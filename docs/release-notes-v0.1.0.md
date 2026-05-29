@@ -11,8 +11,10 @@ kubio v0.1.0 is the first local-first release.
 - In-memory cache with TTL, object size, total size, purge, and eviction counters.
 - Local dashboard with overview, routes, route detail, events, config, and JSON APIs.
 - Prometheus-compatible metrics with bounded labels and configurable metrics path.
+- Configurable origin timeout and deterministic gateway timeout behavior.
 - Panic switch file that immediately disables reuse and promotion while keeping origin pass-through active.
 - Dockerfile and CI checks for formatting, clippy, tests, supply-chain checks, and Docker build.
+- Release workflow for Linux x86_64 binary artifacts, checksums, and Docker image smoke tests.
 
 ## Known Limits
 

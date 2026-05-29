@@ -1,7 +1,7 @@
 //! HTTP reverse proxy runtime for kubio.
 
 use anyhow::Context;
-use axum::body::{to_bytes, Body, Bytes};
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
@@ -45,7 +45,8 @@ impl ProxyState {
         store: Arc<dyn CacheStore>,
     ) -> anyhow::Result<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(config.server.origin_timeout)
+            .connect_timeout(config.server.origin_timeout.min(Duration::from_secs(5)))
             .build()
             .context("build origin HTTP client")?;
         Ok(Self {
@@ -88,18 +89,19 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     let panic_active = panic_switch_active(state.config.panic_file.as_deref());
     record_panic_switch_transition(&state, panic_active, &route_id, None);
 
-    let body_limit = state.config.policy.max_request_body_size;
-    let body = match to_bytes(request.into_body(), body_limit).await {
-        Ok(body) => body,
-        Err(err) => {
-            warn!(error = %err, "request body exceeded proxy buffer limit");
-            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-        }
-    };
+    let request_body_len = declared_request_body_len(&headers);
+    if request_body_len > state.config.policy.max_request_body_size as u64 {
+        warn!("request body exceeded proxy body limit");
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let signal_body_len = request_body_len
+        .max(unknown_streaming_body_signal(&headers))
+        .min(usize::MAX as u64) as usize;
 
-    let mut request_signals = state
-        .policy
-        .request_signals(&method, &path, &headers, body.len());
+    let mut request_signals =
+        state
+            .policy
+            .request_signals(&method, &path, &headers, signal_body_len);
     request_signals.query_param_count = query
         .as_deref()
         .map(count_query_params)
@@ -164,37 +166,119 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
         }
     }
 
-    let origin_response = match send_origin(&state, &method, &uri, &headers, body.clone()).await {
-        Ok(response) => response,
-        Err(err) => {
-            warn!(error = %err, "origin request failed");
-            let status = if err.is_timeout() {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
-            state.observer.record(ObservationRecord {
-                route_id,
-                cache_key_hash,
-                decision: Decision::Bypass,
-                reasons: vec![DecisionReason::PolicyError],
-                status: status.as_u16(),
-                latency: started.elapsed(),
-                origin: true,
-                reused: false,
-                protected: request_decision.protected(),
-                bypass: true,
-                fingerprint: None,
-                shadow_eligible: false,
-                score: request_decision.score,
-                mode: state.config.mode,
-            });
-            return status.into_response();
-        }
-    };
+    let origin_response =
+        match send_origin(&state, &method, &uri, &headers, request.into_body()).await {
+            Ok(response) => response,
+            Err(err) => {
+                warn!(error = %err, "origin request failed");
+                let status = if err.is_timeout() {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                state.observer.record(ObservationRecord {
+                    route_id,
+                    cache_key_hash,
+                    decision: Decision::Bypass,
+                    reasons: vec![DecisionReason::PolicyError],
+                    status: status.as_u16(),
+                    latency: started.elapsed(),
+                    origin: true,
+                    reused: false,
+                    protected: request_decision.protected(),
+                    bypass: true,
+                    fingerprint: None,
+                    shadow_eligible: false,
+                    score: request_decision.score,
+                    mode: state.config.mode,
+                });
+                state.observer.push_event(
+                    EventType::OriginRequestFailed,
+                    None,
+                    None,
+                    vec![DecisionReason::PolicyError],
+                    if status == StatusCode::GATEWAY_TIMEOUT {
+                        "origin request timed out"
+                    } else {
+                        "origin request failed"
+                    },
+                );
+                return status.into_response();
+            }
+        };
 
     let status = origin_response.status();
     let origin_headers = clone_response_headers(origin_response.headers());
+    let response_signals = state.policy.response_signals(status, &origin_headers);
+    if should_stream_origin_response(
+        &state,
+        &request_signals,
+        &response_signals,
+        response_signals.content_length,
+    ) {
+        let body_len = response_signals
+            .content_length
+            .unwrap_or(0)
+            .min(usize::MAX as u64) as usize;
+        let response_decision = state.policy.decide_response(
+            state.config.mode,
+            state.observer.route_state(&route_id),
+            &request_signals,
+            &response_signals,
+            body_len,
+            false,
+        );
+        let protected = request_decision.decision == Decision::Protect
+            || response_decision.decision == Decision::Protect;
+        let final_decision = if matches!(
+            request_decision.decision,
+            Decision::Protect | Decision::Bypass
+        ) {
+            request_decision.decision
+        } else {
+            response_decision.decision
+        };
+        let reasons = if matches!(
+            request_decision.decision,
+            Decision::Protect | Decision::Bypass
+        ) {
+            request_decision.reasons.clone()
+        } else {
+            response_decision.reasons.clone()
+        };
+
+        state.observer.record(ObservationRecord {
+            route_id,
+            cache_key_hash,
+            decision: final_decision,
+            reasons,
+            status: status.as_u16(),
+            latency: started.elapsed(),
+            origin: true,
+            reused: false,
+            protected,
+            bypass: request_decision.decision == Decision::Bypass,
+            fingerprint: None,
+            shadow_eligible: false,
+            score: response_decision.score,
+            mode: state.config.mode,
+        });
+
+        return response_from_origin_stream(
+            &state.config,
+            status,
+            &origin_headers,
+            Body::from_stream(origin_response.bytes_stream()),
+            if panic_active {
+                "bypass"
+            } else if protected {
+                "protected"
+            } else {
+                "miss"
+            },
+        );
+    }
+
     let response_bytes = match origin_response.bytes().await {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -215,11 +299,17 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                 score: request_decision.score,
                 mode: state.config.mode,
             });
+            state.observer.push_event(
+                EventType::OriginRequestFailed,
+                None,
+                None,
+                vec![DecisionReason::PolicyError],
+                "origin response body read failed",
+            );
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
 
-    let response_signals = state.policy.response_signals(status, &origin_headers);
     let fingerprint = make_fingerprint(&state.config, status, &origin_headers, &response_bytes);
     let response_decision = state.policy.decide_response(
         state.config.mode,
@@ -305,11 +395,11 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
         }
     }
 
-    response_from_origin(
+    response_from_origin_stream(
         &state.config,
         status,
         &origin_headers,
-        response_bytes,
+        Body::from(response_bytes),
         if panic_active {
             "bypass"
         } else if protected {
@@ -325,7 +415,7 @@ async fn send_origin(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let url = origin_url(&state.config.origin, uri);
     let req_method =
@@ -340,7 +430,10 @@ async fn send_origin(
         }
         request = request.header(name.as_str(), value.as_bytes());
     }
-    request.body(body).send().await
+    request
+        .body(reqwest::Body::wrap_stream(body.into_data_stream()))
+        .send()
+        .await
 }
 
 fn origin_authority(origin: &Url) -> String {
@@ -425,11 +518,11 @@ fn response_from_cache_entry(config: &EffectiveConfig, entry: CacheEntry) -> Res
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
-fn response_from_origin(
+fn response_from_origin_stream(
     config: &EffectiveConfig,
     status: StatusCode,
     headers: &HeaderMap,
-    body: Bytes,
+    body: Body,
     kubio_status: &'static str,
 ) -> Response<Body> {
     let mut builder = Response::builder().status(status);
@@ -443,12 +536,41 @@ fn response_from_origin(
         builder = builder.header("x-kubio-status", kubio_status);
     }
     builder
-        .body(Body::from(body))
+        .body(body)
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+fn should_stream_origin_response(
+    state: &ProxyState,
+    request_signals: &kubio_policy::RequestSignals,
+    response_signals: &kubio_policy::ResponseSignals,
+    content_length: Option<u64>,
+) -> bool {
+    !state.policy.request_is_reuse_safe(request_signals)
+        || !state.policy.response_is_store_safe(response_signals)
+        || content_length
+            .map(|length| length > state.config.policy.max_fingerprint_body_size)
+            .unwrap_or(false)
 }
 
 fn panic_switch_active(path: Option<&Path>) -> bool {
     path.map(|path| path.exists()).unwrap_or(false)
+}
+
+fn declared_request_body_len(headers: &HeaderMap) -> u64 {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn unknown_streaming_body_signal(headers: &HeaderMap) -> u64 {
+    if headers.contains_key(header::TRANSFER_ENCODING) {
+        1
+    } else {
+        0
+    }
 }
 
 fn record_panic_switch_transition(

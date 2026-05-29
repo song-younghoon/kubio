@@ -1,8 +1,8 @@
 //! Process-local observation state for kubio.
 
 use kubio_core::{
-    CacheKeyHash, Decision, DecisionReason, LatencySnapshot, Mode, ResponseFingerprint, RouteId,
-    RouteState, StatusClass, StatusClassCounts,
+    CacheKeyHash, Decision, DecisionReason, LatencyBucketSnapshot, LatencySnapshot, Mode,
+    ResponseFingerprint, RouteId, RouteState, StatusClass, StatusClassCounts,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,7 @@ impl Observer {
                         cache_key_hash: key_hash.clone(),
                         route_id: record.route_id.clone(),
                         seen_count: 0,
+                        first_seen_at: now,
                         last_fingerprint: None,
                         recent_shadow_matches: 0,
                         recent_shadow_mismatches: 0,
@@ -513,6 +514,7 @@ pub struct KeyObservation {
     pub cache_key_hash: CacheKeyHash,
     pub route_id: RouteId,
     pub seen_count: u64,
+    pub first_seen_at: SystemTime,
     pub last_fingerprint: Option<ResponseFingerprint>,
     pub recent_shadow_matches: u32,
     pub recent_shadow_mismatches: u32,
@@ -652,6 +654,7 @@ pub enum EventType {
     ResponseNotStoredDueToNoStore,
     ResponseNotStoredDueToPrivate,
     CacheEntryEvicted,
+    OriginRequestFailed,
     StoreErrorFailOpen,
     PanicSwitchEnabled,
     PanicSwitchDisabled,
@@ -676,12 +679,34 @@ fn latency_snapshot(values: &VecDeque<Duration>) -> LatencySnapshot {
         .map(|value| value.as_secs_f64() * 1000.0)
         .collect::<Vec<_>>();
     millis.sort_by(|left, right| left.total_cmp(right));
-    let avg_ms = millis.iter().sum::<f64>() / millis.len() as f64;
+    let sum_ms = millis.iter().sum::<f64>();
+    let avg_ms = sum_ms / millis.len() as f64;
+    let buckets = latency_buckets(&millis);
     LatencySnapshot {
         p50_ms: percentile(&millis, 0.50),
         p95_ms: percentile(&millis, 0.95),
         avg_ms,
+        count: millis.len() as u64,
+        sum_ms,
+        buckets,
     }
+}
+
+fn latency_buckets(sorted_millis: &[f64]) -> Vec<LatencyBucketSnapshot> {
+    const BUCKETS_SECONDS: &[f64] = &[
+        0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000,
+    ];
+
+    BUCKETS_SECONDS
+        .iter()
+        .map(|le_seconds| LatencyBucketSnapshot {
+            le_seconds: *le_seconds,
+            count: sorted_millis
+                .iter()
+                .filter(|millis| **millis <= le_seconds * 1000.0)
+                .count() as u64,
+        })
+        .collect()
 }
 
 fn percentile(values: &[f64], percentile: f64) -> f64 {
@@ -760,5 +785,55 @@ mod tests {
         }
 
         assert_eq!(observer.route_state(&route), RouteState::Protected);
+    }
+
+    #[test]
+    fn event_ring_buffer_is_bounded() {
+        let observer = Observer::new(100, 100, 2, 2, 2, 1);
+
+        for index in 0..4 {
+            observer.push_event(
+                EventType::StoreErrorFailOpen,
+                None,
+                None,
+                vec![DecisionReason::StoreError],
+                format!("event-{index}"),
+            );
+        }
+
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.events.len(), 2);
+        assert_eq!(snapshot.events[0].message, "event-2");
+        assert_eq!(snapshot.events[1].message, "event-3");
+    }
+
+    #[test]
+    fn route_promotes_to_auto_after_shadow_validation_threshold() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let key = CacheKeyHash("key".to_string());
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("b".to_string()));
+
+        for _ in 0..3 {
+            observer.record(ObservationRecord {
+                route_id: route.clone(),
+                cache_key_hash: Some(key.clone()),
+                decision: Decision::ObserveOnly,
+                reasons: vec![DecisionReason::InsufficientShadowValidations],
+                status: 200,
+                latency: Duration::from_millis(1),
+                origin: true,
+                reused: false,
+                protected: false,
+                bypass: false,
+                fingerprint: Some(fp.clone()),
+                shadow_eligible: true,
+                score: 90,
+                mode: Mode::Auto,
+            });
+        }
+
+        assert_eq!(observer.route_state(&route), RouteState::Auto);
+        assert!(observer.is_auto_eligible(&route, &key));
     }
 }

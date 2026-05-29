@@ -24,4 +24,12 @@ Required metrics include:
 - `kubio_origin_duration_seconds`
 - `kubio_policy_decisions_total`
 
-Allowed labels are bounded to method, route id, decision, status class, and quantile. Raw paths, query strings, user identifiers, header values, and IP addresses are not used as metric labels.
+Latency metrics use Prometheus histogram samples:
+
+```text
+kubio_request_duration_seconds_bucket{route_id="GET /api/products",le="0.050"} 12
+kubio_request_duration_seconds_sum{route_id="GET /api/products"} 0.42
+kubio_request_duration_seconds_count{route_id="GET /api/products"} 20
+```
+
+Allowed labels are bounded to method, route id, decision, status class, and histogram bucket. Raw paths, query strings, user identifiers, header values, and IP addresses are not used as metric labels.

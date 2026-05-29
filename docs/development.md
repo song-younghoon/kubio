@@ -20,4 +20,10 @@ cargo test --workspace
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+Local smoke benchmark:
+
+```bash
+bash examples/bench/local_smoke.sh
+```
+
 The proxy path should fail open to origin on internal errors. Add tests before changing policy rules.

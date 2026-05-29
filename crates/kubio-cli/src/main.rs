@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use kubio_core::{
     parse_size, DashboardConfig, EffectiveConfig, FreshnessProfile, Mode, ObservabilityConfig,
-    PolicyConfig, RouteId, ServerConfig, StorageConfig,
+    PolicyConfig, RouteId, StorageConfig,
 };
 use kubio_dashboard::{run_dashboard, DashboardState};
 use kubio_observe::{Observer, RouteSnapshot};
@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 use url::Url;
@@ -466,9 +467,13 @@ fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<(
     }
     if let Some(server) = file.server {
         if let Some(listen) = server.listen {
-            config.server = ServerConfig {
-                listen: listen.parse().context("parse server.listen")?,
-            };
+            config.server.listen = listen.parse().context("parse server.listen")?;
+        }
+        if let Some(origin_timeout_ms) = server.origin_timeout_ms {
+            if origin_timeout_ms == 0 {
+                bail!("server.origin_timeout_ms must be greater than zero");
+            }
+            config.server.origin_timeout = Duration::from_millis(origin_timeout_ms);
         }
     }
     if let Some(dashboard) = file.dashboard {
@@ -564,6 +569,9 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     }
     if config.storage.kind != "memory" {
         bail!("v0.1.0 only supports memory storage");
+    }
+    if config.server.origin_timeout.is_zero() {
+        bail!("server.origin_timeout_ms must be greater than zero");
     }
     if config.storage.max_size == 0 {
         bail!("storage.max_size must be greater than zero");
@@ -662,6 +670,7 @@ struct FileConfig {
 #[derive(Debug, Clone, Deserialize)]
 struct FileServerConfig {
     listen: Option<String>,
+    origin_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

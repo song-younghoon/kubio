@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  linux-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release -p kubio-cli
+      - run: mkdir -p dist
+      - run: cp target/release/kubio dist/kubio-x86_64-unknown-linux-gnu
+      - run: dist/kubio-x86_64-unknown-linux-gnu --help
+      - run: cd dist && sha256sum kubio-x86_64-unknown-linux-gnu > kubio-x86_64-unknown-linux-gnu.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kubio-linux-x86_64
+          path: |
+            dist/kubio-x86_64-unknown-linux-gnu
+            dist/kubio-x86_64-unknown-linux-gnu.sha256
+
+  docker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t kubio:${{ github.ref_name }} .
+      - run: docker run --rm kubio:${{ github.ref_name }} --help

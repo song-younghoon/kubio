@@ -169,38 +169,32 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
     line(
         &mut out,
         "kubio_request_duration_seconds",
-        "Approximate request latency quantiles from in-memory observations.",
-        "gauge",
+        "Request latency histogram from in-memory observations.",
+        "histogram",
     );
     for route in &snapshot.routes {
         let route_id = sanitize_label(&route.route_id.as_label());
-        metric_f64(
+        histogram(
             &mut out,
             "kubio_request_duration_seconds",
-            &[("route_id", &route_id), ("quantile", "0.50")],
-            route.latency.p50_ms / 1000.0,
-        );
-        metric_f64(
-            &mut out,
-            "kubio_request_duration_seconds",
-            &[("route_id", &route_id), ("quantile", "0.95")],
-            route.latency.p95_ms / 1000.0,
+            &route_id,
+            &route.latency,
         );
     }
 
     line(
         &mut out,
         "kubio_origin_duration_seconds",
-        "Approximate origin latency quantiles. v0.1.0 mirrors request duration.",
-        "gauge",
+        "Origin latency histogram. v0.1.0 mirrors request duration.",
+        "histogram",
     );
     for route in &snapshot.routes {
         let route_id = sanitize_label(&route.route_id.as_label());
-        metric_f64(
+        histogram(
             &mut out,
             "kubio_origin_duration_seconds",
-            &[("route_id", &route_id), ("quantile", "0.95")],
-            route.latency.p95_ms / 1000.0,
+            &route_id,
+            &route.latency,
         );
     }
 
@@ -270,12 +264,37 @@ fn metric(out: &mut String, name: &str, labels: &[(&str, &str)], value: u64) {
     out.push('\n');
 }
 
-fn metric_f64(out: &mut String, name: &str, labels: &[(&str, &str)], value: f64) {
+fn histogram(out: &mut String, name: &str, route_id: &str, latency: &kubio_core::LatencySnapshot) {
+    let bucket_name = format!("{name}_bucket");
+    for bucket in &latency.buckets {
+        metric(
+            out,
+            &bucket_name,
+            &[
+                ("route_id", route_id),
+                ("le", &format!("{:.3}", bucket.le_seconds)),
+            ],
+            bucket.count,
+        );
+    }
+    metric(
+        out,
+        &bucket_name,
+        &[("route_id", route_id), ("le", "+Inf")],
+        latency.count,
+    );
     out.push_str(name);
-    push_labels(out, labels);
+    out.push_str("_sum");
+    push_labels(out, &[("route_id", route_id)]);
     out.push(' ');
-    out.push_str(&format!("{value:.6}"));
+    out.push_str(&format!("{:.6}", latency.sum_ms / 1000.0));
     out.push('\n');
+    metric(
+        out,
+        &format!("{name}_count"),
+        &[("route_id", route_id)],
+        latency.count,
+    );
 }
 
 fn push_labels(out: &mut String, labels: &[(&str, &str)]) {
@@ -298,9 +317,66 @@ fn push_labels(out: &mut String, labels: &[(&str, &str)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kubio_core::{
+        LatencyBucketSnapshot, LatencySnapshot, RouteId, RouteState, StatusClassCounts,
+    };
+    use kubio_observe::{ObserverSnapshot, OverviewSnapshot, RouteSnapshot};
+    use kubio_store::StoreStats;
 
     #[test]
     fn sanitizer_removes_metric_breakouts() {
         assert_eq!(sanitize_label("a\nb\"c\\d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn latency_metrics_render_as_histograms() {
+        let snapshot = ObserverSnapshot {
+            overview: OverviewSnapshot::default(),
+            routes: vec![RouteSnapshot {
+                route_id: RouteId::new("GET", "/api/products"),
+                route_hash: "hash".to_string(),
+                state: RouteState::Watching,
+                request_count: 2,
+                origin_count: 2,
+                reuse_count: 0,
+                protected_count: 0,
+                bypass_count: 0,
+                shadow_matches: 0,
+                shadow_mismatches: 0,
+                status_classes: StatusClassCounts::default(),
+                latency: LatencySnapshot {
+                    p50_ms: 1.0,
+                    p95_ms: 2.0,
+                    avg_ms: 1.5,
+                    count: 2,
+                    sum_ms: 3.0,
+                    buckets: vec![LatencyBucketSnapshot {
+                        le_seconds: 0.005,
+                        count: 2,
+                    }],
+                },
+                repeat_rate: 0.0,
+                estimated_savings: 0.0,
+                actual_reuse_rate: 0.0,
+                score: 0,
+                reasons: vec![],
+                explanation: vec![],
+            }],
+            events: vec![],
+        };
+        let metrics = render_metrics(
+            &snapshot,
+            &StoreStats {
+                entries: 0,
+                bytes: 0,
+                evictions: 0,
+                max_size: 1,
+                max_object_size: 1,
+            },
+        );
+
+        assert!(metrics.contains("kubio_request_duration_seconds_bucket"));
+        assert!(metrics.contains("kubio_request_duration_seconds_sum"));
+        assert!(metrics.contains("kubio_request_duration_seconds_count"));
     }
 }

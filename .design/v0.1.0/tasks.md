@@ -1,6 +1,6 @@
 # v0.1.0 Implementation Tasks
 
-Status: implemented baseline with release-hardening follow-up
+Status: complete for v0.1.0 baseline
 Target release: `v0.1.0`
 
 Task states:
@@ -31,12 +31,13 @@ Hardening added after the first implementation pass:
 - Headers named by `Connection` are removed as hop-by-hop headers.
 - Config validation rejects zero limits, invalid promotion thresholds, invalid mismatch rates, and invalid metrics paths.
 
-Remaining release-hardening work before a public v0.1.0 tag:
+Release-hardening added in the remaining-task pass:
 
-- Add packaged release workflow, published checksums, and final binary artifact upload.
-- Add property tests for arbitrary path/query/redaction invariants.
-- Add performance smoke scripts or ignored benchmarks.
-- Broaden integration coverage for Cookie, Set-Cookie, private/no-cache, Vary wildcard, origin timeout, and large response streaming.
+- Added a release workflow for Linux x86_64 binary artifact upload, checksums, and Docker smoke tests.
+- Added property tests for arbitrary path, query ordering, and sensitive header redaction invariants.
+- Added a local performance smoke script under `examples/bench`.
+- Broadened integration coverage for Cookie, Set-Cookie, private/no-cache, Vary wildcard, unsafe method body forwarding, shadow mismatch, origin timeout, panic switch, and sensitive-value exclusion from snapshots/metrics.
+- Added streaming pass-through for ineligible/large origin responses and streamed request forwarding for cache misses.
 
 ## M0: Project Skeleton
 
@@ -44,10 +45,10 @@ Goal: create a buildable Rust workspace with basic CLI, config, logging, CI, and
 
 ### M0.1 Workspace
 
-- [ ] M0.1.1 Create root `Cargo.toml` workspace.
-- [ ] M0.1.2 Add crates: `kubio-cli`, `kubio-core`, `kubio-proxy`, `kubio-policy`, `kubio-observe`, `kubio-store`, `kubio-dashboard`, `kubio-telemetry`.
-- [ ] M0.1.3 Add shared workspace dependency versions.
-- [ ] M0.1.4 Add minimal crate-level docs.
+- [x] M0.1.1 Create root `Cargo.toml` workspace.
+- [x] M0.1.2 Add crates: `kubio-cli`, `kubio-core`, `kubio-proxy`, `kubio-policy`, `kubio-observe`, `kubio-store`, `kubio-dashboard`, `kubio-telemetry`.
+- [x] M0.1.3 Add shared workspace dependency versions.
+- [x] M0.1.4 Add minimal crate-level docs.
 
 Acceptance:
 
@@ -56,10 +57,10 @@ Acceptance:
 
 ### M0.2 CLI Skeleton
 
-- [ ] M0.2.1 Add `kubio` binary in `kubio-cli`.
-- [ ] M0.2.2 Implement subcommands: `serve`, `routes`, `explain`, `doctor`, `purge`.
-- [ ] M0.2.3 Implement flags for `serve`: `--to`, `--listen`, `--dashboard`, `--mode`, `--config`, `--freshness`, `--debug-headers`, `--panic-file`.
-- [ ] M0.2.4 Print startup output for `serve`.
+- [x] M0.2.1 Add `kubio` binary in `kubio-cli`.
+- [x] M0.2.2 Implement subcommands: `serve`, `routes`, `explain`, `doctor`, `purge`.
+- [x] M0.2.3 Implement flags for `serve`: `--to`, `--listen`, `--dashboard`, `--mode`, `--config`, `--freshness`, `--debug-headers`, `--panic-file`.
+- [x] M0.2.4 Print startup output for `serve`.
 
 Acceptance:
 
@@ -69,11 +70,11 @@ Acceptance:
 
 ### M0.3 Config
 
-- [ ] M0.3.1 Define config structs and defaults.
-- [ ] M0.3.2 Parse optional YAML config file.
-- [ ] M0.3.3 Merge defaults, file, and CLI flags.
-- [ ] M0.3.4 Validate origin URL, addresses, mode, sizes, and TTLs.
-- [ ] M0.3.5 Redact secrets for display.
+- [x] M0.3.1 Define config structs and defaults.
+- [x] M0.3.2 Parse optional YAML config file.
+- [x] M0.3.3 Merge defaults, file, and CLI flags.
+- [x] M0.3.4 Validate origin URL, addresses, mode, sizes, and TTLs.
+- [x] M0.3.5 Redact secrets for display.
 
 Acceptance:
 
@@ -83,10 +84,10 @@ Acceptance:
 
 ### M0.4 Telemetry Baseline
 
-- [ ] M0.4.1 Add structured logging.
-- [ ] M0.4.2 Add redaction helpers for sensitive headers.
-- [ ] M0.4.3 Add no-op or in-memory metrics recorder abstraction.
-- [ ] M0.4.4 Add trace span conventions.
+- [x] M0.4.1 Add structured logging.
+- [x] M0.4.2 Add redaction helpers for sensitive headers.
+- [x] M0.4.3 Add no-op or in-memory metrics recorder abstraction.
+- [x] M0.4.4 Add trace span conventions.
 
 Acceptance:
 
@@ -95,11 +96,11 @@ Acceptance:
 
 ### M0.5 Repository Setup
 
-- [ ] M0.5.1 Add README with first-run demo.
-- [ ] M0.5.2 Add CONTRIBUTING.
-- [ ] M0.5.3 Add SECURITY.
-- [ ] M0.5.4 Add CI workflow for fmt, clippy, tests.
-- [ ] M0.5.5 Add Apache-2.0 license confirmation.
+- [x] M0.5.1 Add README with first-run demo.
+- [x] M0.5.2 Add CONTRIBUTING.
+- [x] M0.5.3 Add SECURITY.
+- [x] M0.5.4 Add CI workflow for fmt, clippy, tests.
+- [x] M0.5.5 Add Apache-2.0 license confirmation.
 
 Acceptance:
 
@@ -112,10 +113,10 @@ Goal: make `kubio serve --to ...` work as a local HTTP reverse proxy in watch mo
 
 ### M1.1 Server Lifecycle
 
-- [ ] M1.1.1 Start Tokio runtime from CLI.
-- [ ] M1.1.2 Bind proxy listener to configured address.
+- [x] M1.1.1 Start Tokio runtime from CLI.
+- [x] M1.1.2 Bind proxy listener to configured address.
 - [x] M1.1.3 Handle graceful shutdown on SIGINT/SIGTERM.
-- [ ] M1.1.4 Keep dashboard/metrics failures isolated from proxy.
+- [x] M1.1.4 Keep dashboard/metrics failures isolated from proxy.
 
 Acceptance:
 
@@ -124,12 +125,12 @@ Acceptance:
 
 ### M1.2 Origin Forwarding
 
-- [ ] M1.2.1 Rewrite inbound URI to origin scheme/authority.
-- [ ] M1.2.2 Preserve method, path, query, body, and relevant headers.
+- [x] M1.2.1 Rewrite inbound URI to origin scheme/authority.
+- [x] M1.2.2 Preserve method, path, query, body, and relevant headers.
 - [x] M1.2.3 Remove hop-by-hop headers.
-- [ ] M1.2.4 Stream request body to origin.
-- [ ] M1.2.5 Stream response body to client.
-- [ ] M1.2.6 Preserve origin status and response headers except hop-by-hop headers.
+- [x] M1.2.4 Stream request body to origin.
+- [x] M1.2.5 Stream response body to client.
+- [x] M1.2.6 Preserve origin status and response headers except hop-by-hop headers.
 
 Acceptance:
 
@@ -138,10 +139,10 @@ Acceptance:
 
 ### M1.3 Error Handling
 
-- [ ] M1.3.1 Add origin connect timeout.
-- [ ] M1.3.2 Return `502` on origin connection failure.
-- [ ] M1.3.3 Return `504` on origin timeout.
-- [ ] M1.3.4 Record origin error metrics/events.
+- [x] M1.3.1 Add origin connect timeout.
+- [x] M1.3.2 Return `502` on origin connection failure.
+- [x] M1.3.3 Return `504` on origin timeout.
+- [x] M1.3.4 Record origin error metrics/events.
 
 Acceptance:
 
@@ -154,11 +155,11 @@ Goal: safely collect route-level metadata and fingerprints without serving cache
 
 ### M2.1 Core Types
 
-- [ ] M2.1.1 Define `RouteId`.
-- [ ] M2.1.2 Define `CacheKeyHash`.
-- [ ] M2.1.3 Define `Decision`, `DecisionReason`, `RouteState`.
-- [ ] M2.1.4 Define `ResponseFingerprint`.
-- [ ] M2.1.5 Define status class and latency snapshot types.
+- [x] M2.1.1 Define `RouteId`.
+- [x] M2.1.2 Define `CacheKeyHash`.
+- [x] M2.1.3 Define `Decision`, `DecisionReason`, `RouteState`.
+- [x] M2.1.4 Define `ResponseFingerprint`.
+- [x] M2.1.5 Define status class and latency snapshot types.
 
 Acceptance:
 
@@ -167,12 +168,12 @@ Acceptance:
 
 ### M2.2 Route Clustering
 
-- [ ] M2.2.1 Normalize numeric path segments.
-- [ ] M2.2.2 Normalize UUID-like segments.
-- [ ] M2.2.3 Normalize ULID-like segments.
-- [ ] M2.2.4 Normalize long hex segments.
-- [ ] M2.2.5 Exclude query from route id.
-- [ ] M2.2.6 Add never-panic property test.
+- [x] M2.2.1 Normalize numeric path segments.
+- [x] M2.2.2 Normalize UUID-like segments.
+- [x] M2.2.3 Normalize ULID-like segments.
+- [x] M2.2.4 Normalize long hex segments.
+- [x] M2.2.5 Exclude query from route id.
+- [x] M2.2.6 Add never-panic property test.
 
 Acceptance:
 
@@ -181,11 +182,11 @@ Acceptance:
 
 ### M2.3 Cache Key Hashing
 
-- [ ] M2.3.1 Implement query normalization.
-- [ ] M2.3.2 Preserve repeated parameter order.
-- [ ] M2.3.3 Preserve all query parameters.
-- [ ] M2.3.4 Hash full key for storage/observation.
-- [ ] M2.3.5 Prevent raw cache keys from metrics.
+- [x] M2.3.1 Implement query normalization.
+- [x] M2.3.2 Preserve repeated parameter order.
+- [x] M2.3.3 Preserve all query parameters.
+- [x] M2.3.4 Hash full key for storage/observation.
+- [x] M2.3.5 Prevent raw cache keys from metrics.
 
 Acceptance:
 
@@ -194,11 +195,11 @@ Acceptance:
 
 ### M2.4 Fingerprinting
 
-- [ ] M2.4.1 Hash stable response headers.
-- [ ] M2.4.2 Exclude volatile headers.
-- [ ] M2.4.3 Hash body for bounded eligible responses.
-- [ ] M2.4.4 Skip promotion when body exceeds fingerprint limit.
-- [ ] M2.4.5 Unit test fingerprint stability.
+- [x] M2.4.1 Hash stable response headers.
+- [x] M2.4.2 Exclude volatile headers.
+- [x] M2.4.3 Hash body for bounded eligible responses.
+- [x] M2.4.4 Skip promotion when body exceeds fingerprint limit.
+- [x] M2.4.5 Unit test fingerprint stability.
 
 Acceptance:
 
@@ -207,13 +208,13 @@ Acceptance:
 
 ### M2.5 Observer
 
-- [ ] M2.5.1 Track route request counts.
-- [ ] M2.5.2 Track origin request counts.
-- [ ] M2.5.3 Track protected and bypass counts.
-- [ ] M2.5.4 Track status class distribution.
-- [ ] M2.5.5 Track latency distribution.
-- [ ] M2.5.6 Track repeat frequency by key hash.
-- [ ] M2.5.7 Add bounded event ring buffer.
+- [x] M2.5.1 Track route request counts.
+- [x] M2.5.2 Track origin request counts.
+- [x] M2.5.3 Track protected and bypass counts.
+- [x] M2.5.4 Track status class distribution.
+- [x] M2.5.5 Track latency distribution.
+- [x] M2.5.6 Track repeat frequency by key hash.
+- [x] M2.5.7 Add bounded event ring buffer.
 
 Acceptance:
 
@@ -226,12 +227,12 @@ Goal: protect risky requests/responses and produce explainable decisions.
 
 ### M3.1 Request Signals
 
-- [ ] M3.1.1 Detect unsafe methods.
-- [ ] M3.1.2 Detect `Authorization`.
-- [ ] M3.1.3 Detect `Cookie`.
-- [ ] M3.1.4 Detect Range requests.
-- [ ] M3.1.5 Detect GET/HEAD with body.
-- [ ] M3.1.6 Score sensitive paths.
+- [x] M3.1.1 Detect unsafe methods.
+- [x] M3.1.2 Detect `Authorization`.
+- [x] M3.1.3 Detect `Cookie`.
+- [x] M3.1.4 Detect Range requests.
+- [x] M3.1.5 Detect GET/HEAD with body.
+- [x] M3.1.6 Score sensitive paths.
 
 Acceptance:
 
@@ -240,12 +241,12 @@ Acceptance:
 
 ### M3.2 Response Signals
 
-- [ ] M3.2.1 Detect `Set-Cookie`.
-- [ ] M3.2.2 Parse `Cache-Control: no-store`.
-- [ ] M3.2.3 Parse `Cache-Control: private`.
-- [ ] M3.2.4 Parse `Cache-Control: no-cache`.
-- [ ] M3.2.5 Parse `Vary`.
-- [ ] M3.2.6 Classify status code cacheability.
+- [x] M3.2.1 Detect `Set-Cookie`.
+- [x] M3.2.2 Parse `Cache-Control: no-store`.
+- [x] M3.2.3 Parse `Cache-Control: private`.
+- [x] M3.2.4 Parse `Cache-Control: no-cache`.
+- [x] M3.2.5 Parse `Vary`.
+- [x] M3.2.6 Classify status code cacheability.
 
 Acceptance:
 
@@ -254,11 +255,11 @@ Acceptance:
 
 ### M3.3 Policy Engine
 
-- [ ] M3.3.1 Implement hard deny evaluation.
-- [ ] M3.3.2 Implement deterministic score.
-- [ ] M3.3.3 Implement freshness profile TTL selection.
-- [ ] M3.3.4 Implement explanation mapping.
-- [ ] M3.3.5 Return structured `PolicyDecision`.
+- [x] M3.3.1 Implement hard deny evaluation.
+- [x] M3.3.2 Implement deterministic score.
+- [x] M3.3.3 Implement freshness profile TTL selection.
+- [x] M3.3.4 Implement explanation mapping.
+- [x] M3.3.5 Return structured `PolicyDecision`.
 
 Acceptance:
 
@@ -267,10 +268,10 @@ Acceptance:
 
 ### M3.4 Integration
 
-- [ ] M3.4.1 Apply request precheck in proxy.
-- [ ] M3.4.2 Apply response decision after origin headers.
-- [ ] M3.4.3 Record policy decisions to observer and metrics.
-- [ ] M3.4.4 Emit protection events.
+- [x] M3.4.1 Apply request precheck in proxy.
+- [x] M3.4.2 Apply response decision after origin headers.
+- [x] M3.4.3 Record policy decisions to observer and metrics.
+- [x] M3.4.4 Emit protection events.
 
 Acceptance:
 
@@ -282,10 +283,10 @@ Goal: validate whether reuse would have been safe without serving cached data.
 
 ### M4.1 Fingerprint History
 
-- [ ] M4.1.1 Store latest fingerprint by cache key hash.
-- [ ] M4.1.2 Bound key history by count and age.
-- [ ] M4.1.3 Track first seen and last seen timestamps.
-- [ ] M4.1.4 Record per-route fingerprint stability.
+- [x] M4.1.1 Store latest fingerprint by cache key hash.
+- [x] M4.1.2 Bound key history by count and age.
+- [x] M4.1.3 Track first seen and last seen timestamps.
+- [x] M4.1.4 Record per-route fingerprint stability.
 
 Acceptance:
 
@@ -294,11 +295,11 @@ Acceptance:
 
 ### M4.2 Shadow Comparison
 
-- [ ] M4.2.1 Compare current fingerprint with previous fingerprint.
-- [ ] M4.2.2 Increment shadow match count.
-- [ ] M4.2.3 Increment shadow mismatch count.
-- [ ] M4.2.4 Emit mismatch demotion event.
-- [ ] M4.2.5 Exclude hard-denied requests from promotion.
+- [x] M4.2.1 Compare current fingerprint with previous fingerprint.
+- [x] M4.2.2 Increment shadow match count.
+- [x] M4.2.3 Increment shadow mismatch count.
+- [x] M4.2.4 Emit mismatch demotion event.
+- [x] M4.2.5 Exclude hard-denied requests from promotion.
 
 Acceptance:
 
@@ -308,11 +309,11 @@ Acceptance:
 
 ### M4.3 Promotion and Demotion
 
-- [ ] M4.3.1 Implement Candidate threshold.
-- [ ] M4.3.2 Implement 20 validation / 0 mismatch rule.
-- [ ] M4.3.3 Implement mismatch demotion.
-- [ ] M4.3.4 Surface route state in observer.
-- [ ] M4.3.5 Add route state transition tests.
+- [x] M4.3.1 Implement Candidate threshold.
+- [x] M4.3.2 Implement 20 validation / 0 mismatch rule.
+- [x] M4.3.3 Implement mismatch demotion.
+- [x] M4.3.4 Surface route state in observer.
+- [x] M4.3.5 Add route state transition tests.
 
 Acceptance:
 
@@ -325,13 +326,13 @@ Goal: serve reused responses only for verified safe GET/HEAD 200 responses.
 
 ### M5.1 Cache Store
 
-- [ ] M5.1.1 Define `CacheStore` trait.
-- [ ] M5.1.2 Implement memory store get/put.
-- [ ] M5.1.3 Enforce TTL expiration.
-- [ ] M5.1.4 Enforce max object size.
-- [ ] M5.1.5 Enforce max total size.
-- [ ] M5.1.6 Track bytes, entries, and evictions.
-- [ ] M5.1.7 Implement purge all and purge by route.
+- [x] M5.1.1 Define `CacheStore` trait.
+- [x] M5.1.2 Implement memory store get/put.
+- [x] M5.1.3 Enforce TTL expiration.
+- [x] M5.1.4 Enforce max object size.
+- [x] M5.1.5 Enforce max total size.
+- [x] M5.1.6 Track bytes, entries, and evictions.
+- [x] M5.1.7 Implement purge all and purge by route.
 
 Acceptance:
 
@@ -340,11 +341,11 @@ Acceptance:
 
 ### M5.2 Store Eligible Origin Responses
 
-- [ ] M5.2.1 Buffer small eligible responses.
-- [ ] M5.2.2 Strip hop-by-hop response headers before storage.
-- [ ] M5.2.3 Store status, headers, body, expiry, route id, key hash, fingerprint.
-- [ ] M5.2.4 Treat store failure as origin pass-through.
-- [ ] M5.2.5 Record store events and metrics.
+- [x] M5.2.1 Buffer small eligible responses.
+- [x] M5.2.2 Strip hop-by-hop response headers before storage.
+- [x] M5.2.3 Store status, headers, body, expiry, route id, key hash, fingerprint.
+- [x] M5.2.4 Treat store failure as origin pass-through.
+- [x] M5.2.5 Record store events and metrics.
 
 Acceptance:
 
@@ -353,12 +354,12 @@ Acceptance:
 
 ### M5.3 Serve Reused Responses
 
-- [ ] M5.3.1 Check request hard denies before lookup.
+- [x] M5.3.1 Check request hard denies before lookup.
 - [x] M5.3.2 Check panic switch before lookup.
-- [ ] M5.3.3 Lookup only auto-eligible route/key.
-- [ ] M5.3.4 Serve only fresh entries.
-- [ ] M5.3.5 Add optional `X-Kubio-Status` debug header.
-- [ ] M5.3.6 Record reuse metrics.
+- [x] M5.3.3 Lookup only auto-eligible route/key.
+- [x] M5.3.4 Serve only fresh entries.
+- [x] M5.3.5 Add optional `X-Kubio-Status` debug header.
+- [x] M5.3.6 Record reuse metrics.
 
 Acceptance:
 
@@ -387,7 +388,7 @@ Goal: make the release understandable, observable, packaged, and documented.
 - [x] M6.1.1 Expose `/metrics`.
 - [x] M6.1.2 Implement required counters.
 - [x] M6.1.3 Implement cache gauges.
-- [ ] M6.1.4 Implement request/origin duration histograms.
+- [x] M6.1.4 Implement request/origin duration histograms.
 - [x] M6.1.5 Enforce allowed labels.
 
 Acceptance:
@@ -397,12 +398,12 @@ Acceptance:
 
 ### M6.2 Dashboard APIs
 
-- [ ] M6.2.1 Implement `GET /api/overview`.
-- [ ] M6.2.2 Implement `GET /api/routes`.
-- [ ] M6.2.3 Implement route detail by route hash.
-- [ ] M6.2.4 Implement `GET /api/events`.
-- [ ] M6.2.5 Implement `GET /api/config`.
-- [ ] M6.2.6 Implement optional `POST /api/purge`.
+- [x] M6.2.1 Implement `GET /api/overview`.
+- [x] M6.2.2 Implement `GET /api/routes`.
+- [x] M6.2.3 Implement route detail by route hash.
+- [x] M6.2.4 Implement `GET /api/events`.
+- [x] M6.2.5 Implement `GET /api/config`.
+- [x] M6.2.6 Implement optional `POST /api/purge`.
 
 Acceptance:
 
@@ -411,12 +412,12 @@ Acceptance:
 
 ### M6.3 Dashboard UI
 
-- [ ] M6.3.1 Build Overview page.
-- [ ] M6.3.2 Build Routes page.
-- [ ] M6.3.3 Build Route Detail page.
-- [ ] M6.3.4 Build Events page.
-- [ ] M6.3.5 Build Config page.
-- [ ] M6.3.6 Use product language from design docs.
+- [x] M6.3.1 Build Overview page.
+- [x] M6.3.2 Build Routes page.
+- [x] M6.3.3 Build Route Detail page.
+- [x] M6.3.4 Build Events page.
+- [x] M6.3.5 Build Config page.
+- [x] M6.3.6 Use product language from design docs.
 
 Acceptance:
 
@@ -425,8 +426,8 @@ Acceptance:
 
 ### M6.4 CLI Admin Commands
 
-- [ ] M6.4.1 Implement `kubio routes` through local API.
-- [ ] M6.4.2 Implement `kubio explain`.
+- [x] M6.4.1 Implement `kubio routes` through local API.
+- [x] M6.4.2 Implement `kubio explain`.
 - [x] M6.4.3 Implement `kubio purge --all`.
 - [x] M6.4.4 Implement `kubio purge --route`.
 - [x] M6.4.5 Implement `kubio doctor`.
@@ -438,14 +439,14 @@ Acceptance:
 
 ### M6.5 Documentation
 
-- [ ] M6.5.1 Write `docs/getting-started.md`.
-- [ ] M6.5.2 Write `docs/configuration.md`.
-- [ ] M6.5.3 Write `docs/how-kubio-decides.md`.
-- [ ] M6.5.4 Write `docs/safety-model.md`.
-- [ ] M6.5.5 Write `docs/metrics.md`.
-- [ ] M6.5.6 Write `docs/deployment.md`.
-- [ ] M6.5.7 Write `docs/development.md`.
-- [ ] M6.5.8 Write `docs/roadmap.md`.
+- [x] M6.5.1 Write `docs/getting-started.md`.
+- [x] M6.5.2 Write `docs/configuration.md`.
+- [x] M6.5.3 Write `docs/how-kubio-decides.md`.
+- [x] M6.5.4 Write `docs/safety-model.md`.
+- [x] M6.5.5 Write `docs/metrics.md`.
+- [x] M6.5.6 Write `docs/deployment.md`.
+- [x] M6.5.7 Write `docs/development.md`.
+- [x] M6.5.8 Write `docs/roadmap.md`.
 
 Acceptance:
 
@@ -454,11 +455,11 @@ Acceptance:
 
 ### M6.6 Release Engineering
 
-- [ ] M6.6.1 Add Dockerfile.
-- [ ] M6.6.2 Add release build workflow.
-- [ ] M6.6.3 Generate checksums.
-- [ ] M6.6.4 Build Linux x86_64 binary.
-- [ ] M6.6.5 Build Docker image.
+- [x] M6.6.1 Add Dockerfile.
+- [x] M6.6.2 Add release build workflow.
+- [x] M6.6.3 Generate checksums.
+- [x] M6.6.4 Build Linux x86_64 binary.
+- [x] M6.6.5 Build Docker image.
 - [x] M6.6.6 Draft release notes.
 
 Acceptance:
@@ -468,16 +469,16 @@ Acceptance:
 
 ## Cross-Milestone Safety Tasks
 
-- [ ] S.1 Add integration test proving Authorization is never reused.
-- [ ] S.2 Add integration test proving Cookie is never reused.
-- [ ] S.3 Add integration test proving Set-Cookie response is never stored.
-- [ ] S.4 Add integration test proving no-store/private/no-cache are not reused.
-- [ ] S.5 Add integration test proving Vary wildcard is not reused.
-- [ ] S.6 Add integration test proving shadow mismatch blocks auto.
+- [x] S.1 Add integration test proving Authorization is never reused.
+- [x] S.2 Add integration test proving Cookie is never reused.
+- [x] S.3 Add integration test proving Set-Cookie response is never stored.
+- [x] S.4 Add integration test proving no-store/private/no-cache are not reused.
+- [x] S.5 Add integration test proving Vary wildcard is not reused.
+- [x] S.6 Add integration test proving shadow mismatch blocks auto.
 - [x] S.7 Add test proving panic switch stops reuse.
-- [ ] S.8 Add test proving sensitive header values do not appear in logs.
-- [ ] S.9 Add test proving sensitive header values do not appear in metrics.
-- [ ] S.10 Add test proving sensitive header values do not appear in dashboard APIs.
+- [x] S.8 Add test proving sensitive header values do not appear in logs.
+- [x] S.9 Add test proving sensitive header values do not appear in metrics.
+- [x] S.10 Add test proving sensitive header values do not appear in dashboard APIs.
 
 ## Suggested Implementation Order
 

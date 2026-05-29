@@ -252,6 +252,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn purge_all_removes_every_entry() {
+        let store = MemoryStore::new(&StorageConfig::default());
+        store
+            .put(
+                CacheKeyHash("a".to_string()),
+                entry("body", "/a", Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                CacheKeyHash("b".to_string()),
+                entry("body", "/b", Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+
+        let result = store.purge(PurgeSelector::All).await.unwrap();
+
+        assert_eq!(result.purged_entries, 2);
+        assert_eq!(store.stats().entries, 0);
+    }
+
+    #[tokio::test]
+    async fn total_size_limit_evicts_oldest_entries() {
+        let config = StorageConfig {
+            max_size: 8,
+            max_object_size: 8,
+            ..StorageConfig::default()
+        };
+        let store = MemoryStore::new(&config);
+
+        store
+            .put(
+                CacheKeyHash("a".to_string()),
+                entry("1234", "/a", Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                CacheKeyHash("b".to_string()),
+                entry("5678", "/b", Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                CacheKeyHash("c".to_string()),
+                entry("9012", "/c", Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+
+        let stats = store.stats();
+        assert!(stats.entries <= 2);
+        assert!(stats.evictions > 0);
+    }
+
+    #[tokio::test]
     async fn object_limit_is_enforced() {
         let config = StorageConfig {
             max_object_size: 1,

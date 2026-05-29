@@ -17,6 +17,7 @@ CLI flags override config file values.
 Important defaults:
 
 - Proxy listen: `0.0.0.0:8080`
+- Origin timeout: `30000` ms
 - Dashboard listen: `127.0.0.1:9900`
 - Mode: `watch`
 - Freshness: `balanced`
@@ -24,6 +25,14 @@ Important defaults:
 - Storage: in-memory
 - Max cache size: `256MiB`
 - Max object size: `1MiB`
+
+Server settings:
+
+```yaml
+server:
+  listen: "0.0.0.0:8080"
+  origin_timeout_ms: 30000
+```
 
 Public dashboard binding requires explicit configuration. If admin APIs are enabled on a public dashboard address, configure an admin token and pass it to admin commands with `--admin-token` or `KUBIO_ADMIN_TOKEN`.
 

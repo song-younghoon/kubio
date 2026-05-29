@@ -13,6 +13,7 @@ use url::Url;
 
 pub const DEFAULT_PROXY_LISTEN: &str = "0.0.0.0:8080";
 pub const DEFAULT_DASHBOARD_LISTEN: &str = "127.0.0.1:9900";
+pub const DEFAULT_ORIGIN_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -126,6 +127,7 @@ impl Default for EffectiveConfig {
         Self {
             server: ServerConfig {
                 listen: DEFAULT_PROXY_LISTEN.parse().expect("valid default listen"),
+                origin_timeout: Duration::from_millis(DEFAULT_ORIGIN_TIMEOUT_MS),
             },
             origin: Url::parse("http://localhost:3000").expect("valid default origin"),
             mode: Mode::Watch,
@@ -166,6 +168,7 @@ pub struct RedactedConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
+    pub origin_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -543,10 +546,19 @@ impl StatusClassCounts {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LatencyBucketSnapshot {
+    pub le_seconds: f64,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatencySnapshot {
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub avg_ms: f64,
+    pub count: u64,
+    pub sum_ms: f64,
+    pub buckets: Vec<LatencyBucketSnapshot>,
 }
 
 pub fn normalize_path_template(path: &str) -> String {
@@ -762,6 +774,7 @@ pub fn parse_size(value: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn route_clustering_replaces_ids() {
@@ -802,5 +815,62 @@ mod tests {
     fn size_parser_supports_binary_units() {
         assert_eq!(parse_size("1MiB").unwrap(), 1024 * 1024);
         assert_eq!(parse_size("256 kb").unwrap(), 256 * 1024);
+    }
+
+    proptest! {
+        #[test]
+        fn route_clustering_never_panics(path in "\\PC*") {
+            let _ = normalize_path_template(&path);
+        }
+
+        #[test]
+        fn query_normalization_is_stable_for_parameter_order(a in "[A-Za-z0-9]{0,16}", b in "[A-Za-z0-9]{0,16}") {
+            let left = format!("b={b}&a={a}");
+            let right = format!("a={a}&b={b}");
+
+            prop_assert_eq!(normalize_query(&left), normalize_query(&right));
+        }
+
+        #[test]
+        fn redaction_never_returns_sensitive_values(secret in "[A-Za-z0-9]{1,64}") {
+            prop_assert_ne!(redact_header_value("authorization", &secret), secret.as_str());
+            prop_assert_ne!(redact_header_value("cookie", &secret), secret.as_str());
+            prop_assert_ne!(redact_header_value("set-cookie", &secret), secret.as_str());
+        }
+    }
+
+    #[test]
+    fn cache_key_hash_changes_with_vary_header_values() {
+        let mut first = HeaderMap::new();
+        first.insert("accept-language", "en".parse().unwrap());
+        let mut second = HeaderMap::new();
+        second.insert("accept-language", "ko".parse().unwrap());
+
+        let method = Method::GET;
+        let first_key = build_cache_key(
+            &method,
+            "http",
+            "localhost:3000",
+            "/api/products",
+            Some("b=2&a=1"),
+            &first,
+            &["accept-language"],
+        );
+        let second_key = build_cache_key(
+            &method,
+            "http",
+            "localhost:3000",
+            "/api/products",
+            Some("a=1&b=2"),
+            &second,
+            &["accept-language"],
+        );
+
+        assert_ne!(first_key.hash(), second_key.hash());
+    }
+
+    #[test]
+    fn body_changes_alter_fingerprint_hash() {
+        assert_ne!(body_hash(b"one"), body_hash(b"two"));
     }
 }

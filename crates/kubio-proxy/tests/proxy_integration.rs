@@ -4,7 +4,7 @@ use axum::http::Request;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
-use kubio_core::{DecisionReason, EffectiveConfig, Mode, ServerConfig};
+use kubio_core::{DecisionReason, EffectiveConfig, Mode, RouteState};
 use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use url::Url;
@@ -61,6 +62,82 @@ async fn authorization_is_protected_and_never_stored() {
 }
 
 #[tokio::test]
+async fn sensitive_header_values_do_not_appear_in_snapshots_or_metrics() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/auth", runtime.proxy_url()))
+        .header("authorization", "Bearer raw-secret-token")
+        .header("cookie", "session=raw-cookie-secret")
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    let snapshot = runtime.observer.snapshot();
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap();
+    let metrics = kubio_telemetry::render_metrics(&snapshot, &runtime.store.stats());
+
+    for output in [snapshot_json.as_str(), metrics.as_str()] {
+        assert!(!output.contains("raw-secret-token"));
+        assert!(!output.contains("raw-cookie-secret"));
+        assert!(!output.contains("Bearer"));
+        assert!(!output.contains("session="));
+    }
+
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn cookie_is_protected_and_never_stored() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..3 {
+        let response = client
+            .get(format!("{}/cookie", runtime.proxy_url()))
+            .header("cookie", "session=secret")
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.protected_requests, 3);
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn set_cookie_response_is_never_stored() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+
+    for _ in 0..3 {
+        let response = reqwest::get(format!("{}/set-cookie", runtime.proxy_url()))
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    assert_eq!(runtime.store.stats().entries, 0);
+    assert!(runtime
+        .observer
+        .snapshot()
+        .routes
+        .iter()
+        .any(|route| route.reasons.contains(&DecisionReason::HasSetCookie)));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
 async fn no_store_response_is_not_cached() {
     let origin = TestOrigin::start().await;
     let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
@@ -72,6 +149,74 @@ async fn no_store_response_is_not_cached() {
         assert!(response.status().is_success());
     }
 
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn private_and_no_cache_responses_are_not_cached() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+
+    for path in ["/private", "/nocache"] {
+        for _ in 0..3 {
+            let response = reqwest::get(format!("{}{}", runtime.proxy_url(), path))
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+        }
+    }
+
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn vary_wildcard_response_is_not_cached() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+
+    for _ in 0..3 {
+        let response = reqwest::get(format!("{}/vary-star", runtime.proxy_url()))
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    assert_eq!(runtime.store.stats().entries, 0);
+    assert!(runtime
+        .observer
+        .snapshot()
+        .routes
+        .iter()
+        .any(|route| route.reasons.contains(&DecisionReason::VaryWildcard)));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsafe_method_forwards_body_and_is_not_reused() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..2 {
+        let body = client
+            .post(format!("{}/echo", runtime.proxy_url()))
+            .body("posted")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "posted");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.protected_requests, 2);
     assert_eq!(runtime.store.stats().entries, 0);
     runtime.shutdown().await;
     origin.shutdown().await;
@@ -96,6 +241,54 @@ async fn auto_mode_reuses_after_shadow_confidence() {
     assert_eq!(snapshot.overview.origin_requests, 2);
     assert_eq!(snapshot.overview.reused_responses, 1);
     assert_eq!(runtime.store.stats().entries, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn shadow_mismatch_blocks_auto_reuse() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 2, 1, 1).await;
+
+    for _ in 0..4 {
+        let response = reqwest::get(format!("{}/unstable", runtime.proxy_url()))
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    assert!(snapshot
+        .routes
+        .iter()
+        .any(|route| route.state == RouteState::Protected
+            && route.reasons.contains(&DecisionReason::ShadowMismatch)));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn origin_timeout_returns_gateway_timeout() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_with_origin_timeout(
+        origin.url(),
+        Mode::Watch,
+        Duration::from_millis(25),
+    )
+    .await;
+
+    let response = reqwest::get(format!("{}/slow", runtime.proxy_url()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::GATEWAY_TIMEOUT);
+    assert!(runtime
+        .observer
+        .snapshot()
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::OriginRequestFailed));
     runtime.shutdown().await;
     origin.shutdown().await;
 }
@@ -174,7 +367,14 @@ impl TestOrigin {
         let app = Router::new()
             .route("/stable", get(|| async { "stable" }))
             .route("/auth", get(origin_counted))
+            .route("/cookie", get(origin_counted))
+            .route("/set-cookie", get(set_cookie))
             .route("/nostore", get(no_store))
+            .route("/private", get(private))
+            .route("/nocache", get(no_cache))
+            .route("/vary-star", get(vary_star))
+            .route("/unstable", get(unstable))
+            .route("/slow", get(slow))
             .route("/echo", post(echo))
             .with_state(hits);
         let (tx, rx) = oneshot::channel();
@@ -209,6 +409,32 @@ async fn origin_counted(State(hits): State<Arc<AtomicUsize>>) -> String {
 
 async fn no_store() -> impl IntoResponse {
     ([("cache-control", "no-store")], "no-store")
+}
+
+async fn set_cookie() -> impl IntoResponse {
+    ([("set-cookie", "session=secret")], "set-cookie")
+}
+
+async fn private() -> impl IntoResponse {
+    ([("cache-control", "private")], "private")
+}
+
+async fn no_cache() -> impl IntoResponse {
+    ([("cache-control", "no-cache")], "no-cache")
+}
+
+async fn vary_star() -> impl IntoResponse {
+    ([("vary", "*")], "vary")
+}
+
+async fn unstable(State(hits): State<Arc<AtomicUsize>>) -> String {
+    let count = hits.fetch_add(1, Ordering::SeqCst);
+    format!("unstable-{count}")
+}
+
+async fn slow() -> impl IntoResponse {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    "slow"
 }
 
 async fn echo(request: Request<Body>) -> impl IntoResponse {
@@ -249,16 +475,46 @@ impl TestRuntime {
         min_shadow_validations: u64,
         panic_file: Option<PathBuf>,
     ) -> Self {
+        Self::start_with_options(
+            origin,
+            mode,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            panic_file,
+            None,
+        )
+        .await
+    }
+
+    async fn start_with_origin_timeout(origin: Url, mode: Mode, origin_timeout: Duration) -> Self {
+        Self::start_with_options(origin, mode, 100, 5, 20, None, Some(origin_timeout)).await
+    }
+
+    async fn start_with_options(
+        origin: Url,
+        mode: Mode,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        panic_file: Option<PathBuf>,
+        origin_timeout: Option<Duration>,
+    ) -> Self {
         let addr = unused_addr().await;
         let defaults = EffectiveConfig::default();
         let mut policy_config = defaults.policy.clone();
         policy_config.min_route_samples = min_route_samples;
         policy_config.min_key_repeats = min_key_repeats;
         policy_config.min_shadow_validations = min_shadow_validations;
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        if let Some(origin_timeout) = origin_timeout {
+            server_config.origin_timeout = origin_timeout;
+        }
         let config = EffectiveConfig {
             origin,
             mode,
-            server: ServerConfig { listen: addr },
+            server: server_config,
             policy: policy_config,
             panic_file,
             ..defaults
