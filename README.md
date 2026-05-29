@@ -78,4 +78,6 @@ This repository is at v0.1.0 implementation stage. v0.1.0 is local-first and pro
 - No required telemetry.
 - No distributed cache.
 
-See [.design/v0.1.0](.design/v0.1.0) and [docs/safety-model.md](docs/safety-model.md).
+v0.2.0 is in design draft. The target adds conditional revalidation, bounded stale-if-error, route policy hints, query parameter intelligence, and an optional disk store while preserving v0.1.0 hard safety denies.
+
+See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), and [docs/safety-model.md](docs/safety-model.md).
