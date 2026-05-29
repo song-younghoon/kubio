@@ -83,4 +83,6 @@ This repository is at v0.2.0 implementation stage. v0.2.0 is local-first and pro
 - No required telemetry.
 - No distributed cache.
 
-See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), and [docs/safety-model.md](docs/safety-model.md).
+v0.3.0 is currently design-stage and focuses on performance, HTTP/2, and guarded HTTP/3 support.
+
+See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), [.design/v0.3.0](.design/v0.3.0), and [docs/safety-model.md](docs/safety-model.md).
