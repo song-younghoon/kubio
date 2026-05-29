@@ -690,6 +690,7 @@ fn valid_dashboard_path(path: &str) -> bool {
 }
 
 fn validate_route_hints(routes: &[RouteHintConfig]) -> Result<()> {
+    let mut seen_routes = Vec::new();
     for route in routes {
         if route.route_match.method.trim().is_empty() {
             bail!("routes[].match.method must not be empty");
@@ -697,9 +698,26 @@ fn validate_route_hints(routes: &[RouteHintConfig]) -> Result<()> {
         if !route.route_match.path.starts_with('/') {
             bail!("routes[].match.path must be absolute");
         }
+        let route_key = (
+            route.route_match.method.to_ascii_uppercase(),
+            route.route_match.path.clone(),
+        );
+        if seen_routes.contains(&route_key) {
+            bail!(
+                "duplicate route hint for {} {}",
+                route.route_match.method,
+                route.route_match.path
+            );
+        }
+        seen_routes.push(route_key);
         for include in &route.query.include {
-            if route.query.ignore.iter().any(|ignore| ignore == include) {
-                bail!("query parameter `{include}` cannot appear in both include and ignore lists");
+            if route
+                .query
+                .ignore
+                .iter()
+                .any(|ignore| query_patterns_overlap(include, ignore))
+            {
+                bail!("query parameter pattern `{include}` conflicts with the route ignore list");
             }
         }
         for pattern in route.query.ignore.iter().chain(route.query.include.iter()) {
@@ -722,6 +740,17 @@ fn validate_route_hints(routes: &[RouteHintConfig]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn query_patterns_overlap(left: &str, right: &str) -> bool {
+    match (left.strip_suffix('*'), right.strip_suffix('*')) {
+        (Some(left_prefix), Some(right_prefix)) => {
+            left_prefix.starts_with(right_prefix) || right_prefix.starts_with(left_prefix)
+        }
+        (Some(left_prefix), None) => right.starts_with(left_prefix),
+        (None, Some(right_prefix)) => left.starts_with(right_prefix),
+        (None, None) => left == right,
+    }
 }
 
 fn parse_route_id(value: &str) -> Option<RouteId> {
@@ -865,6 +894,13 @@ impl TryFrom<FileRouteHintConfig> for RouteHintConfig {
     type Error = anyhow::Error;
 
     fn try_from(value: FileRouteHintConfig) -> Result<Self> {
+        let query = match value.query {
+            Some(query) if query.is_empty() => {
+                bail!("routes[].query must define include or ignore patterns")
+            }
+            Some(query) => query,
+            None => RouteQueryConfig::default(),
+        };
         let freshness = RouteFreshnessConfig {
             ttl: value
                 .freshness
@@ -889,7 +925,7 @@ impl TryFrom<FileRouteHintConfig> for RouteHintConfig {
                 path: value.route_match.path,
             },
             freshness,
-            query: value.query.unwrap_or_default(),
+            query,
             vary: value.vary.unwrap_or_default(),
             stale_if_error,
             safety: value.safety.unwrap_or_default(),
@@ -943,6 +979,62 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_duplicate_route_hints() {
+        let config = EffectiveConfig {
+            routes: vec![
+                test_route_hint("GET", "/api/products"),
+                test_route_hint("get", "/api/products"),
+            ],
+            ..EffectiveConfig::default()
+        };
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("duplicate route hint"));
+    }
+
+    #[test]
+    fn validation_rejects_query_glob_conflicts() {
+        let hint = RouteHintConfig {
+            query: RouteQueryConfig {
+                include: vec!["utm_source".to_string()],
+                ignore: vec!["utm_*".to_string()],
+            },
+            ..test_route_hint("GET", "/api/products")
+        };
+        let config = EffectiveConfig {
+            routes: vec![hint],
+            ..EffectiveConfig::default()
+        };
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("conflicts"));
+    }
+
+    #[test]
+    fn route_hint_config_rejects_empty_query_section() {
+        let file: FileConfig = serde_yaml::from_str(
+            r#"
+origin: "http://localhost:3000"
+routes:
+  - match:
+      method: GET
+      path: "/api/products"
+    query: {}
+"#,
+        )
+        .unwrap();
+        let mut config = EffectiveConfig::default();
+
+        let err = apply_file_config(&mut config, file)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("routes[].query"));
+    }
+
+    #[test]
     fn dashboard_url_joins_base_and_path() {
         assert_eq!(
             dashboard_url("http://127.0.0.1:9900/", "metrics"),
@@ -952,5 +1044,20 @@ mod tests {
             dashboard_url("http://127.0.0.1:9900", "/api/overview"),
             "http://127.0.0.1:9900/api/overview"
         );
+    }
+
+    fn test_route_hint(method: &str, path: &str) -> RouteHintConfig {
+        RouteHintConfig {
+            name: None,
+            route_match: RouteMatchConfig {
+                method: method.to_string(),
+                path: path.to_string(),
+            },
+            freshness: RouteFreshnessConfig::default(),
+            query: RouteQueryConfig::default(),
+            vary: RouteVaryConfig::default(),
+            stale_if_error: RouteStaleIfErrorConfig::default(),
+            safety: RouteSafetyConfig::default(),
+        }
     }
 }

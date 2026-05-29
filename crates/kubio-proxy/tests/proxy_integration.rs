@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Request};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
@@ -402,6 +402,35 @@ async fn no_cache_with_validator_revalidates_before_reuse() {
 }
 
 #[tokio::test]
+async fn unsafe_304_metadata_purges_stored_entry_and_refetches() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..2 {
+        let body = reqwest::get(format!("{}/unsafe-304", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "unsafe-original");
+    }
+
+    let body = reqwest::get(format!("{}/unsafe-304", runtime.proxy_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert_eq!(body, "unsafe-refresh");
+    assert_eq!(runtime.observer.snapshot().overview.reused_responses, 0);
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
 async fn stale_if_error_serves_verified_stale_response() {
     let origin = TestOrigin::start().await;
     let runtime = TestRuntime::start(origin.url(), Mode::Auto, 2, 2, 1).await;
@@ -487,6 +516,7 @@ impl TestOrigin {
             .route("/nocache", get(no_cache))
             .route("/nocache-etag", get(no_cache_etag))
             .route("/etag", get(etag))
+            .route("/unsafe-304", get(unsafe_304))
             .route("/stale-error", get(stale_error))
             .route("/query", get(|| async { "query" }))
             .route("/vary-star", get(vary_star))
@@ -568,6 +598,31 @@ async fn etag(headers: HeaderMap) -> impl IntoResponse {
             axum::http::StatusCode::OK,
             [("etag", "\"etag-v1\""), ("cache-control", "max-age=0")],
             "etag-body",
+        )
+    }
+}
+
+async fn unsafe_304(State(hits): State<Arc<AtomicUsize>>, headers: HeaderMap) -> impl IntoResponse {
+    if headers.contains_key("if-none-match") {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [("etag", "\"unsafe-v1\""), ("cache-control", "no-store")],
+            "",
+        );
+    }
+
+    let count = hits.fetch_add(1, Ordering::SeqCst);
+    if count < 2 {
+        (
+            StatusCode::OK,
+            [("etag", "\"unsafe-v1\""), ("cache-control", "max-age=0")],
+            "unsafe-original",
+        )
+    } else {
+        (
+            StatusCode::OK,
+            [("etag", "\"unsafe-v2\""), ("cache-control", "no-store")],
+            "unsafe-refresh",
         )
     }
 }

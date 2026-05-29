@@ -18,7 +18,7 @@ use kubio_observe::{
     EventType, ObservationRecord, Observer, QueryParamRecord, RevalidationOutcome,
 };
 use kubio_policy::PolicyEngine;
-use kubio_store::{CacheEntry, CacheStore};
+use kubio_store::{CacheEntry, CacheStore, PurgeSelector};
 use reqwest::Client;
 use std::future::Future;
 use std::path::Path;
@@ -118,10 +118,12 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
         .map(count_query_params)
         .unwrap_or_default()
         .min(u16::MAX as usize) as u16;
-    state.observer.record_query_params(
-        route_id.clone(),
-        query_param_records(query.as_deref(), route_hint),
-    );
+    if state.config.policy.query_intelligence.enabled {
+        state.observer.record_query_params(
+            route_id.clone(),
+            query_param_records(query.as_deref(), route_hint),
+        );
+    }
 
     let route_state = state.observer.route_state(&route_id);
     let mut request_decision = state.policy.decide_request(
@@ -235,6 +237,23 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                                             &state.config,
                                             refreshed,
                                             "revalidated",
+                                        );
+                                    }
+                                    if let Err(err) = state
+                                        .store
+                                        .purge(PurgeSelector::Key(key_hash.clone()))
+                                        .await
+                                    {
+                                        warn!(
+                                            error = %err,
+                                            "failed to purge cache entry after unsafe 304 metadata"
+                                        );
+                                        state.observer.push_event(
+                                            EventType::StoreErrorFailOpen,
+                                            Some(route_id.clone()),
+                                            Some(key_hash.clone()),
+                                            vec![DecisionReason::StoreError],
+                                            "failed to purge cache entry after unsafe 304 metadata",
                                         );
                                     }
                                     origin_response_override = Some(

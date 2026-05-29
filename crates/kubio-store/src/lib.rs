@@ -189,6 +189,10 @@ impl DiskStore {
                 continue;
             };
             let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("tmp") {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
@@ -200,7 +204,7 @@ impl DiskStore {
                 }
                 Err(_) => {
                     corrupt += 1;
-                    let _ = std::fs::remove_file(&path);
+                    remove_disk_entry_files_for_meta(&path);
                 }
             }
         }
@@ -503,10 +507,25 @@ fn read_disk_entry(meta_path: &Path) -> Result<(CacheKeyHash, CacheEntry), Store
             "unsupported disk entry version".to_string(),
         ));
     }
+    let expected_key = meta_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| StoreError::Other("invalid disk metadata file name".to_string()))?;
+    if metadata.key.0 != expected_key {
+        return Err(StoreError::Other(
+            "disk metadata key does not match file name".to_string(),
+        ));
+    }
+    let expected_body_file = format!("{expected_key}.body");
+    if metadata.body_file != expected_body_file {
+        return Err(StoreError::Other(
+            "disk metadata body file does not match cache key".to_string(),
+        ));
+    }
     let body_path = meta_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(&metadata.body_file);
+        .join(expected_body_file);
     let body = std::fs::read(body_path)
         .map_err(|err| StoreError::Other(format!("read disk body: {err}")))?;
     let headers = headers_from_disk(&metadata.headers)?;
@@ -529,6 +548,15 @@ fn read_disk_entry(meta_path: &Path) -> Result<(CacheKeyHash, CacheEntry), Store
             cache_key_hash: key,
         },
     ))
+}
+
+fn remove_disk_entry_files_for_meta(meta_path: &Path) {
+    let _ = std::fs::remove_file(meta_path);
+    if let Some(stem) = meta_path.file_stem().and_then(|value| value.to_str()) {
+        let _ = std::fs::remove_file(meta_path.with_file_name(format!("{stem}.body")));
+        let _ = std::fs::remove_file(meta_path.with_file_name(format!("{stem}.body.tmp")));
+        let _ = std::fs::remove_file(meta_path.with_file_name(format!("{stem}.json.tmp")));
+    }
 }
 
 fn headers_to_disk(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -733,6 +761,50 @@ mod tests {
 
         assert_eq!(recovered.body, Bytes::from_static(b"body"));
         assert_eq!(reopened.stats().startup_recovered_entries, Some(1));
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn disk_store_rejects_metadata_body_path_traversal() {
+        let path = temp_store_path();
+        let entries = path.join("entries");
+        std::fs::create_dir_all(&entries).unwrap();
+        let now = SystemTime::now();
+        let key = CacheKeyHash("evil".to_string());
+        let metadata = DiskEntryMetadata {
+            version: 1,
+            key: key.clone(),
+            status: 200,
+            headers: Vec::new(),
+            body_file: "../outside.body".to_string(),
+            created_at_ms: system_time_to_ms(now),
+            expires_at_ms: system_time_to_ms(now + Duration::from_secs(60)),
+            fresh_until_ms: system_time_to_ms(now + Duration::from_secs(60)),
+            stale_until_ms: None,
+            validators: Validators::default(),
+            cache_control: StoredCacheControl::default(),
+            must_revalidate: false,
+            fingerprint: ResponseFingerprint::new(200, "h".to_string(), Some("b".to_string())),
+            route_id: RouteId::new("GET", "/disk"),
+        };
+        let meta_path = entries.join("evil.json");
+        std::fs::write(&meta_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        std::fs::write(path.join("outside.body"), b"outside").unwrap();
+
+        let store = DiskStore::open(&StorageConfig {
+            kind: "disk".to_string(),
+            max_size: 8 * 1024 * 1024,
+            max_object_size: 1024 * 1024,
+            path: Some(path.clone()),
+            sync: false,
+        })
+        .unwrap();
+
+        let stats = store.stats();
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.corrupt_entries_skipped, Some(1));
+        assert!(!meta_path.exists());
+        assert!(path.join("outside.body").exists());
         let _ = std::fs::remove_dir_all(path);
     }
 

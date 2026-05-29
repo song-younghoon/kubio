@@ -367,7 +367,9 @@ pub struct RouteFreshnessConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteQueryConfig {
+    #[serde(default)]
     pub include: Vec<String>,
+    #[serde(default)]
     pub ignore: Vec<String>,
 }
 
@@ -379,18 +381,23 @@ impl RouteQueryConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteVaryConfig {
+    #[serde(default)]
     pub allow: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteStaleIfErrorConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub max_stale: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSafetyConfig {
+    #[serde(default)]
     pub acknowledge_sensitive_path: bool,
+    #[serde(default)]
     pub force_protect: bool,
 }
 
