@@ -1,0 +1,11 @@
+[package]
+name = "kubio-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+http.workspace = true
+kubio-core.workspace = true
+serde.workspace = true

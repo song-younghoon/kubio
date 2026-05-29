@@ -1,0 +1,13 @@
+[package]
+name = "kubio-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kubio-core.workspace = true
+kubio-observe.workspace = true
+kubio-store.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

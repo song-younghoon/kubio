@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/kubio-cli",
+    "crates/kubio-core",
+    "crates/kubio-dashboard",
+    "crates/kubio-observe",
+    "crates/kubio-policy",
+    "crates/kubio-proxy",
+    "crates/kubio-store",
+    "crates/kubio-telemetry",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/song-younghoon/kubio"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = "0.8"
+blake3 = "1.5"
+bytes = { version = "1.7", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+http = "1.1"
+http-body-util = "0.1"
+parking_lot = "0.12"
+percent-encoding = "2.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "2.0"
+tokio = { version = "1.41", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = { version = "2.5", features = ["serde"] }
+
+kubio-core = { path = "crates/kubio-core" }
+kubio-dashboard = { path = "crates/kubio-dashboard" }
+kubio-observe = { path = "crates/kubio-observe" }
+kubio-policy = { path = "crates/kubio-policy" }
+kubio-proxy = { path = "crates/kubio-proxy" }
+kubio-store = { path = "crates/kubio-store" }
+kubio-telemetry = { path = "crates/kubio-telemetry" }

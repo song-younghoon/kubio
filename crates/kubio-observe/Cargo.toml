@@ -1,0 +1,11 @@
+[package]
+name = "kubio-observe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kubio-core.workspace = true
+parking_lot.workspace = true
+serde.workspace = true

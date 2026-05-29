@@ -1,0 +1,35 @@
+version: 1
+
+server:
+  listen: "0.0.0.0:8080"
+
+origin: "http://localhost:3000"
+
+mode: "watch"
+freshness: "balanced"
+
+dashboard:
+  enabled: true
+  listen: "127.0.0.1:9900"
+
+policy:
+  respect_origin_headers: true
+  protect_authorization: true
+  protect_cookies: true
+  protect_set_cookie: true
+  max_object_size: "1MiB"
+  max_fingerprint_body_size: "2MiB"
+  min_route_samples: 100
+  min_key_repeats: 5
+  min_shadow_validations: 20
+  max_shadow_mismatch_rate: 0.001
+
+storage:
+  kind: "memory"
+  max_size: "256MiB"
+  max_object_size: "1MiB"
+
+observability:
+  metrics: true
+  metrics_path: "/metrics"
+  tracing: true
