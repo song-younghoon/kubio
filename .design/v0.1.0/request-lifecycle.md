@@ -1,6 +1,6 @@
 # Request Lifecycle
 
-Status: draft
+Status: implemented design reference
 Target release: `v0.1.0`
 
 ## Overview
@@ -255,6 +255,7 @@ Do not include raw reasons or identifiers in response headers for v0.1.0.
 If configured and active:
 
 - Never serve cached responses.
+- Do not store new cache entries.
 - Do not promote routes to auto.
 - Continue forwarding to origin.
 - Observation may continue if it remains privacy-safe.

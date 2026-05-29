@@ -23,4 +23,14 @@ Recommended rollout:
 4. Enable auto mode after validation.
 5. Configure a panic file for rapid reuse disablement.
 
+Panic switch example:
+
+```bash
+kubio serve --to http://localhost:3000 --mode auto --panic-file /tmp/kubio.disable
+touch /tmp/kubio.disable
+rm /tmp/kubio.disable
+```
+
+While the file exists, kubio keeps forwarding to origin and does not serve, store, or promote reused responses. Removing the file restores normal policy-controlled reuse.
+
 v0.1.0 does not provide multi-instance shared cache consistency.

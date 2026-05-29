@@ -1,6 +1,6 @@
 # v0.1.0 Implementation Tasks
 
-Status: draft
+Status: implemented baseline with release-hardening follow-up
 Target release: `v0.1.0`
 
 Task states:
@@ -8,6 +8,35 @@ Task states:
 - `[ ]` not started
 - `[~]` in progress
 - `[x]` complete
+
+## Current Implementation Snapshot
+
+Completed baseline:
+
+- Rust workspace, CLI, config loading/validation, telemetry, repository docs, Dockerfile, and CI.
+- Local reverse proxy with origin forwarding, gateway errors, hop-by-hop header removal, and graceful Ctrl-C/SIGTERM shutdown.
+- Route clustering, cache key hashing, response fingerprinting, observer snapshots, route states, and bounded event storage.
+- Conservative policy engine with request/response hard denies, freshness profiles, and user-facing explanations.
+- Shadow validation, mismatch demotion, safe auto reuse, memory cache store, purge, debug headers, and panic switch.
+- Local dashboard, JSON APIs, configurable metrics endpoint, admin purge API, and CLI admin commands.
+
+Hardening added after the first implementation pass:
+
+- `observability.metrics_path` and `observability.metrics` are honored by the dashboard router.
+- `kubio purge` can send `--admin-token` or `KUBIO_ADMIN_TOKEN`.
+- `doctor` checks dashboard overview, storage snapshot fields, configured metrics path, and panic-switch state.
+- Panic-switch events are emitted on active/inactive transitions instead of every request.
+- Active panic switch prevents reuse, storage, and promotion.
+- Policy explanations retain concrete oversized/fingerprint reasons.
+- Headers named by `Connection` are removed as hop-by-hop headers.
+- Config validation rejects zero limits, invalid promotion thresholds, invalid mismatch rates, and invalid metrics paths.
+
+Remaining release-hardening work before a public v0.1.0 tag:
+
+- Add packaged release workflow, published checksums, and final binary artifact upload.
+- Add property tests for arbitrary path/query/redaction invariants.
+- Add performance smoke scripts or ignored benchmarks.
+- Broaden integration coverage for Cookie, Set-Cookie, private/no-cache, Vary wildcard, origin timeout, and large response streaming.
 
 ## M0: Project Skeleton
 
@@ -85,7 +114,7 @@ Goal: make `kubio serve --to ...` work as a local HTTP reverse proxy in watch mo
 
 - [ ] M1.1.1 Start Tokio runtime from CLI.
 - [ ] M1.1.2 Bind proxy listener to configured address.
-- [ ] M1.1.3 Handle graceful shutdown on SIGINT/SIGTERM.
+- [x] M1.1.3 Handle graceful shutdown on SIGINT/SIGTERM.
 - [ ] M1.1.4 Keep dashboard/metrics failures isolated from proxy.
 
 Acceptance:
@@ -97,7 +126,7 @@ Acceptance:
 
 - [ ] M1.2.1 Rewrite inbound URI to origin scheme/authority.
 - [ ] M1.2.2 Preserve method, path, query, body, and relevant headers.
-- [ ] M1.2.3 Remove hop-by-hop headers.
+- [x] M1.2.3 Remove hop-by-hop headers.
 - [ ] M1.2.4 Stream request body to origin.
 - [ ] M1.2.5 Stream response body to client.
 - [ ] M1.2.6 Preserve origin status and response headers except hop-by-hop headers.
@@ -325,7 +354,7 @@ Acceptance:
 ### M5.3 Serve Reused Responses
 
 - [ ] M5.3.1 Check request hard denies before lookup.
-- [ ] M5.3.2 Check panic switch before lookup.
+- [x] M5.3.2 Check panic switch before lookup.
 - [ ] M5.3.3 Lookup only auto-eligible route/key.
 - [ ] M5.3.4 Serve only fresh entries.
 - [ ] M5.3.5 Add optional `X-Kubio-Status` debug header.
@@ -339,10 +368,10 @@ Acceptance:
 
 ### M5.4 Panic Switch
 
-- [ ] M5.4.1 Implement `--panic-file`.
-- [ ] M5.4.2 Check file existence on each request or with short cached interval.
-- [ ] M5.4.3 Emit enabled/disabled transition events.
-- [ ] M5.4.4 Ensure active panic switch prevents reuse.
+- [x] M5.4.1 Implement `--panic-file`.
+- [x] M5.4.2 Check file existence on each request or with short cached interval.
+- [x] M5.4.3 Emit enabled/disabled transition events.
+- [x] M5.4.4 Ensure active panic switch prevents reuse.
 
 Acceptance:
 
@@ -355,11 +384,11 @@ Goal: make the release understandable, observable, packaged, and documented.
 
 ### M6.1 Metrics
 
-- [ ] M6.1.1 Expose `/metrics`.
-- [ ] M6.1.2 Implement required counters.
-- [ ] M6.1.3 Implement cache gauges.
+- [x] M6.1.1 Expose `/metrics`.
+- [x] M6.1.2 Implement required counters.
+- [x] M6.1.3 Implement cache gauges.
 - [ ] M6.1.4 Implement request/origin duration histograms.
-- [ ] M6.1.5 Enforce allowed labels.
+- [x] M6.1.5 Enforce allowed labels.
 
 Acceptance:
 
@@ -398,9 +427,9 @@ Acceptance:
 
 - [ ] M6.4.1 Implement `kubio routes` through local API.
 - [ ] M6.4.2 Implement `kubio explain`.
-- [ ] M6.4.3 Implement `kubio purge --all`.
-- [ ] M6.4.4 Implement `kubio purge --route`.
-- [ ] M6.4.5 Implement `kubio doctor`.
+- [x] M6.4.3 Implement `kubio purge --all`.
+- [x] M6.4.4 Implement `kubio purge --route`.
+- [x] M6.4.5 Implement `kubio doctor`.
 
 Acceptance:
 
@@ -430,7 +459,7 @@ Acceptance:
 - [ ] M6.6.3 Generate checksums.
 - [ ] M6.6.4 Build Linux x86_64 binary.
 - [ ] M6.6.5 Build Docker image.
-- [ ] M6.6.6 Draft release notes.
+- [x] M6.6.6 Draft release notes.
 
 Acceptance:
 
@@ -445,7 +474,7 @@ Acceptance:
 - [ ] S.4 Add integration test proving no-store/private/no-cache are not reused.
 - [ ] S.5 Add integration test proving Vary wildcard is not reused.
 - [ ] S.6 Add integration test proving shadow mismatch blocks auto.
-- [ ] S.7 Add test proving panic switch stops reuse.
+- [x] S.7 Add test proving panic switch stops reuse.
 - [ ] S.8 Add test proving sensitive header values do not appear in logs.
 - [ ] S.9 Add test proving sensitive header values do not appear in metrics.
 - [ ] S.10 Add test proving sensitive header values do not appear in dashboard APIs.

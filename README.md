@@ -46,6 +46,7 @@ kubio routes
 kubio explain "GET /api/products"
 kubio doctor --to http://localhost:3000
 kubio purge --all
+kubio purge --all --admin-token "$KUBIO_ADMIN_TOKEN"
 ```
 
 ## Safety Defaults
@@ -62,6 +63,8 @@ kubio protects:
 
 When kubio is unsure, it passes through to origin.
 
+Configure `--panic-file /path/to/file` to immediately disable reuse while keeping origin pass-through active.
+
 ## Project Status
 
 This repository is at v0.1.0 implementation stage. v0.1.0 is local-first and process-local:
@@ -69,6 +72,7 @@ This repository is at v0.1.0 implementation stage. v0.1.0 is local-first and pro
 - HTTP/1.1 reverse proxy.
 - Local dashboard.
 - Prometheus-style metrics.
+- Configurable metrics path.
 - In-memory observation and cache store.
 - No hosted control plane.
 - No required telemetry.

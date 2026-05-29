@@ -6,6 +6,8 @@ Metrics are exposed from the local dashboard server:
 GET /metrics
 ```
 
+The path defaults to `/metrics` and can be changed with `observability.metrics_path`. Set `observability.metrics: false` to disable the endpoint.
+
 Required metrics include:
 
 - `kubio_requests_total`

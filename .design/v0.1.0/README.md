@@ -1,10 +1,12 @@
 # kubio v0.1.0 Design Index
 
-Status: draft
+Status: implemented baseline
 Source: `PRD.md` v0.1 draft
 Target release: `v0.1.0`
 
 This directory turns the product requirements into implementation-facing designs and tasks for the first kubio release. The goal is a local-first Rust reverse proxy that observes API traffic by default, validates reuse through shadow checks, and only serves cached responses when conservative safety gates pass.
+
+Current implementation note: the v0.1.0 baseline exists in the Rust workspace. The remaining release-hardening items are tracked in `tasks.md`, especially packaged release artifacts, broader property/performance tests, and additional edge-case integration coverage.
 
 ## Release Definition
 

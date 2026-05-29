@@ -4,12 +4,13 @@ use axum::http::Request;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
-use kubio_core::{EffectiveConfig, Mode, ServerConfig};
-use kubio_observe::Observer;
+use kubio_core::{DecisionReason, EffectiveConfig, Mode, ServerConfig};
+use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
 use kubio_store::{CacheStore, MemoryStore};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -99,6 +100,67 @@ async fn auto_mode_reuses_after_shadow_confidence() {
     origin.shutdown().await;
 }
 
+#[tokio::test]
+async fn panic_switch_stops_and_restores_reuse() {
+    let origin = TestOrigin::start().await;
+    let panic_file = temp_panic_file();
+    let runtime =
+        TestRuntime::start_with_panic(origin.url(), Mode::Auto, 2, 2, 1, Some(panic_file.clone()))
+            .await;
+
+    for _ in 0..3 {
+        let body = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "stable");
+    }
+    assert_eq!(runtime.observer.snapshot().overview.reused_responses, 1);
+
+    std::fs::write(&panic_file, "disabled").unwrap();
+    for _ in 0..2 {
+        let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+    let active_snapshot = runtime.observer.snapshot();
+    assert_eq!(active_snapshot.overview.reused_responses, 1);
+    assert!(active_snapshot
+        .routes
+        .iter()
+        .any(|route| route.reasons.contains(&DecisionReason::PanicSwitchActive)));
+    assert_eq!(
+        active_snapshot
+            .events
+            .iter()
+            .filter(|event| event.event_type == EventType::PanicSwitchEnabled)
+            .count(),
+        1
+    );
+
+    std::fs::remove_file(&panic_file).unwrap();
+    let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let restored_snapshot = runtime.observer.snapshot();
+    assert_eq!(restored_snapshot.overview.reused_responses, 2);
+    assert_eq!(
+        restored_snapshot
+            .events
+            .iter()
+            .filter(|event| event.event_type == EventType::PanicSwitchDisabled)
+            .count(),
+        1
+    );
+
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
 struct TestOrigin {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
@@ -168,6 +230,25 @@ impl TestRuntime {
         min_key_repeats: u64,
         min_shadow_validations: u64,
     ) -> Self {
+        Self::start_with_panic(
+            origin,
+            mode,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            None,
+        )
+        .await
+    }
+
+    async fn start_with_panic(
+        origin: Url,
+        mode: Mode,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        panic_file: Option<PathBuf>,
+    ) -> Self {
         let addr = unused_addr().await;
         let defaults = EffectiveConfig::default();
         let mut policy_config = defaults.policy.clone();
@@ -179,6 +260,7 @@ impl TestRuntime {
             mode,
             server: ServerConfig { listen: addr },
             policy: policy_config,
+            panic_file,
             ..defaults
         };
 
@@ -237,4 +319,20 @@ async fn unused_addr() -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     drop(listener);
     addr
+}
+
+fn temp_panic_file() -> PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "kubio-panic-switch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    if path.exists() {
+        std::fs::remove_file(&path).unwrap();
+    }
+    path
 }

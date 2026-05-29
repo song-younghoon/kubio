@@ -172,13 +172,18 @@ impl PolicyEngine {
         }
 
         if body_len as u64 > self.config.max_object_size || !fingerprint_available {
-            return PolicyDecision::new(Decision::ObserveOnly, reasons, route_state, score);
+            return PolicyDecision::new(
+                Decision::ObserveOnly,
+                observe_reasons(reasons),
+                route_state,
+                score,
+            );
         }
 
         match mode {
             Mode::Watch | Mode::Shadow => PolicyDecision::new(
                 Decision::ObserveOnly,
-                vec![DecisionReason::InsufficientShadowValidations],
+                observe_reasons(reasons),
                 route_state,
                 score,
             ),
@@ -190,7 +195,7 @@ impl PolicyEngine {
             ),
             Mode::Auto => PolicyDecision::new(
                 Decision::ObserveOnly,
-                vec![DecisionReason::InsufficientShadowValidations],
+                observe_reasons(reasons),
                 route_state,
                 score,
             ),
@@ -290,6 +295,13 @@ impl PolicyEngine {
 
         score
     }
+}
+
+fn observe_reasons(mut reasons: Vec<DecisionReason>) -> Vec<DecisionReason> {
+    if !reasons.contains(&DecisionReason::InsufficientShadowValidations) {
+        reasons.push(DecisionReason::InsufficientShadowValidations);
+    }
+    reasons
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,5 +529,28 @@ mod tests {
         let signals = engine.response_signals(StatusCode::OK, &headers);
         assert_eq!(signals.vary, VaryClass::Wildcard);
         assert!(!engine.response_is_store_safe(&signals));
+    }
+
+    #[test]
+    fn oversized_response_keeps_explainable_reason() {
+        let mut engine = engine();
+        engine.config.max_object_size = 4;
+        let request = engine.request_signals(&Method::GET, "/api/products", &HeaderMap::new(), 0);
+        let response = engine.response_signals(StatusCode::OK, &HeaderMap::new());
+
+        let decision = engine.decide_response(
+            Mode::Watch,
+            RouteState::Watching,
+            &request,
+            &response,
+            5,
+            true,
+        );
+
+        assert_eq!(decision.decision, Decision::ObserveOnly);
+        assert!(decision.reasons.contains(&DecisionReason::ObjectTooLarge));
+        assert!(decision
+            .reasons
+            .contains(&DecisionReason::InsufficientShadowValidations));
     }
 }

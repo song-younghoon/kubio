@@ -1,6 +1,6 @@
 # Observability and Dashboard
 
-Status: draft
+Status: implemented design reference
 Target release: `v0.1.0`
 
 ## Goals
@@ -100,6 +100,8 @@ Endpoint:
 ```text
 GET /metrics
 ```
+
+The endpoint defaults to `/metrics`; v0.1.0 honors `observability.metrics_path` and can disable metrics with `observability.metrics: false`.
 
 Required metrics:
 

@@ -1,6 +1,6 @@
 # System Architecture
 
-Status: draft
+Status: implemented design reference
 Target release: `v0.1.0`
 
 ## Goals

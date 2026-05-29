@@ -22,7 +22,7 @@ pub struct DashboardState {
 }
 
 pub fn router(state: DashboardState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(index))
         .route("/routes", get(routes_page))
         .route("/routes/{route_hash}", get(route_page))
@@ -33,10 +33,13 @@ pub fn router(state: DashboardState) -> Router {
         .route("/api/routes/by-hash/{route_hash}", get(api_route_detail))
         .route("/api/events", get(api_events))
         .route("/api/config", get(api_config))
-        .route("/api/purge", post(api_purge))
-        .route("/metrics", get(metrics))
-        .fallback(not_found)
-        .with_state(state)
+        .route("/api/purge", post(api_purge));
+
+    if state.config.observability.metrics {
+        router = router.route(&state.config.observability.metrics_path, get(metrics));
+    }
+
+    router.fallback(not_found).with_state(state)
 }
 
 pub async fn run_dashboard<F>(state: DashboardState, shutdown: F) -> anyhow::Result<()>
@@ -394,6 +397,11 @@ struct StoreView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use kubio_core::{EffectiveConfig, StorageConfig};
+    use kubio_store::MemoryStore;
+    use tower::ServiceExt;
 
     #[test]
     fn route_id_parser_accepts_method_space_path() {
@@ -405,5 +413,63 @@ mod tests {
     #[test]
     fn html_escape_handles_sensitive_chars() {
         assert_eq!(escape_html("<x&y>"), "&lt;x&amp;y&gt;");
+    }
+
+    #[tokio::test]
+    async fn metrics_path_can_be_configured() {
+        let mut config = EffectiveConfig::default();
+        config.observability.metrics_path = "/internal/metrics".to_string();
+        let app = router(test_state(config));
+
+        let configured = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/internal/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let default = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(configured.status(), StatusCode::OK);
+        assert_eq!(default.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn metrics_can_be_disabled() {
+        let mut config = EffectiveConfig::default();
+        config.observability.metrics = false;
+        let app = router(test_state(config));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn test_state(config: EffectiveConfig) -> DashboardState {
+        let config = Arc::new(config);
+        DashboardState {
+            config: config.clone(),
+            observer: Arc::new(Observer::new(100, 100, 100, 2, 2, 1)),
+            store: Arc::new(MemoryStore::new(&StorageConfig::default())),
+        }
     }
 }

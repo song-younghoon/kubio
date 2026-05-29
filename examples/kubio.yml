@@ -11,6 +11,8 @@ freshness: "balanced"
 dashboard:
   enabled: true
   listen: "127.0.0.1:9900"
+  allow_public: false
+  admin_api: true
 
 policy:
   respect_origin_headers: true
@@ -33,3 +35,6 @@ observability:
   metrics: true
   metrics_path: "/metrics"
   tracing: true
+
+# Required when exposing admin APIs on a public dashboard address.
+# admin_token: "change-me"

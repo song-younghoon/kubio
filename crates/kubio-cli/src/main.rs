@@ -88,6 +88,8 @@ struct PurgeArgs {
     route: Option<String>,
     #[arg(long, default_value = "http://127.0.0.1:9900")]
     dashboard: String,
+    #[arg(long, env = "KUBIO_ADMIN_TOKEN")]
+    admin_token: Option<String>,
 }
 
 #[tokio::main]
@@ -151,7 +153,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         result = proxy_task => {
             result.context("proxy task join failed")??;
         }
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             info!("shutdown signal received");
             let _ = shutdown_tx.send(());
         }
@@ -222,12 +224,22 @@ async fn explain(args: ExplainArgs) -> Result<()> {
 
 async fn doctor(args: DoctorArgs) -> Result<()> {
     let mut checks = Vec::new();
-    let config_result = if let Some(path) = args.config.as_ref() {
-        load_config_file(path).map(|_| ())
+
+    let (file_config, config_ok) = if let Some(path) = args.config.as_ref() {
+        match load_config_file(path) {
+            Ok(file_config) => {
+                let mut effective = EffectiveConfig::default();
+                let ok = apply_file_config(&mut effective, file_config.clone())
+                    .and_then(|_| validate_config(&effective))
+                    .is_ok();
+                (Some(file_config), ok)
+            }
+            Err(_) => (None, false),
+        }
     } else {
-        Ok(())
+        (None, true)
     };
-    checks.push(("config parsing", config_result.is_ok()));
+    checks.push(("config parsing", config_ok));
 
     if let Some(origin) = args.to.as_ref() {
         let origin_ok = Url::parse(origin).is_ok()
@@ -241,17 +253,47 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
     }
 
     let dashboard = args.dashboard.trim_end_matches('/');
-    let dashboard_ok = reqwest::get(format!("{dashboard}/api/overview"))
-        .await
-        .map(|response| response.status().is_success())
-        .unwrap_or(false);
+    let overview_url = dashboard_url(dashboard, "/api/overview");
+    let (dashboard_ok, storage_ok) = match reqwest::get(overview_url).await {
+        Ok(response) if response.status().is_success() => {
+            let storage_ok = response
+                .json::<serde_json::Value>()
+                .await
+                .map(|value| {
+                    value.get("cache_entries").is_some() && value.get("cache_bytes").is_some()
+                })
+                .unwrap_or(false);
+            (true, storage_ok)
+        }
+        Ok(_) | Err(_) => (false, false),
+    };
     checks.push(("dashboard", dashboard_ok));
+    checks.push(("storage snapshot", storage_ok));
 
-    let metrics_ok = reqwest::get(format!("{dashboard}/metrics"))
-        .await
-        .map(|response| response.status().is_success())
-        .unwrap_or(false);
-    checks.push(("metrics endpoint", metrics_ok));
+    let metrics_enabled = file_config
+        .as_ref()
+        .and_then(|config| config.observability.as_ref())
+        .and_then(|observability| observability.metrics)
+        .unwrap_or(true);
+    if metrics_enabled {
+        let metrics_path = file_config
+            .as_ref()
+            .and_then(|config| config.observability.as_ref())
+            .and_then(|observability| observability.metrics_path.as_deref())
+            .unwrap_or("/metrics");
+        let metrics_ok = reqwest::get(dashboard_url(dashboard, metrics_path))
+            .await
+            .map(|response| response.status().is_success())
+            .unwrap_or(false);
+        checks.push(("metrics endpoint", metrics_ok));
+    }
+
+    if let Some(panic_file) = file_config
+        .as_ref()
+        .and_then(|config| config.panic_file.as_ref())
+    {
+        checks.push(("panic switch inactive", !PathBuf::from(panic_file).exists()));
+    }
 
     for (name, ok) in &checks {
         println!("{name}: {}", if *ok { "ok" } else { "failed" });
@@ -281,12 +323,13 @@ async fn purge(args: PurgeArgs) -> Result<()> {
         bail!("provide --all or --route");
     };
     let client = reqwest::Client::new();
-    let result: PurgeResult = client
-        .post(format!(
-            "{}/api/purge",
-            args.dashboard.trim_end_matches('/')
+    let request = client
+        .post(dashboard_url(
+            args.dashboard.trim_end_matches('/'),
+            "/api/purge",
         ))
-        .json(&selector)
+        .json(&selector);
+    let result: PurgeResult = with_admin_token(request, args.admin_token.as_deref())
         .send()
         .await?
         .error_for_status()?
@@ -320,6 +363,35 @@ fn print_startup(config: &EffectiveConfig) {
     if config.dashboard.enabled {
         println!("\nDashboard: http://{}", config.dashboard.listen);
     }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            warn!(error = %err, "failed to install Ctrl-C shutdown handler");
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(err) => {
+                    warn!(error = %err, "failed to install SIGTERM shutdown handler");
+                    ctrl_c.await;
+                    return;
+                }
+            };
+
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }
 
 fn title_case(value: &str) -> String {
@@ -493,6 +565,38 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     if config.storage.kind != "memory" {
         bail!("v0.1.0 only supports memory storage");
     }
+    if config.storage.max_size == 0 {
+        bail!("storage.max_size must be greater than zero");
+    }
+    if config.storage.max_object_size == 0 {
+        bail!("storage.max_object_size must be greater than zero");
+    }
+    if config.storage.max_object_size > config.storage.max_size {
+        bail!("storage.max_object_size must not exceed storage.max_size");
+    }
+    if config.policy.max_object_size == 0 {
+        bail!("policy.max_object_size must be greater than zero");
+    }
+    if config.policy.max_fingerprint_body_size == 0 {
+        bail!("policy.max_fingerprint_body_size must be greater than zero");
+    }
+    if config.policy.max_request_body_size == 0 {
+        bail!("policy.max_request_body_size must be greater than zero");
+    }
+    if config.policy.min_route_samples == 0
+        || config.policy.min_key_repeats == 0
+        || config.policy.min_shadow_validations == 0
+    {
+        bail!("policy promotion thresholds must be greater than zero");
+    }
+    if !config.policy.max_shadow_mismatch_rate.is_finite()
+        || !(0.0..=1.0).contains(&config.policy.max_shadow_mismatch_rate)
+    {
+        bail!("policy.max_shadow_mismatch_rate must be between 0 and 1");
+    }
+    if !valid_dashboard_path(&config.observability.metrics_path) {
+        bail!("observability.metrics_path must be an absolute dashboard path");
+    }
     let dashboard_ip = config.dashboard.listen.ip();
     let public_dashboard = !matches!(dashboard_ip, IpAddr::V4(ip) if ip.is_loopback())
         && !matches!(dashboard_ip, IpAddr::V6(ip) if ip.is_loopback());
@@ -505,9 +609,37 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     Ok(())
 }
 
+fn valid_dashboard_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && !path.contains('{')
+        && !path.contains('}')
+        && !path.contains('*')
+        && !path.chars().any(char::is_control)
+}
+
 fn parse_route_id(value: &str) -> Option<RouteId> {
     let (method, path) = value.split_once(' ')?;
     Some(RouteId::new(method, path))
+}
+
+fn dashboard_url(base: &str, path: &str) -> String {
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    format!("{}{}", base.trim_end_matches('/'), path)
+}
+
+fn with_admin_token(
+    request: reqwest::RequestBuilder,
+    admin_token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match admin_token {
+        Some(token) => request.header("x-kubio-admin-token", token),
+        None => request,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -587,4 +719,41 @@ fn _default_config_parts() -> (DashboardConfig, StorageConfig, ObservabilityConf
 #[allow(dead_code)]
 fn _selector_examples(route: RouteId) -> (PurgeSelector, FreshnessProfile) {
     (PurgeSelector::Route(route), FreshnessProfile::Balanced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_rejects_invalid_metrics_path() {
+        let mut config = EffectiveConfig::default();
+        config.observability.metrics_path = "metrics".to_string();
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("metrics_path"));
+    }
+
+    #[test]
+    fn validation_rejects_zero_promotion_thresholds() {
+        let mut config = EffectiveConfig::default();
+        config.policy.min_shadow_validations = 0;
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("promotion thresholds"));
+    }
+
+    #[test]
+    fn dashboard_url_joins_base_and_path() {
+        assert_eq!(
+            dashboard_url("http://127.0.0.1:9900/", "metrics"),
+            "http://127.0.0.1:9900/metrics"
+        );
+        assert_eq!(
+            dashboard_url("http://127.0.0.1:9900", "/api/overview"),
+            "http://127.0.0.1:9900/api/overview"
+        );
+    }
 }

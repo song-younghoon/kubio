@@ -8,6 +8,7 @@ v0.1.0:
 - Local dashboard.
 - Prometheus-style metrics.
 - Conservative safety policy.
+- Release notes draft: `docs/release-notes-v0.1.0.md`.
 
 v0.2+ candidates:
 

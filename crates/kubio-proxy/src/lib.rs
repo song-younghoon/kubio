@@ -9,8 +9,8 @@ use axum::routing::any;
 use axum::Router;
 use http::header;
 use kubio_core::{
-    body_hash, build_cache_key, is_hop_by_hop_header, stable_header_hash, Decision, DecisionReason,
-    EffectiveConfig, Mode, ResponseFingerprint, RouteId,
+    body_hash, build_cache_key, is_hop_by_hop_header, stable_header_hash, CacheKeyHash, Decision,
+    DecisionReason, EffectiveConfig, Mode, ResponseFingerprint, RouteId,
 };
 use kubio_observe::{EventType, ObservationRecord, Observer};
 use kubio_policy::PolicyEngine;
@@ -18,6 +18,7 @@ use kubio_store::{CacheEntry, CacheStore};
 use reqwest::Client;
 use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
@@ -33,6 +34,7 @@ pub struct ProxyState {
     pub observer: Arc<Observer>,
     pub store: Arc<dyn CacheStore>,
     pub client: Client,
+    panic_switch_was_active: Arc<AtomicBool>,
 }
 
 impl ProxyState {
@@ -52,6 +54,7 @@ impl ProxyState {
             observer,
             store,
             client,
+            panic_switch_was_active: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -83,6 +86,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     let route_id = RouteId::from_method_path(&method, &path);
     let headers = request.headers().clone();
     let panic_active = panic_switch_active(state.config.panic_file.as_deref());
+    record_panic_switch_transition(&state, panic_active, &route_id, None);
 
     let body_limit = state.config.policy.max_request_body_size;
     let body = match to_bytes(request.into_body(), body_limit).await {
@@ -115,7 +119,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
             build_cache_key(
                 &method,
                 state.config.origin.scheme(),
-                state.config.origin.host_str().unwrap_or("origin"),
+                &origin_authority(&state.config.origin),
                 &path,
                 query.as_deref(),
                 &headers,
@@ -126,16 +130,6 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     } else {
         None
     };
-
-    if panic_active {
-        state.observer.push_event(
-            EventType::PanicSwitchEnabled,
-            Some(route_id.clone()),
-            cache_key_hash.clone(),
-            vec![DecisionReason::PanicSwitchActive],
-            "panic switch active; response reuse disabled",
-        );
-    }
 
     if state.config.mode == Mode::Auto
         && request_decision.decision != Decision::Protect
@@ -238,13 +232,25 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
 
     let protected = request_decision.decision == Decision::Protect
         || response_decision.decision == Decision::Protect;
-    let reasons = if request_decision.decision == Decision::Protect {
+    let final_decision = if matches!(
+        request_decision.decision,
+        Decision::Protect | Decision::Bypass
+    ) {
+        request_decision.decision
+    } else {
+        response_decision.decision
+    };
+    let reasons = if matches!(
+        request_decision.decision,
+        Decision::Protect | Decision::Bypass
+    ) {
         request_decision.reasons.clone()
     } else {
         response_decision.reasons.clone()
     };
 
-    let shadow_eligible = state.policy.request_is_reuse_safe(&request_signals)
+    let shadow_eligible = !panic_active
+        && state.policy.request_is_reuse_safe(&request_signals)
         && state.policy.response_is_store_safe(&response_signals)
         && fingerprint.is_some()
         && response_bytes.len() as u64 <= state.config.policy.max_fingerprint_body_size;
@@ -252,7 +258,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     state.observer.record(ObservationRecord {
         route_id: route_id.clone(),
         cache_key_hash: cache_key_hash.clone(),
-        decision: response_decision.decision,
+        decision: final_decision,
         reasons: reasons.clone(),
         status: status.as_u16(),
         latency: started.elapsed(),
@@ -267,6 +273,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     });
 
     if state.config.mode == Mode::Auto
+        && !panic_active
         && !protected
         && state.policy.response_is_store_safe(&response_signals)
         && response_bytes.len() as u64 <= state.config.storage.max_object_size
@@ -303,7 +310,13 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
         status,
         &origin_headers,
         response_bytes,
-        if protected { "protected" } else { "miss" },
+        if panic_active {
+            "bypass"
+        } else if protected {
+            "protected"
+        } else {
+            "miss"
+        },
     )
 }
 
@@ -318,13 +331,24 @@ async fn send_origin(
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = state.client.request(req_method, url);
+    let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
-        if name == header::HOST || is_hop_by_hop_header(name.as_str()) {
+        if name == header::HOST
+            || is_hop_by_hop_header_named(name.as_str(), &connection_named_headers)
+        {
             continue;
         }
         request = request.header(name.as_str(), value.as_bytes());
     }
     request.body(body).send().await
+}
+
+fn origin_authority(origin: &Url) -> String {
+    let host = origin.host_str().unwrap_or("origin");
+    match origin.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    }
 }
 
 fn origin_url(origin: &Url, uri: &Uri) -> Url {
@@ -361,8 +385,9 @@ fn make_fingerprint(
 
 fn clone_response_headers(headers: &HeaderMap) -> HeaderMap {
     let mut cloned = HeaderMap::new();
+    let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
-        if !is_hop_by_hop_header(name.as_str()) {
+        if !is_hop_by_hop_header_named(name.as_str(), &connection_named_headers) {
             cloned.insert(name.clone(), value.clone());
         }
     }
@@ -371,9 +396,13 @@ fn clone_response_headers(headers: &HeaderMap) -> HeaderMap {
 
 fn sanitized_response_headers(headers: &HeaderMap) -> HeaderMap {
     let mut sanitized = HeaderMap::new();
+    let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
         let lower = name.as_str().to_ascii_lowercase();
-        if is_hop_by_hop_header(&lower) || lower == "set-cookie" || lower.starts_with("x-kubio-") {
+        if is_hop_by_hop_header_named(&lower, &connection_named_headers)
+            || lower == "set-cookie"
+            || lower.starts_with("x-kubio-")
+        {
             continue;
         }
         sanitized.insert(name.clone(), value.clone());
@@ -404,8 +433,9 @@ fn response_from_origin(
     kubio_status: &'static str,
 ) -> Response<Body> {
     let mut builder = Response::builder().status(status);
+    let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
-        if !is_hop_by_hop_header(name.as_str()) {
+        if !is_hop_by_hop_header_named(name.as_str(), &connection_named_headers) {
             builder = builder.header(name, value);
         }
     }
@@ -419,6 +449,53 @@ fn response_from_origin(
 
 fn panic_switch_active(path: Option<&Path>) -> bool {
     path.map(|path| path.exists()).unwrap_or(false)
+}
+
+fn record_panic_switch_transition(
+    state: &ProxyState,
+    panic_active: bool,
+    route_id: &RouteId,
+    cache_key_hash: Option<CacheKeyHash>,
+) {
+    let was_active = state
+        .panic_switch_was_active
+        .swap(panic_active, Ordering::Relaxed);
+
+    match (was_active, panic_active) {
+        (false, true) => state.observer.push_event(
+            EventType::PanicSwitchEnabled,
+            Some(route_id.clone()),
+            cache_key_hash,
+            vec![DecisionReason::PanicSwitchActive],
+            "panic switch active; response reuse disabled",
+        ),
+        (true, false) => state.observer.push_event(
+            EventType::PanicSwitchDisabled,
+            Some(route_id.clone()),
+            cache_key_hash,
+            vec![DecisionReason::ReusableAndFresh],
+            "panic switch inactive; policy-controlled reuse restored",
+        ),
+        _ => {}
+    }
+}
+
+fn connection_header_names(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn is_hop_by_hop_header_named(name: &str, connection_named_headers: &[String]) -> bool {
+    is_hop_by_hop_header(name)
+        || connection_named_headers
+            .iter()
+            .any(|header| header.eq_ignore_ascii_case(name))
 }
 
 fn count_query_params(query: &str) -> usize {
@@ -447,5 +524,19 @@ mod tests {
     fn query_params_are_counted() {
         assert_eq!(count_query_params("a=1&b=2"), 2);
         assert_eq!(count_query_params(""), 0);
+    }
+
+    #[test]
+    fn connection_named_headers_are_removed_from_origin_responses() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, "x-stream-id".parse().unwrap());
+        headers.insert("x-stream-id", "abc".parse().unwrap());
+        headers.insert("content-type", "text/plain".parse().unwrap());
+
+        let cloned = clone_response_headers(&headers);
+
+        assert!(!cloned.contains_key(header::CONNECTION));
+        assert!(!cloned.contains_key("x-stream-id"));
+        assert_eq!(cloned.get("content-type").unwrap(), "text/plain");
     }
 }

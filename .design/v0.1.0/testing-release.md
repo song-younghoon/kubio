@@ -1,6 +1,6 @@
 # Testing and Release
 
-Status: draft
+Status: implemented design reference
 Target release: `v0.1.0`
 
 ## Goals
@@ -112,6 +112,7 @@ Integration tests should send real HTTP requests through kubio and assert client
 - Dashboard binds to localhost by default.
 - `/api/overview` and `/api/routes` return expected snapshots.
 - `/metrics` exposes required metrics.
+- Configured metrics paths expose metrics when enabled and return 404 when disabled.
 - Metrics labels do not include raw path, query, or header values.
 - Dashboard never displays sensitive header values.
 
@@ -233,5 +234,6 @@ All must be true:
 - Auto mode reuses only verified safe GET/HEAD 200 responses.
 - Prometheus-compatible metrics are available.
 - Panic switch prevents cache reuse.
+- Panic switch prevents reuse, storage, and promotion while active.
 - No sensitive header values appear in logs, metrics, or dashboard.
 - Safety integration tests pass.
