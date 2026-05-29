@@ -1,6 +1,6 @@
 # Revalidation and Staleness
 
-Status: design draft
+Status: implemented baseline and safety-hardened
 Target release: `v0.2.0`
 
 ## Goals
@@ -24,7 +24,7 @@ Each stored entry has:
 - `stale_until`: latest time kubio may serve during origin failure, if allowed.
 - `must_revalidate`: true for `Cache-Control: no-cache` and similar directives.
 - `validators`: `ETag`, `Last-Modified`, or both.
-- `origin_freshness`: parsed bounded origin directives.
+- `cache_control`: parsed bounded origin directives used for storage and revalidation.
 - `policy_freshness`: kubio freshness profile or route hint.
 
 Freshness calculation:
@@ -44,7 +44,7 @@ must_revalidate = true
 
 ## Validator Extraction
 
-kubio should extract validators from safe origin responses:
+kubio extracts validators from safe origin responses:
 
 - `ETag`
 - `Last-Modified`
@@ -98,9 +98,9 @@ Headers to merge include:
 
 Hop-by-hop headers and `Set-Cookie` must not be stored.
 
-If the 304 introduces `Set-Cookie`, `private`, `no-store`, `Vary: *`, or unsupported `Vary`, kubio must treat the entry as invalid for reuse, purge or mark it unusable, and pass through safely. Because 304 normally has no body, kubio should return the origin 304 only if it can preserve client-visible behavior; otherwise it should refetch unconditionally.
+If the 304 introduces `Set-Cookie`, `private`, `no-store`, `Vary: *`, or unsupported `Vary`, kubio treats the entry as invalid for reuse, purges it, and passes through safely. Because 304 normally has no body, kubio refetches unconditionally instead of returning the unsafe 304.
 
-Conservative implementation: on unsafe 304 metadata, perform an unconditional origin fetch.
+Implemented hardening: on unsafe 304 metadata, kubio purges the stored entry before the unconditional origin fetch, so the previous body cannot remain reusable after unsafe revalidation metadata.
 
 ### 200 OK
 
@@ -236,8 +236,9 @@ Do not include validator values or route ids in response headers.
 ## Acceptance
 
 - Stale ETag entry receives conditional request and 304 serves stored body.
-- Stale Last-Modified entry receives conditional request and 304 serves stored body.
+- Last-Modified validators are parsed and sent as `If-Modified-Since`; dedicated Last-Modified-only integration coverage remains a follow-up.
 - Revalidation 200 replaces the cache entry when safe.
+- Unsafe 304 metadata purges the cache entry and refetches safely.
 - `no-cache` entries are never served without contacting origin.
 - Entries without validators pass through on stale requests.
 - Stale-if-error serves stale only when origin or route permission exists.

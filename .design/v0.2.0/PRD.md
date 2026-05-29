@@ -1,6 +1,6 @@
 # PRD: kubio v0.2.0
 
-Document version: v0.2 draft
+Document version: v0.2 implemented baseline
 Product type: Open-source software
 Primary implementation language: Rust
 Release target: Safer real-world API response reuse
@@ -42,7 +42,7 @@ Those defaults are safe, but they limit impact in common API deployments:
 - Tracking query parameters can fragment otherwise reusable public responses.
 - Local development and single-node deployments benefit from a disk-backed cache.
 
-v0.2.0 should add these capabilities without changing kubio's safety posture.
+v0.2.0 adds these capabilities without changing kubio's safety posture.
 
 ## 3. Product Goals
 
@@ -55,7 +55,7 @@ kubio v0.2.0 should:
 4. Replace cached entries on 200 OK revalidation responses.
 5. Serve stale responses during origin failure only with explicit permission and bounded age.
 6. Let operators add route-level hints for freshness, query keys, Vary allowlists, and stale recovery.
-7. Show query parameter cardinality and safe-ignore suggestions without automatically hiding risk.
+7. Show query parameter observations and conservative safe-ignore suggestions without automatically hiding risk.
 8. Provide a process-local disk store that survives restart.
 9. Preserve v0.1.0 hard-deny behavior for personalized and unsafe traffic.
 10. Explain every new decision through dashboard, CLI, JSON APIs, events, and metrics.
@@ -179,6 +179,10 @@ Sensitive-looking paths may be acknowledged by a route hint only when the route 
 
 Disk storage extends process-local cache lifetime across restarts. It does not introduce distributed consistency, cross-node invalidation, or shared locks.
 
+### 6.5 Corruption Never Expands Reuse
+
+Unsafe revalidation metadata and corrupt disk metadata must narrow reuse rather than broaden it. If a 304 response introduces hard-deny metadata, kubio purges the stored entry and refetches. If disk metadata references a body file that does not match its cache key, kubio skips and deletes that entry instead of reading arbitrary files.
+
 ## 7. Success Metrics
 
 Release success is measured by:
@@ -187,6 +191,7 @@ Release success is measured by:
 - `no-cache` responses are never served without revalidation.
 - Stale-if-error tests prove stale is served only when allowed and bounded.
 - Disk store restart tests prove safe entries survive restart and protected entries do not persist.
+- Disk corruption tests prove corrupt metadata cannot trigger unsafe reuse or arbitrary body file reads.
 - Query hint tests prove ignored parameters affect keys only when explicitly configured.
 - Existing v0.1.0 safety integration tests continue to pass.
 

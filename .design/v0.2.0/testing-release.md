@@ -1,6 +1,6 @@
 # Testing and Release
 
-Status: design draft
+Status: implementation gates passing; release artifact smoke remains
 Target release: `v0.2.0`
 
 ## Goals
@@ -21,80 +21,92 @@ cargo audit
 
 If supply-chain tools are unavailable locally, CI must still run them before release.
 
+Current local verification for the implementation and hardening commits:
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace
+git diff --check
+```
+
+`cargo deny check`, `cargo audit`, release artifact smoke, and Docker image smoke remain release-gate follow-ups.
+
 ## Unit Tests
 
 Required new unit areas:
 
-- `Cache-Control` parsing for `max-age`, `no-cache`, `must-revalidate`, and `stale-if-error`.
-- Validator extraction and bounds.
-- Freshness calculation.
-- 304 header merge policy.
-- Stale-if-error permission calculation.
-- Route hint parsing and conflict validation.
-- Route hint specificity sorting.
-- Query include/ignore normalization.
-- Sensitive query parameter detection.
-- Disk store metadata encoding/decoding.
-- Store format version rejection.
-- New decision reason user messages.
+- [x] `Cache-Control` parsing for `max-age`, `no-cache`, `must-revalidate`, and `stale-if-error`.
+- [x] Validator extraction and bounds.
+- [~] Freshness calculation.
+- [~] 304 header merge policy.
+- [~] Stale-if-error permission calculation.
+- [x] Route hint parsing and conflict validation.
+- [~] Route hint specificity sorting.
+- [x] Query include/ignore normalization.
+- [x] Sensitive query parameter detection.
+- [x] Disk store metadata encoding/decoding.
+- [x] Store format version rejection.
+- [x] New decision reason user messages.
 
 ## Integration Tests
 
 ### Revalidation
 
-- ETag stale entry sends `If-None-Match`.
-- Last-Modified stale entry sends `If-Modified-Since`.
-- 304 returns stored body with refreshed metadata.
-- 200 revalidation replaces stored body.
-- Unsafe 304 metadata causes safe pass-through/refetch.
-- Missing validator causes origin pass-through.
-- `Cache-Control: no-cache` is stored only with validator and revalidated before every use.
+- [x] ETag stale entry sends `If-None-Match`.
+- [~] Last-Modified stale entry sends `If-Modified-Since`.
+- [x] 304 returns stored body with refreshed metadata.
+- [x] 200 revalidation replaces stored body.
+- [x] Unsafe 304 metadata causes purge plus safe refetch.
+- [x] Missing validator causes origin pass-through.
+- [x] `Cache-Control: no-cache` is stored only with validator and revalidated before every use.
 
 ### Stale-If-Error
 
-- Origin `stale-if-error` permits stale on timeout within stale window.
-- Route hint permits stale on timeout within stale window.
-- Stale is denied when no permission exists.
-- Stale is denied after `max_stale`.
-- Stale is denied when panic switch is active.
-- Stale is denied for Authorization, Cookie, Set-Cookie, private, no-store, unsupported Vary, and shadow mismatch cases.
-- Revalidation 5xx can serve stale only when allowed.
+- [x] Origin `stale-if-error` permits stale on origin error within stale window.
+- [~] Route hint permits stale on timeout within stale window.
+- [~] Stale is denied when no permission exists.
+- [~] Stale is denied after `max_stale`.
+- [x] Stale is denied when panic switch is active.
+- [x] Stale is denied for Authorization, Cookie, Set-Cookie, private, no-store, unsupported Vary, and shadow mismatch cases.
+- [x] Revalidation 5xx can serve stale only when allowed.
 
 ### Route Hints
 
-- Matching hint applies TTL.
-- Matching hint ignores configured query parameter.
-- Non-matching route does not use hint.
-- Sensitive path acknowledgment only affects sensitive path reason and cannot override personalized signals.
-- Force-protect hint protects otherwise safe public routes.
-- Conflicting hints fail config validation.
+- [x] Matching hint applies TTL.
+- [x] Matching hint ignores configured query parameter.
+- [~] Non-matching route does not use hint.
+- [~] Sensitive path acknowledgment only affects sensitive path reason and cannot override personalized signals.
+- [~] Force-protect hint protects otherwise safe public routes.
+- [x] Conflicting hints fail config validation.
 
 ### Query Intelligence
 
-- Query parameter stats are recorded without raw values.
-- Repeated query parameter ordering stays deterministic.
-- Ignored parameters merge cache keys only on configured routes.
-- Dashboard/API suggestions are generated only after sufficient shadow evidence.
-- Sensitive query parameter names never produce auto-ignore suggestions.
+- [x] Query parameter stats are recorded without raw values.
+- [x] Repeated query parameter ordering stays deterministic.
+- [x] Ignored parameters merge cache keys only on configured routes.
+- [~] Dashboard/API suggestions are generated only after sufficient shadow evidence.
+- [~] Sensitive query parameter names never produce auto-ignore suggestions.
 
 ### Disk Store
 
-- Safe entry survives restart.
-- Expired entry is not served as fresh after restart.
-- Stale entry after restart requires revalidation.
-- Protected response is not persisted.
-- Purge all/route/key works on disk.
-- Single corrupt entry is skipped without crashing hot path.
-- Disk write failure returns origin response.
+- [x] Safe entry survives restart.
+- [x] Expired entry is not served as fresh after restart.
+- [~] Stale entry after restart requires revalidation.
+- [x] Protected response is not persisted.
+- [x] Purge all/route/key works on disk.
+- [x] Single corrupt entry is skipped without crashing hot path.
+- [x] Corrupt metadata cannot cause arbitrary file reads.
+- [~] Disk write failure returns origin response.
 
 ### Observability
 
-- Metrics include revalidation outcomes.
-- Metrics include stale served/denied counts.
-- Metrics include store kind.
-- Dashboard overview includes v0.2.0 fields.
-- CLI explain includes revalidation/stale/query details.
-- Sensitive values do not appear in logs, metrics, dashboard APIs, or disk metadata.
+- [x] Metrics include revalidation outcomes.
+- [x] Metrics include stale served/denied counts.
+- [x] Metrics include store kind.
+- [x] Dashboard overview includes v0.2.0 fields.
+- [~] CLI explain includes revalidation/stale/query details.
+- [x] Sensitive values do not appear in logs, metrics, dashboard APIs, or disk metadata.
 
 ## Property Tests
 
@@ -134,7 +146,7 @@ Required assertions:
 - Raw query values do not appear in metrics or dashboard APIs.
 - Validator values are not shown in default dashboard/API output.
 - Route hints cannot override hard denies.
-- Disk path traversal is impossible through cache key material.
+- Disk path traversal is impossible through cache key material and disk metadata body file names.
 - Corrupt disk entries cannot cause arbitrary file reads or writes.
 - Panic switch disables fresh, revalidated, and stale reuse.
 
@@ -187,3 +199,4 @@ All must be true:
 - Query hints are deterministic and redacted.
 - Disk store survives restart and handles corrupt entries safely.
 - Documentation explains defaults, limits, and migration from v0.1.0.
+- Release artifact smoke, Docker smoke, `cargo deny`, and `cargo audit` pass before tagging.

@@ -1,11 +1,11 @@
 # Architecture Delta
 
-Status: design draft
+Status: implemented baseline and safety-hardened
 Target release: `v0.2.0`
 
 ## Goals
 
-v0.2.0 should add freshness metadata, conditional revalidation, route hints, query intelligence, and disk storage without replacing the v0.1.0 architecture.
+v0.2.0 adds freshness metadata, conditional revalidation, route hints, query intelligence, and disk storage without replacing the v0.1.0 architecture.
 
 The proxy hot path still owns request execution. Policy, observation, and stores remain narrow dependencies.
 
@@ -24,7 +24,7 @@ kubio-dashboard
 kubio-telemetry
 ```
 
-Expected responsibility changes:
+Implemented responsibility changes:
 
 - `kubio-core`
   - Add cache metadata types, validator types, route hint config, query hint config, and new decision reasons.
@@ -35,7 +35,7 @@ Expected responsibility changes:
 - `kubio-observe`
   - Track revalidation outcomes, stale serves, query parameter stats, hint matches, and disk-store events.
 - `kubio-store`
-  - Extend `CacheEntry`, add disk implementation, and expose entry metadata without cloning bodies unnecessarily.
+  - Extend `CacheEntry`, add disk implementation, expose store kind/stats, and keep metadata-only lookup as a later optimization.
 - `kubio-dashboard`
   - Surface freshness, validator, stale, query, hint, and store-kind data.
 - `kubio-cli`
@@ -51,6 +51,7 @@ pub struct CacheEntry {
     pub headers: HeaderMap,
     pub body: Bytes,
     pub created_at: SystemTime,
+    pub expires_at: SystemTime,
     pub fresh_until: SystemTime,
     pub stale_until: Option<SystemTime>,
     pub validators: Validators,
@@ -62,7 +63,7 @@ pub struct CacheEntry {
 }
 ```
 
-`expires_at` from v0.1.0 becomes `fresh_until`. A stale entry can exist after `fresh_until`, but it is not reusable unless revalidated or stale-if-error applies.
+`fresh_until` controls fresh reuse. `expires_at` remains the store retention boundary and may extend beyond `fresh_until` so entries can be revalidated or used during an explicitly allowed stale-if-error window. A stale entry can exist after `fresh_until`, but it is not reusable unless revalidated or stale-if-error applies.
 
 ### Validators
 
@@ -77,16 +78,7 @@ Validator values are response metadata. They may be persisted because entries ar
 
 ### Cache Lookup State
 
-```rust
-pub enum CacheLookupState {
-    Miss,
-    Fresh(CacheEntry),
-    RequiresRevalidation(CacheEntry),
-    StaleIfErrorCandidate(CacheEntry),
-}
-```
-
-The store may return an entry that is stale. The proxy decides whether it can be used.
+The store returns an optional `CacheEntry`. The proxy derives the logical lookup state from `fresh_until`, `expires_at`, validators, `must_revalidate`, route/key eligibility, panic-switch state, and stale-if-error permission.
 
 ### Decision Reasons
 
@@ -151,11 +143,14 @@ routes:
 Validation rules:
 
 - Unknown storage kinds fail before binding.
-- Disk path is required when `storage.kind: disk` unless a platform-specific default is chosen.
+- Disk path defaults to `.kubio/cache` when `storage.kind: disk`.
 - Route paths must be absolute and route match methods must be explicit.
-- Hint glob patterns must be bounded and compile before startup.
+- Hint glob patterns support exact names or trailing `*` only, must be non-empty, and are validated before startup.
+- Duplicate route hints for the same method/template fail before startup.
+- A `query:` section must define at least one `include` or `ignore` pattern.
+- Overlapping query include/ignore patterns fail before startup.
 - `stale_if_error.max_stale` must be greater than zero and capped by a global maximum.
-- `query.auto_ignore` defaults to `false`.
+- `query_intelligence.auto_ignore` defaults to `false` and is not used to change cache keys in v0.2.0.
 
 ## Proxy Flow Changes
 
@@ -206,6 +201,7 @@ Watch and shadow modes should record validators and freshness metadata but never
 | Revalidation timeout | Serve stale only if stale-if-error applies |
 | Revalidation 5xx | Serve stale only if stale-if-error applies |
 | Revalidation 200 with unsafe headers | Return origin response but do not store/reuse |
+| Revalidation 304 with unsafe headers | Purge the stored entry and refetch unconditionally |
 | Disk store unavailable at startup | Fail startup unless configured fallback is enabled |
 | Disk store read error for one entry | Skip entry, emit event, pass through to origin |
 | Disk store write error | Return origin response, emit store error |
@@ -215,11 +211,12 @@ Watch and shadow modes should record validators and freshness metadata but never
 - Route hints are config data and may be shown in dashboard, except secrets if future fields add them.
 - Query stats must store parameter names and bounded classes, not raw sensitive values by default.
 - Disk store persists only entries that policy allowed to store.
-- Disk store directory permissions should be owner-only on Unix where possible.
+- Disk metadata body file names must match the cache key and cannot point outside the entry directory.
 - Disk store does not claim encryption at rest in v0.2.0.
 
-## Open Questions
+## Follow-Ups
 
-- Whether to use `redb`, `sled`, or a custom file layout for disk storage. The design favors an embedded transactional KV store if dependency review passes.
-- Whether revalidation should update route shadow confidence after 304. The conservative answer is yes for metadata, but not as a substitute for response fingerprint validation.
-- Whether the dashboard should allow editing route hints. v0.2.0 should stay read-only.
+- Move blocking disk file operations behind `spawn_blocking`, an async file API, or a dedicated store worker before high-concurrency disk-store use.
+- Expand query intelligence beyond parameter names and simple noise-parameter suggestions to bounded cardinality and fingerprint sensitivity.
+- Add release artifact and Docker smoke automation for the v0.2.0 config.
+- Keep dashboard route-hint editing out of v0.2.0; dashboard remains read-only.

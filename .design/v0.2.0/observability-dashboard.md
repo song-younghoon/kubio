@@ -1,6 +1,6 @@
 # Observability and Dashboard
 
-Status: design draft
+Status: implemented baseline; hint/store metric polish remains
 Target release: `v0.2.0`
 
 ## Goals
@@ -31,10 +31,12 @@ pub struct RouteSnapshot {
     pub revalidation_failed: u64,
     pub stale_served: u64,
     pub stale_denied: u64,
-    pub route_hint: Option<RouteHintSnapshot>,
+    pub route_hint: Option<String>,
     pub query_params: Vec<QueryParamSnapshot>,
 }
 ```
+
+`route_hint` is reserved for richer hint display. The current dashboard/API exposes query configured actions and v0.2.0 counters; full route hint status remains a follow-up.
 
 ### Store Snapshot
 
@@ -60,18 +62,18 @@ pub struct StoreSnapshot {
 pub struct QueryParamSnapshot {
     pub name: String,
     pub seen_count: u64,
-    pub cardinality: CardinalityClass,
+    pub cardinality: String,
     pub fingerprint_sensitive: bool,
     pub configured_action: QueryParamAction,
     pub suggestion: Option<QuerySuggestion>,
 }
 ```
 
-No raw values.
+No raw values. The current implementation uses `unknown` for cardinality until bounded value-class tracking is added.
 
 ## Events
 
-Add event types:
+Event types are defined for:
 
 - `response_revalidated_not_modified`
 - `response_revalidated_modified`
@@ -89,15 +91,25 @@ Add event types:
 
 Events should include route id and key hash when available, but not validator values, raw query values, or headers.
 
+The implemented baseline emits revalidation, stale, panic-switch, and store fail-open events. Full route/query hint event emission remains a follow-up.
+
 ## Metrics
 
-Required new metrics:
+Implemented new metrics:
 
 ```text
 kubio_revalidation_attempts_total
 kubio_revalidation_outcomes_total
 kubio_stale_responses_served_total
 kubio_stale_responses_denied_total
+kubio_cache_entries{store="memory|disk"}
+kubio_cache_bytes{store="memory|disk"}
+kubio_cache_evictions_total{store="memory|disk"}
+```
+
+Follow-up metrics:
+
+```text
 kubio_route_hints_applied_total
 kubio_query_hints_applied_total
 kubio_store_errors_total
@@ -161,10 +173,8 @@ Existing APIs remain:
 Add:
 
 - `GET /api/store`
-- `GET /api/routes/by-hash/:route_hash/query`
-- `GET /api/routes/by-hash/:route_hash/hints`
 
-These can be folded into route detail if simpler, but separate endpoints keep payloads bounded.
+Query snapshots and hint placeholders are folded into route detail for the v0.2.0 baseline. Separate bounded query/hint endpoints remain optional follow-ups.
 
 ### Overview Additions
 
@@ -196,6 +206,9 @@ Add columns:
 
 - Revalidated.
 - Stale served.
+
+Follow-up columns:
+
 - Hint status.
 - Query suggestions count.
 
@@ -203,11 +216,14 @@ Add columns:
 
 Add sections:
 
-- Freshness and validators.
 - Revalidation history.
 - Stale-if-error status.
-- Route hints applied.
 - Query parameters and suggestions.
+
+Follow-up sections:
+
+- Freshness and validator presence.
+- Route hints applied.
 
 ### Store
 
@@ -267,4 +283,4 @@ It is acceptable to expose:
 - Dashboard APIs show store kind and revalidation counts.
 - Query snapshots never include raw values.
 - Events explain stale served and stale denied cases.
-- CLI explain includes v0.2.0 reasons without exposing sensitive metadata.
+- CLI explain includes v0.2.0 revalidation/stale counts without exposing sensitive metadata.

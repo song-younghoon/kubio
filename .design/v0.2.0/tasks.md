@@ -1,6 +1,6 @@
 # v0.2.0 Implementation Tasks
 
-Status: implementation baseline complete; release packaging follow-up remains
+Status: implementation baseline complete and safety-hardened; release packaging follow-up remains
 Target release: `v0.2.0`
 
 Task states:
@@ -21,7 +21,16 @@ v0.1.0 baseline exists:
 - Local dashboard, JSON APIs, metrics, admin purge, doctor.
 - Release workflow and safety tests.
 
-v0.2.0 implementation baseline now includes conditional revalidation, `no-cache` with validators, bounded stale-if-error, route/query hints, disk store, dashboard/API/CLI/metrics updates, examples, docs, and targeted regression tests. Release artifact smoke automation remains a follow-up.
+v0.2.0 implementation baseline now includes conditional revalidation, `no-cache` with validators, bounded stale-if-error, route/query hints, disk store, dashboard/API/CLI/metrics updates, examples, docs, and targeted regression tests.
+
+Additional hardening completed after the baseline:
+
+- Unsafe `304 Not Modified` metadata purges the stored entry before unconditional refetch.
+- Disk metadata decode rejects body file path traversal and key/body mismatches.
+- Route hint validation rejects duplicate routes, empty query sections, and overlapping include/ignore glob patterns.
+- Query parameter observation respects `policy.query_intelligence.enabled`.
+
+Remaining follow-ups are release packaging smoke automation, richer query intelligence, and nonblocking disk I/O optimization.
 
 ## M0: Design and Schema Preparation
 
@@ -29,11 +38,11 @@ Goal: add v0.2.0 types and config parsing without changing runtime behavior.
 
 ### M0.1 Core Types
 
-- [ ] M0.1.1 Add validator metadata types.
-- [ ] M0.1.2 Add freshness metadata types.
-- [ ] M0.1.3 Add route hint config structs.
-- [ ] M0.1.4 Add query hint config structs.
-- [ ] M0.1.5 Add new decision reasons and user messages.
+- [x] M0.1.1 Add validator metadata types.
+- [x] M0.1.2 Add freshness metadata types.
+- [x] M0.1.3 Add route hint config structs.
+- [x] M0.1.4 Add query hint config structs.
+- [x] M0.1.5 Add new decision reasons and user messages.
 
 Acceptance:
 
@@ -43,12 +52,12 @@ Acceptance:
 
 ### M0.2 Config
 
-- [ ] M0.2.1 Parse `policy.revalidation`.
-- [ ] M0.2.2 Parse `policy.stale_if_error`.
-- [ ] M0.2.3 Parse `policy.query_intelligence`.
-- [ ] M0.2.4 Parse route hints.
-- [ ] M0.2.5 Parse disk storage fields.
-- [ ] M0.2.6 Validate bounds and conflicts.
+- [x] M0.2.1 Parse `policy.revalidation`.
+- [x] M0.2.2 Parse `policy.stale_if_error`.
+- [x] M0.2.3 Parse `policy.query_intelligence`.
+- [x] M0.2.4 Parse route hints.
+- [x] M0.2.5 Parse disk storage fields.
+- [x] M0.2.6 Validate bounds and conflicts.
 
 Acceptance:
 
@@ -62,11 +71,11 @@ Goal: safely revalidate stale eligible entries with origin validators.
 
 ### M1.1 Metadata
 
-- [ ] M1.1.1 Extend `CacheEntry` with `fresh_until`, `stale_until`, validators, and `must_revalidate`.
-- [ ] M1.1.2 Update memory store for stale entry retrieval.
-- [ ] M1.1.3 Parse `ETag` and `Last-Modified`.
-- [ ] M1.1.4 Parse origin freshness directives.
-- [ ] M1.1.5 Calculate effective freshness from origin and kubio policy.
+- [x] M1.1.1 Extend `CacheEntry` with `fresh_until`, `stale_until`, validators, and `must_revalidate`.
+- [x] M1.1.2 Update memory store for stale entry retrieval.
+- [x] M1.1.3 Parse `ETag` and `Last-Modified`.
+- [x] M1.1.4 Parse origin freshness directives.
+- [x] M1.1.5 Calculate effective freshness from origin and kubio policy.
 
 Acceptance:
 
@@ -75,23 +84,23 @@ Acceptance:
 
 ### M1.2 Conditional Requests
 
-- [ ] M1.2.1 Add conditional headers for stale entries with validators.
-- [ ] M1.2.2 Handle 304 by serving stored body.
-- [ ] M1.2.3 Merge safe 304 metadata.
-- [ ] M1.2.4 Handle 200 by replacing safe stored entry.
-- [ ] M1.2.5 Pass through when validators are missing or invalid.
+- [x] M1.2.1 Add conditional headers for stale entries with validators.
+- [x] M1.2.2 Handle 304 by serving stored body.
+- [x] M1.2.3 Merge safe 304 metadata.
+- [x] M1.2.4 Handle 200 by replacing safe stored entry.
+- [x] M1.2.5 Pass through when validators are missing or invalid.
 
 Acceptance:
 
-- ETag and Last-Modified integration tests pass.
-- Unsafe 304 metadata does not cause unsafe reuse.
+- ETag revalidation integration and validator extraction tests pass; Last-Modified-only integration coverage remains a follow-up.
+- Unsafe 304 metadata purges the stored entry and refetches instead of leaving the previous body reusable.
 
 ### M1.3 `no-cache`
 
-- [ ] M1.3.1 Change `no-cache` from hard non-store to store-with-revalidation when safe.
-- [ ] M1.3.2 Require validators for `no-cache` reuse.
-- [ ] M1.3.3 Ensure every `no-cache` use contacts origin.
-- [ ] M1.3.4 Update explanations and docs.
+- [x] M1.3.1 Change `no-cache` from hard non-store to store-with-revalidation when safe.
+- [x] M1.3.2 Require validators for `no-cache` reuse.
+- [x] M1.3.3 Ensure every `no-cache` use contacts origin.
+- [x] M1.3.4 Update explanations and docs.
 
 Acceptance:
 
@@ -104,11 +113,11 @@ Goal: serve stale verified entries during origin failure only when explicitly al
 
 ### M2.1 Policy
 
-- [ ] M2.1.1 Parse origin `stale-if-error`.
-- [ ] M2.1.2 Implement global mode: `disabled`, `origin`, `enabled`.
-- [ ] M2.1.3 Implement route-level stale permission.
-- [ ] M2.1.4 Calculate `stale_until`.
-- [ ] M2.1.5 Reject stale when panic switch is active.
+- [x] M2.1.1 Parse origin `stale-if-error`.
+- [x] M2.1.2 Implement global mode: `disabled`, `origin`, `enabled`.
+- [x] M2.1.3 Implement route-level stale permission.
+- [x] M2.1.4 Calculate `stale_until`.
+- [x] M2.1.5 Reject stale when panic switch is active.
 
 Acceptance:
 
@@ -117,11 +126,11 @@ Acceptance:
 
 ### M2.2 Proxy Flow
 
-- [ ] M2.2.1 Detect revalidation/refresh origin failures.
-- [ ] M2.2.2 Serve stale when all gates pass.
-- [ ] M2.2.3 Deny stale with explainable reasons when gates fail.
-- [ ] M2.2.4 Add debug header `X-Kubio-Status: stale`.
-- [ ] M2.2.5 Emit stale served/denied events.
+- [x] M2.2.1 Detect revalidation/refresh origin failures.
+- [x] M2.2.2 Serve stale when all gates pass.
+- [x] M2.2.3 Deny stale with explainable reasons when gates fail.
+- [x] M2.2.4 Add debug header `X-Kubio-Status: stale`.
+- [x] M2.2.5 Emit stale served/denied events.
 
 Acceptance:
 
@@ -134,24 +143,24 @@ Goal: let operators safely tune known public routes and understand query-key fra
 
 ### M3.1 Route Hints
 
-- [ ] M3.1.1 Implement route hint matcher.
-- [ ] M3.1.2 Apply per-route TTL.
-- [ ] M3.1.3 Apply per-route stale-if-error cap.
-- [ ] M3.1.4 Implement force-protect hint.
-- [ ] M3.1.5 Implement sensitive path acknowledgment without overriding hard denies.
+- [x] M3.1.1 Implement route hint matcher.
+- [x] M3.1.2 Apply per-route TTL.
+- [x] M3.1.3 Apply per-route stale-if-error cap.
+- [x] M3.1.4 Implement force-protect hint.
+- [x] M3.1.5 Implement sensitive path acknowledgment without overriding hard denies.
 
 Acceptance:
 
-- Hint specificity is deterministic.
-- Hard-deny overrides are tested.
+- Hint matching is deterministic for exact normalized route templates; duplicate route hints fail config validation.
+- Hard-deny overrides remain enforced by request/response prechecks; dedicated route-hint override tests remain follow-up.
 
 ### M3.2 Query Hints
 
-- [ ] M3.2.1 Apply `query.ignore`.
-- [ ] M3.2.2 Apply `query.include`.
-- [ ] M3.2.3 Preserve repeated parameter order.
-- [ ] M3.2.4 Record hint applied/rejected reasons.
-- [ ] M3.2.5 Test non-matching route behavior.
+- [x] M3.2.1 Apply `query.ignore`.
+- [x] M3.2.2 Apply `query.include`.
+- [x] M3.2.3 Preserve repeated parameter order.
+- [~] M3.2.4 Record hint applied/rejected reasons.
+- [~] M3.2.5 Test non-matching route behavior.
 
 Acceptance:
 
@@ -160,15 +169,15 @@ Acceptance:
 
 ### M3.3 Query Intelligence
 
-- [ ] M3.3.1 Track query parameter names by route.
-- [ ] M3.3.2 Track bounded cardinality classes.
-- [ ] M3.3.3 Track fingerprint sensitivity.
-- [ ] M3.3.4 Generate safe-ignore suggestions.
-- [ ] M3.3.5 Redact sensitive query values everywhere.
+- [x] M3.3.1 Track query parameter names by route.
+- [~] M3.3.2 Track bounded cardinality classes.
+- [~] M3.3.3 Track fingerprint sensitivity.
+- [~] M3.3.4 Generate safe-ignore suggestions.
+- [x] M3.3.5 Redact sensitive query values everywhere.
 
 Acceptance:
 
-- Dashboard/API can show query suggestions.
+- Dashboard/API can show query parameter names, configured actions, and conservative noise-parameter suggestions.
 - Raw query values never appear in metrics or dashboard output.
 
 ## M4: Disk Store
@@ -177,11 +186,11 @@ Goal: add process-local persistent storage.
 
 ### M4.1 Store Implementation
 
-- [ ] M4.1.1 Select disk backend after dependency review.
-- [ ] M4.1.2 Implement disk store open/create.
-- [ ] M4.1.3 Encode/decode versioned entries.
-- [ ] M4.1.4 Implement get/put/purge/stats.
-- [ ] M4.1.5 Enforce max size and max object size.
+- [x] M4.1.1 Select disk backend after dependency review.
+- [x] M4.1.2 Implement disk store open/create.
+- [x] M4.1.3 Encode/decode versioned entries.
+- [x] M4.1.4 Implement get/put/purge/stats.
+- [x] M4.1.5 Enforce max size and max object size.
 
 Acceptance:
 
@@ -190,16 +199,17 @@ Acceptance:
 
 ### M4.2 Persistence and Recovery
 
-- [ ] M4.2.1 Persist safe entries.
-- [ ] M4.2.2 Recover entries on restart.
-- [ ] M4.2.3 Drop expired entries on startup or first access.
-- [ ] M4.2.4 Skip corrupt entries safely.
+- [x] M4.2.1 Persist safe entries.
+- [x] M4.2.2 Recover entries on restart.
+- [x] M4.2.3 Drop expired entries on startup or first access.
+- [x] M4.2.4 Skip corrupt entries safely.
 - [ ] M4.2.5 Protect Tokio runtime from blocking disk I/O.
 
 Acceptance:
 
 - Safe entry survives restart.
 - Corrupt single entry does not crash hot path.
+- Corrupt metadata cannot cause arbitrary body file reads.
 
 ## M5: Dashboard, Metrics, CLI, and Docs
 
@@ -207,11 +217,11 @@ Goal: expose v0.2.0 behavior clearly.
 
 ### M5.1 Metrics and Events
 
-- [ ] M5.1.1 Add revalidation counters.
-- [ ] M5.1.2 Add stale served/denied counters.
-- [ ] M5.1.3 Add hint counters.
-- [ ] M5.1.4 Add store error counters.
-- [ ] M5.1.5 Add bounded event types.
+- [x] M5.1.1 Add revalidation counters.
+- [x] M5.1.2 Add stale served/denied counters.
+- [~] M5.1.3 Add hint counters.
+- [~] M5.1.4 Add store error counters.
+- [x] M5.1.5 Add bounded event types.
 
 Acceptance:
 
@@ -220,28 +230,28 @@ Acceptance:
 
 ### M5.2 Dashboard APIs and UI
 
-- [ ] M5.2.1 Extend overview API.
-- [ ] M5.2.2 Extend route detail API.
-- [ ] M5.2.3 Add store API.
-- [ ] M5.2.4 Add query param snapshots.
-- [ ] M5.2.5 Update dashboard pages.
+- [x] M5.2.1 Extend overview API.
+- [x] M5.2.2 Extend route detail API.
+- [x] M5.2.3 Add store API.
+- [x] M5.2.4 Add query param snapshots.
+- [x] M5.2.5 Update dashboard pages.
 
 Acceptance:
 
-- User can inspect revalidation, stale, hints, query suggestions, and store status.
+- User can inspect revalidation, stale, query snapshots, conservative suggestions, and store status; richer hint status remains follow-up.
 
 ### M5.3 CLI and Docs
 
-- [ ] M5.3.1 Update `kubio routes`.
-- [ ] M5.3.2 Update `kubio explain`.
-- [ ] M5.3.3 Update `kubio doctor`.
-- [ ] M5.3.4 Add v0.2.0 example config.
-- [ ] M5.3.5 Update README and docs.
-- [ ] M5.3.6 Draft release notes.
+- [x] M5.3.1 Update `kubio routes`.
+- [x] M5.3.2 Update `kubio explain`.
+- [x] M5.3.3 Update `kubio doctor`.
+- [x] M5.3.4 Add v0.2.0 example config.
+- [x] M5.3.5 Update README and docs.
+- [x] M5.3.6 Draft release notes.
 
 Acceptance:
 
-- CLI output explains new reasons.
+- CLI output includes v0.2.0 revalidation/stale counts and existing reason explanations.
 - Docs state defaults and limits.
 
 ## M6: Release Hardening
@@ -250,12 +260,12 @@ Goal: ship v0.2.0 with safety, persistence, and performance confidence.
 
 ### M6.1 Tests
 
-- [ ] M6.1.1 Add revalidation integration tests.
-- [ ] M6.1.2 Add stale-if-error integration tests.
-- [ ] M6.1.3 Add route hint tests.
-- [ ] M6.1.4 Add query intelligence tests.
-- [ ] M6.1.5 Add disk persistence tests.
-- [ ] M6.1.6 Add privacy regression tests.
+- [x] M6.1.1 Add revalidation integration tests.
+- [x] M6.1.2 Add stale-if-error integration tests.
+- [~] M6.1.3 Add route hint tests.
+- [~] M6.1.4 Add query intelligence tests.
+- [x] M6.1.5 Add disk persistence tests.
+- [x] M6.1.6 Add privacy regression tests.
 
 Acceptance:
 
@@ -268,7 +278,7 @@ Acceptance:
 - [ ] M6.2.2 Add disk store smoke test.
 - [ ] M6.2.3 Add release artifact smoke with v0.2.0 config.
 - [ ] M6.2.4 Update Docker image smoke.
-- [ ] M6.2.5 Publish release notes.
+- [x] M6.2.5 Publish release notes.
 
 Acceptance:
 
@@ -277,16 +287,16 @@ Acceptance:
 
 ## Cross-Milestone Safety Tasks
 
-- [ ] S.1 Authorization is never fresh-reused, revalidated-reused, or stale-served.
-- [ ] S.2 Cookie traffic is never fresh-reused, revalidated-reused, or stale-served.
-- [ ] S.3 Set-Cookie responses are never persisted.
-- [ ] S.4 Private/no-store responses are never persisted.
-- [ ] S.5 `no-cache` is never served without revalidation.
-- [ ] S.6 Unsupported Vary and Vary wildcard remain protected.
-- [ ] S.7 Shadow mismatch blocks fresh, revalidated, and stale reuse.
-- [ ] S.8 Panic switch blocks fresh, revalidated, and stale reuse.
-- [ ] S.9 Raw query values and sensitive headers do not appear in metrics/dashboard/logs/disk metadata.
-- [ ] S.10 Disk corruption cannot cause unsafe reuse.
+- [x] S.1 Authorization is never fresh-reused, revalidated-reused, or stale-served.
+- [x] S.2 Cookie traffic is never fresh-reused, revalidated-reused, or stale-served.
+- [x] S.3 Set-Cookie responses are never persisted.
+- [x] S.4 Private/no-store responses are never persisted.
+- [x] S.5 `no-cache` is never served without revalidation.
+- [x] S.6 Unsupported Vary and Vary wildcard remain protected.
+- [x] S.7 Shadow mismatch blocks fresh, revalidated, and stale reuse.
+- [x] S.8 Panic switch blocks fresh, revalidated, and stale reuse.
+- [x] S.9 Raw query values and sensitive headers do not appear in metrics/dashboard/logs/disk metadata.
+- [x] S.10 Disk corruption cannot cause unsafe reuse.
 
 ## Suggested Implementation Order
 

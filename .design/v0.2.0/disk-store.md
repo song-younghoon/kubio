@@ -1,6 +1,6 @@
 # Disk Store
 
-Status: design draft
+Status: implemented baseline; nonblocking disk I/O follow-up remains
 Target release: `v0.2.0`
 
 ## Goals
@@ -37,17 +37,13 @@ async fn purge(&self, selector: PurgeSelector) -> Result<PurgeResult, StoreError
 fn stats(&self) -> StoreStats;
 ```
 
-v0.2.0 may add:
+v0.2.0 adds:
 
 ```rust
-async fn get_metadata(&self, key: &CacheKeyHash) -> Result<Option<CacheEntryMetadata>, StoreError>;
-async fn mark_unusable(&self, key: &CacheKeyHash, reason: StoreInvalidationReason) -> Result<(), StoreError>;
 fn kind(&self) -> StoreKind;
 ```
 
-`get_metadata` avoids cloning large bodies before the proxy knows whether a stale entry can be used.
-
-If this complicates the release, implement disk store behind the existing trait first and optimize later.
+Metadata-only lookup and `mark_unusable` are deferred. The implemented v0.2.0 baseline keeps the existing `get`/`put`/`purge` shape and adds `kind()` plus richer stats.
 
 ## Entry Requirements
 
@@ -89,52 +85,41 @@ Do not persist:
 
 ## Disk Layout
 
-Preferred implementation: embedded transactional key-value store.
-
-Logical tables:
-
-```text
-entries: cache_key_hash -> encoded CacheEntry
-route_index: route_hash -> set/cache_key_hash list
-metadata: store_version, created_by, limits
-```
-
-Encoding should be deterministic and versioned. JSON is easy to inspect but costly for bodies. A binary format such as `bincode` plus explicit version field is acceptable if dependency review passes.
-
-Alternative simple layout:
+Implemented layout:
 
 ```text
 .kubio/cache/
-  manifest.json
   entries/
-    ab/
-      abcdef1234567890.meta.json
-      abcdef1234567890.body
+    abcdef1234567890.json
+    abcdef1234567890.body
 ```
 
-If using plain files, writes must be atomic:
+Writes use plain files with a versioned JSON metadata file and a separate body file:
 
 1. Write temp body.
 2. Write temp metadata.
-3. fsync when configured.
-4. Rename metadata last.
+3. `fsync` both temp files when `storage.sync: true`.
+4. Rename body and metadata into place.
 5. Remove orphan temp files on startup.
+
+On decode, the metadata key and body file name must match the metadata file stem. This prevents a corrupt metadata file from causing arbitrary body file reads.
 
 ## Startup Behavior
 
 On startup:
 
 - Create directory if missing.
-- Set owner-only permissions where supported.
-- Open store and read format version.
+- Open store and read entry format versions.
 - Reject unsupported newer store versions.
 - Opportunistically delete expired entries.
+- Skip corrupt entries and remove their metadata/body files.
+- Remove orphan temp files.
 - Recompute stats.
 
 Corruption handling:
 
-- A corrupt individual entry is skipped, evented, and deleted or quarantined.
-- A corrupt store header fails startup by default.
+- A corrupt individual entry is skipped and deleted.
+- Unsupported entry versions are treated as corrupt entries.
 - Optional future `storage.fallback_to_memory: true` can downgrade to memory; not required for v0.2.0.
 
 ## Eviction
@@ -157,6 +142,8 @@ Optional:
 ## Concurrency
 
 The proxy hot path must not block the Tokio runtime on disk I/O.
+
+Current implementation note: the baseline uses synchronous filesystem operations behind the store trait. This is acceptable for functional v0.2.0 validation and local/single-node use, but production hardening should move disk I/O behind `spawn_blocking`, an async file API, or a dedicated store worker.
 
 Options:
 
@@ -185,11 +172,10 @@ Add or extend:
 ```text
 kubio_cache_entries{store="memory|disk"}
 kubio_cache_bytes{store="memory|disk"}
-kubio_cache_evictions_total{store="memory|disk",reason="size|expired|corrupt|purge"}
-kubio_store_errors_total{store="memory|disk",operation="get|put|purge|startup"}
+kubio_cache_evictions_total{store="memory|disk"}
 ```
 
-Labels must remain bounded.
+Labels must remain bounded. Eviction reasons and explicit store error counters remain follow-ups; store fail-open behavior is currently visible through bounded events and dashboard/API store stats.
 
 ## Acceptance
 
@@ -199,4 +185,5 @@ Labels must remain bounded.
 - Protected responses are not written to disk.
 - Purge all/route/key works for disk.
 - Corrupt single entry does not crash the proxy hot path.
+- Corrupt metadata cannot cause path traversal or arbitrary body file reads.
 - Disk I/O errors return origin responses rather than failed reused responses.

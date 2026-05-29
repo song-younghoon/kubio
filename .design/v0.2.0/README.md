@@ -1,6 +1,6 @@
 # kubio v0.2.0 Design Index
 
-Status: implemented baseline
+Status: implemented baseline and safety-hardened
 Source: v0.1.0 implementation baseline and `docs/roadmap.md`
 Target release: `v0.2.0`
 
@@ -20,10 +20,17 @@ kubio v0.2.0 is complete when a user can:
 - Safely store `Cache-Control: no-cache` responses only when they can be revalidated before reuse.
 - Serve stale verified public responses during origin failure only when origin headers or route policy explicitly allow it.
 - Configure route-level policy hints for freshness, query parameters, and stale recovery without bypassing hard safety denies.
-- See query parameter impact and safe ignore suggestions in dashboard/API output.
+- See query parameter names, configured actions, and conservative noise-parameter suggestions in dashboard/API output.
 - Choose `storage.kind: disk` for process-local persistent cache entries.
 - Restart kubio and keep safe disk-backed entries without persisting sensitive observations.
 - Understand every revalidation, stale, query, and disk-store decision from CLI/dashboard output and metrics.
+
+Post-baseline hardening added:
+
+- Unsafe 304 metadata purges stale entries before refetch.
+- Disk metadata cannot point to arbitrary body paths.
+- Route hint validation rejects duplicate routes, empty query blocks, and overlapping include/ignore globs.
+- Query observation can be disabled with `policy.query_intelligence.enabled: false`.
 
 ## In Scope
 
@@ -31,7 +38,7 @@ kubio v0.2.0 is complete when a user can:
 - Freshness metadata model for origin TTLs, validators, `no-cache`, and stale windows.
 - Conservative `stale-if-error` support.
 - Explicit route policy hints in YAML config.
-- Query parameter intelligence and opt-in query-key hints.
+- Query parameter observation and opt-in query-key hints.
 - Process-local disk cache store.
 - Dashboard, API, CLI, metrics, documentation, and tests for the new behavior.
 
@@ -83,5 +90,12 @@ kubio v0.2.0 is complete when a user can:
 - M4: Disk store
 - M5: Dashboard, metrics, CLI, and docs
 - M6: Release hardening
+
+## Remaining Follow-Ups
+
+- Release artifact and Docker smoke automation.
+- `cargo deny check` and `cargo audit` release gates.
+- Richer query cardinality and fingerprint-sensitivity analysis.
+- Nonblocking disk I/O implementation for high-concurrency disk-store deployments.
 
 Each milestone should preserve the v0.1.0 safety model. A partial v0.2.0 implementation must pass through to origin rather than serving stale, unvalidated, or policy-relaxed responses.
