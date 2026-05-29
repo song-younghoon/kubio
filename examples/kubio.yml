@@ -20,6 +20,16 @@ policy:
   protect_authorization: true
   protect_cookies: true
   protect_set_cookie: true
+  revalidation:
+    enabled: true
+    prefer_etag: true
+    max_validator_length: 1024
+  stale_if_error:
+    mode: "origin"
+    max_stale: "5m"
+  query_intelligence:
+    enabled: true
+    auto_ignore: false
   max_object_size: "1MiB"
   max_fingerprint_body_size: "2MiB"
   min_route_samples: 100
@@ -31,6 +41,8 @@ storage:
   kind: "memory"
   max_size: "256MiB"
   max_object_size: "1MiB"
+  # path: ".kubio/cache"
+  # sync: false
 
 observability:
   metrics: true

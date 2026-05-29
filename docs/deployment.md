@@ -1,6 +1,6 @@
 # Deployment
 
-v0.1.0 is designed for local-first and single-process deployment.
+v0.2.0 is designed for local-first and single-process deployment.
 
 Run as a binary:
 
@@ -33,4 +33,4 @@ rm /tmp/kubio.disable
 
 While the file exists, kubio keeps forwarding to origin and does not serve, store, or promote reused responses. Removing the file restores normal policy-controlled reuse.
 
-v0.1.0 does not provide multi-instance shared cache consistency.
+Use `storage.kind: disk` for process-local persistence across restarts. Disk storage is still single-node and does not provide multi-instance shared cache consistency.

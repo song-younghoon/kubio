@@ -13,7 +13,7 @@ kubio prefers a missed optimization over a wrong response.
 - Responses with `Set-Cookie`.
 - Responses with `Cache-Control: no-store`.
 - Responses with `Cache-Control: private`.
-- Responses with `Cache-Control: no-cache`.
+- Responses with `Cache-Control: no-cache` and no usable validator.
 - Responses with `Vary: *`.
 - Responses with unsupported `Vary` headers.
 - Responses that fail fingerprinting.
@@ -21,7 +21,7 @@ kubio prefers a missed optimization over a wrong response.
 
 ## Fail Open
 
-Policy errors, store errors, dashboard errors, metrics errors, and internal uncertainty pass through to origin. Origin failures return gateway errors rather than cached data unless a future stale-if-error feature is explicitly implemented.
+Policy errors, store errors, dashboard errors, metrics errors, and internal uncertainty pass through to origin. Origin failures return gateway errors rather than cached data unless stale-if-error is explicitly allowed by origin headers or route policy.
 
 ## Privacy
 

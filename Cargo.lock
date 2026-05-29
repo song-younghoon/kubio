@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "http",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-dashboard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-observe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kubio-core",
  "parking_lot",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "http",
  "kubio-core",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -794,13 +794,14 @@ dependencies = [
  "kubio-core",
  "parking_lot",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
 
 [[package]]
 name = "kubio-telemetry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kubio-core",
  "kubio-observe",

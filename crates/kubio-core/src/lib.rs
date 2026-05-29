@@ -99,6 +99,7 @@ pub struct EffectiveConfig {
     pub policy: PolicyConfig,
     pub storage: StorageConfig,
     pub observability: ObservabilityConfig,
+    pub routes: Vec<RouteHintConfig>,
     pub debug_headers: bool,
     pub panic_file: Option<PathBuf>,
     pub admin_token: Option<String>,
@@ -115,6 +116,7 @@ impl EffectiveConfig {
             policy: self.policy.clone(),
             storage: self.storage.clone(),
             observability: self.observability.clone(),
+            routes: self.routes.clone(),
             debug_headers: self.debug_headers,
             panic_file: self.panic_file.clone(),
             admin_token: self.admin_token.as_ref().map(|_| "REDACTED".to_string()),
@@ -143,6 +145,7 @@ impl Default for EffectiveConfig {
             policy: PolicyConfig::default(),
             storage: StorageConfig::default(),
             observability: ObservabilityConfig::default(),
+            routes: Vec::new(),
             debug_headers: false,
             panic_file: None,
             admin_token: None,
@@ -160,6 +163,7 @@ pub struct RedactedConfig {
     pub policy: PolicyConfig,
     pub storage: StorageConfig,
     pub observability: ObservabilityConfig,
+    pub routes: Vec<RouteHintConfig>,
     pub debug_headers: bool,
     pub panic_file: Option<PathBuf>,
     pub admin_token: Option<String>,
@@ -192,6 +196,9 @@ pub struct PolicyConfig {
     pub min_key_repeats: u64,
     pub min_shadow_validations: u64,
     pub max_shadow_mismatch_rate: f64,
+    pub revalidation: RevalidationConfig,
+    pub stale_if_error: StaleIfErrorConfig,
+    pub query_intelligence: QueryIntelligenceConfig,
 }
 
 impl Default for PolicyConfig {
@@ -208,6 +215,88 @@ impl Default for PolicyConfig {
             min_key_repeats: 5,
             min_shadow_validations: 20,
             max_shadow_mismatch_rate: 0.001,
+            revalidation: RevalidationConfig::default(),
+            stale_if_error: StaleIfErrorConfig::default(),
+            query_intelligence: QueryIntelligenceConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevalidationConfig {
+    pub enabled: bool,
+    pub prefer_etag: bool,
+    pub max_validator_length: usize,
+}
+
+impl Default for RevalidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefer_etag: true,
+            max_validator_length: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaleIfErrorMode {
+    Disabled,
+    #[default]
+    Origin,
+    Enabled,
+}
+
+impl Display for StaleIfErrorMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("disabled"),
+            Self::Origin => f.write_str("origin"),
+            Self::Enabled => f.write_str("enabled"),
+        }
+    }
+}
+
+impl FromStr for StaleIfErrorMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "origin" => Ok(Self::Origin),
+            "enabled" => Ok(Self::Enabled),
+            other => Err(format!("unsupported stale-if-error mode `{other}`")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleIfErrorConfig {
+    pub mode: StaleIfErrorMode,
+    pub max_stale: Duration,
+}
+
+impl Default for StaleIfErrorConfig {
+    fn default() -> Self {
+        Self {
+            mode: StaleIfErrorMode::Origin,
+            max_stale: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryIntelligenceConfig {
+    pub enabled: bool,
+    pub auto_ignore: bool,
+}
+
+impl Default for QueryIntelligenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_ignore: false,
         }
     }
 }
@@ -217,6 +306,8 @@ pub struct StorageConfig {
     pub kind: String,
     pub max_size: u64,
     pub max_object_size: u64,
+    pub path: Option<PathBuf>,
+    pub sync: bool,
 }
 
 impl Default for StorageConfig {
@@ -225,8 +316,82 @@ impl Default for StorageConfig {
             kind: "memory".to_string(),
             max_size: mib(256),
             max_object_size: mib(1),
+            path: None,
+            sync: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteHintConfig {
+    pub name: Option<String>,
+    #[serde(rename = "match")]
+    pub route_match: RouteMatchConfig,
+    #[serde(default)]
+    pub freshness: RouteFreshnessConfig,
+    #[serde(default)]
+    pub query: RouteQueryConfig,
+    #[serde(default)]
+    pub vary: RouteVaryConfig,
+    #[serde(default)]
+    pub stale_if_error: RouteStaleIfErrorConfig,
+    #[serde(default)]
+    pub safety: RouteSafetyConfig,
+}
+
+impl RouteHintConfig {
+    pub fn matches(&self, route_id: &RouteId) -> bool {
+        self.route_match
+            .method
+            .eq_ignore_ascii_case(&route_id.method)
+            && self.route_match.path == route_id.template
+    }
+
+    pub fn display_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("{} {}", self.route_match.method, self.route_match.path))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteMatchConfig {
+    pub method: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteFreshnessConfig {
+    pub ttl: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteQueryConfig {
+    pub include: Vec<String>,
+    pub ignore: Vec<String>,
+}
+
+impl RouteQueryConfig {
+    pub fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.ignore.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteVaryConfig {
+    pub allow: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteStaleIfErrorConfig {
+    pub enabled: bool,
+    pub max_stale: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteSafetyConfig {
+    pub acknowledge_sensitive_path: bool,
+    pub force_protect: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +505,29 @@ pub fn build_cache_key(
     request_headers: &HeaderMap,
     vary_names: &[&str],
 ) -> CacheKey {
+    build_cache_key_with_query_config(
+        method,
+        scheme,
+        authority,
+        path,
+        query,
+        request_headers,
+        vary_names,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_cache_key_with_query_config(
+    method: &Method,
+    scheme: &str,
+    authority: &str,
+    path: &str,
+    query: Option<&str>,
+    request_headers: &HeaderMap,
+    vary_names: &[&str],
+    query_config: Option<&RouteQueryConfig>,
+) -> CacheKey {
     let mut vary_headers = vary_names
         .iter()
         .map(|name| {
@@ -358,9 +546,18 @@ pub fn build_cache_key(
         scheme: scheme.to_string(),
         authority: authority.to_string(),
         path: path.to_string(),
-        normalized_query: query.map(normalize_query).unwrap_or_default(),
+        normalized_query: query
+            .map(|query| normalize_query_with_config(query, query_config))
+            .unwrap_or_default(),
         vary_headers,
     }
+}
+
+pub fn matching_route_hint<'a>(
+    route_id: &RouteId,
+    hints: &'a [RouteHintConfig],
+) -> Option<&'a RouteHintConfig> {
+    hints.iter().find(|hint| hint.matches(route_id))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +625,21 @@ pub enum DecisionReason {
     PolicyError,
     StoreError,
     ReusableAndFresh,
+    ConditionalRevalidationRequired,
+    RevalidationNotModified,
+    RevalidationModified,
+    RevalidationFailed,
+    NoValidatorAvailable,
+    NoCacheRequiresRevalidation,
+    StaleIfErrorAllowed,
+    StaleIfErrorNotAllowed,
+    StaleTooOld,
+    RouteHintApplied,
+    RouteHintRejected,
+    QueryHintApplied,
+    QueryHintRejected,
+    DiskStoreUnavailable,
+    DiskStoreCorruptEntry,
 }
 
 impl DecisionReason {
@@ -460,8 +672,53 @@ impl DecisionReason {
             Self::PolicyError => "A policy error caused kubio to pass through to origin.",
             Self::StoreError => "A cache store error caused kubio to pass through to origin.",
             Self::ReusableAndFresh => "A verified fresh response was available.",
+            Self::ConditionalRevalidationRequired => {
+                "The cached response is stale and requires origin revalidation."
+            }
+            Self::RevalidationNotModified => {
+                "The origin confirmed the stored response is still current."
+            }
+            Self::RevalidationModified => "The origin returned new content during revalidation.",
+            Self::RevalidationFailed => "Revalidation failed, so kubio used the safe fallback.",
+            Self::NoValidatorAvailable => {
+                "The cached response does not have an ETag or Last-Modified validator."
+            }
+            Self::NoCacheRequiresRevalidation => {
+                "The origin allows storage but requires revalidation before reuse."
+            }
+            Self::StaleIfErrorAllowed => {
+                "A verified stale response was allowed during an origin error."
+            }
+            Self::StaleIfErrorNotAllowed => "Stale reuse is not allowed for this route.",
+            Self::StaleTooOld => "The stored response is older than the allowed stale window.",
+            Self::RouteHintApplied => "A route policy hint was applied.",
+            Self::RouteHintRejected => "A route policy hint was rejected by a safety rule.",
+            Self::QueryHintApplied => "A configured query key hint was applied.",
+            Self::QueryHintRejected => "A configured query key hint was rejected.",
+            Self::DiskStoreUnavailable => "The disk store was unavailable.",
+            Self::DiskStoreCorruptEntry => "A corrupt disk cache entry was skipped.",
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Validators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+impl Validators {
+    pub fn available(&self) -> bool {
+        self.etag.is_some() || self.last_modified.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredCacheControl {
+    pub max_age: Option<Duration>,
+    pub stale_if_error: Option<Duration>,
+    pub no_cache: bool,
+    pub must_revalidate: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -591,6 +848,10 @@ pub fn normalize_path_template(path: &str) -> String {
 }
 
 pub fn normalize_query(query: &str) -> String {
+    normalize_query_with_config(query, None)
+}
+
+pub fn normalize_query_with_config(query: &str, query_config: Option<&RouteQueryConfig>) -> String {
     if query.is_empty() {
         return String::new();
     }
@@ -599,6 +860,10 @@ pub fn normalize_query(query: &str) -> String {
         .enumerate()
         .map(|(index, (name, value))| (index, name.into_owned(), value.into_owned()))
         .collect::<Vec<_>>();
+
+    if let Some(config) = query_config {
+        pairs.retain(|(_, name, _)| query_param_allowed(name, config));
+    }
 
     pairs.sort_by(|left, right| match left.1.cmp(&right.1) {
         std::cmp::Ordering::Equal => left.0.cmp(&right.0),
@@ -610,6 +875,47 @@ pub fn normalize_query(query: &str) -> String {
         serializer.append_pair(&name, &value);
     }
     serializer.finish()
+}
+
+fn query_param_allowed(name: &str, config: &RouteQueryConfig) -> bool {
+    if config
+        .ignore
+        .iter()
+        .any(|pattern| query_pattern_matches(pattern, name))
+    {
+        return false;
+    }
+    if !config.include.is_empty() {
+        return config
+            .include
+            .iter()
+            .any(|pattern| query_pattern_matches(pattern, name));
+    }
+    true
+}
+
+pub fn query_pattern_matches(pattern: &str, name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else {
+        pattern == name
+    }
+}
+
+pub fn is_sensitive_query_param(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "token"
+            | "access_token"
+            | "auth"
+            | "authorization"
+            | "session"
+            | "password"
+            | "secret"
+            | "key"
+            | "signature"
+            | "sig"
+    )
 }
 
 pub fn is_id_like_segment(segment: &str) -> bool {
@@ -771,6 +1077,27 @@ pub fn parse_size(value: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("size `{value}` is too large"))
 }
 
+pub fn parse_duration(value: &str) -> Result<Duration, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+    let split_at = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let number = trimmed[..split_at]
+        .parse::<u64>()
+        .map_err(|_| format!("invalid duration `{value}`"))?;
+    let unit = trimmed[split_at..].trim().to_ascii_lowercase();
+    match unit.as_str() {
+        "" | "s" | "sec" | "secs" | "second" | "seconds" => Ok(Duration::from_secs(number)),
+        "ms" | "millisecond" | "milliseconds" => Ok(Duration::from_millis(number)),
+        "m" | "min" | "mins" | "minute" | "minutes" => Ok(Duration::from_secs(number * 60)),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Ok(Duration::from_secs(number * 60 * 60)),
+        _ => Err(format!("unsupported duration unit `{unit}`")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +1126,19 @@ mod tests {
     }
 
     #[test]
+    fn query_normalization_applies_route_query_config() {
+        let config = RouteQueryConfig {
+            include: Vec::new(),
+            ignore: vec!["utm_*".to_string(), "gclid".to_string()],
+        };
+
+        assert_eq!(
+            normalize_query_with_config("b=2&utm_source=x&a=1&gclid=y", Some(&config)),
+            "a=1&b=2"
+        );
+    }
+
+    #[test]
     fn volatile_headers_are_excluded_from_hash() {
         let mut first = HeaderMap::new();
         first.insert("date", "today".parse().unwrap());
@@ -815,6 +1155,13 @@ mod tests {
     fn size_parser_supports_binary_units() {
         assert_eq!(parse_size("1MiB").unwrap(), 1024 * 1024);
         assert_eq!(parse_size("256 kb").unwrap(), 256 * 1024);
+    }
+
+    #[test]
+    fn duration_parser_supports_common_units() {
+        assert_eq!(parse_duration("5s").unwrap(), Duration::from_secs(5));
+        assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
+        assert_eq!(parse_duration("100ms").unwrap(), Duration::from_millis(100));
     }
 
     proptest! {

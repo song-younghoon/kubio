@@ -184,6 +184,117 @@ impl Observer {
         self.record(record);
     }
 
+    pub fn record_revalidation(
+        &self,
+        route_id: RouteId,
+        cache_key_hash: Option<CacheKeyHash>,
+        outcome: RevalidationOutcome,
+    ) {
+        let mut inner = self.inner.lock();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.revalidation_attempts += 1;
+        let (event_type, reason, message) = match outcome {
+            RevalidationOutcome::NotModified => {
+                route.revalidation_not_modified += 1;
+                (
+                    EventType::ResponseRevalidatedNotModified,
+                    DecisionReason::RevalidationNotModified,
+                    "origin confirmed the stored response is still current",
+                )
+            }
+            RevalidationOutcome::Modified => {
+                route.revalidation_modified += 1;
+                (
+                    EventType::ResponseRevalidatedModified,
+                    DecisionReason::RevalidationModified,
+                    "origin returned new content during revalidation",
+                )
+            }
+            RevalidationOutcome::Failed => {
+                route.revalidation_failed += 1;
+                (
+                    EventType::ResponseRevalidationFailed,
+                    DecisionReason::RevalidationFailed,
+                    "origin revalidation failed",
+                )
+            }
+            RevalidationOutcome::Skipped => (
+                EventType::ResponseRevalidationFailed,
+                DecisionReason::NoValidatorAvailable,
+                "revalidation skipped because no validator was available",
+            ),
+        };
+        self.push_event_locked(
+            &mut inner,
+            event_type,
+            Some(route_id),
+            cache_key_hash,
+            vec![reason],
+            message,
+        );
+    }
+
+    pub fn record_stale(
+        &self,
+        route_id: RouteId,
+        cache_key_hash: Option<CacheKeyHash>,
+        served: bool,
+        reason: DecisionReason,
+    ) {
+        let mut inner = self.inner.lock();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        if served {
+            route.stale_served += 1;
+        } else {
+            route.stale_denied += 1;
+        }
+        self.push_event_locked(
+            &mut inner,
+            if served {
+                EventType::StaleResponseServed
+            } else {
+                EventType::StaleResponseDenied
+            },
+            Some(route_id),
+            cache_key_hash,
+            vec![reason],
+            if served {
+                "served a verified stale response during an origin error"
+            } else {
+                "stale response was not allowed"
+            },
+        );
+    }
+
+    pub fn record_query_params(&self, route_id: RouteId, params: Vec<QueryParamRecord>) {
+        if params.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.lock();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id));
+        for param in params {
+            let stats = route
+                .query_params
+                .entry(param.name.clone())
+                .or_insert_with(|| QueryParamStats {
+                    name: param.name,
+                    seen_count: 0,
+                    configured_action: param.configured_action,
+                    fingerprint_sensitive: false,
+                });
+            stats.seen_count += 1;
+        }
+    }
+
     pub fn route_state(&self, route_id: &RouteId) -> RouteState {
         self.inner
             .lock()
@@ -432,10 +543,17 @@ struct RouteStats {
     bypass_count: u64,
     shadow_matches: u64,
     shadow_mismatches: u64,
+    revalidation_attempts: u64,
+    revalidation_not_modified: u64,
+    revalidation_modified: u64,
+    revalidation_failed: u64,
+    stale_served: u64,
+    stale_denied: u64,
     status_classes: StatusClassCounts,
     latencies: VecDeque<Duration>,
     score: i16,
     reasons: Vec<DecisionReason>,
+    query_params: HashMap<String, QueryParamStats>,
 }
 
 impl RouteStats {
@@ -450,10 +568,17 @@ impl RouteStats {
             bypass_count: 0,
             shadow_matches: 0,
             shadow_mismatches: 0,
+            revalidation_attempts: 0,
+            revalidation_not_modified: 0,
+            revalidation_modified: 0,
+            revalidation_failed: 0,
+            stale_served: 0,
+            stale_denied: 0,
             status_classes: StatusClassCounts::default(),
             latencies: VecDeque::new(),
             score: 0,
             reasons: Vec::new(),
+            query_params: HashMap::new(),
         }
     }
 
@@ -489,6 +614,12 @@ impl RouteStats {
             bypass_count: self.bypass_count,
             shadow_matches: self.shadow_matches,
             shadow_mismatches: self.shadow_mismatches,
+            revalidation_attempts: self.revalidation_attempts,
+            revalidation_not_modified: self.revalidation_not_modified,
+            revalidation_modified: self.revalidation_modified,
+            revalidation_failed: self.revalidation_failed,
+            stale_served: self.stale_served,
+            stale_denied: self.stale_denied,
             status_classes: self.status_classes.clone(),
             latency: latency_snapshot(&self.latencies),
             repeat_rate: self.repeat_rate(),
@@ -505,8 +636,49 @@ impl RouteStats {
                 .iter()
                 .map(|reason| reason.user_message().to_string())
                 .collect(),
+            route_hint: None,
+            query_params: self
+                .query_params
+                .values()
+                .map(QueryParamStats::snapshot)
+                .collect(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct QueryParamStats {
+    name: String,
+    seen_count: u64,
+    configured_action: String,
+    fingerprint_sensitive: bool,
+}
+
+impl QueryParamStats {
+    fn snapshot(&self) -> QueryParamSnapshot {
+        QueryParamSnapshot {
+            name: self.name.clone(),
+            seen_count: self.seen_count,
+            cardinality: "unknown".to_string(),
+            fingerprint_sensitive: self.fingerprint_sensitive,
+            configured_action: self.configured_action.clone(),
+            suggestion: if self.configured_action == "observe"
+                && (self.name.starts_with("utm_")
+                    || matches!(self.name.as_str(), "gclid" | "fbclid"))
+                && self.seen_count >= 2
+            {
+                Some("candidate_ignore".to_string())
+            } else {
+                None
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryParamRecord {
+    pub name: String,
+    pub configured_action: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,6 +719,15 @@ pub struct ObservationOutcome {
     pub promoted_to_auto: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevalidationOutcome {
+    NotModified,
+    Modified,
+    Failed,
+    Skipped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObserverSnapshot {
     pub overview: OverviewSnapshot,
@@ -567,6 +748,12 @@ pub struct OverviewSnapshot {
     pub actual_reuse_rate: f64,
     pub shadow_matches: u64,
     pub shadow_mismatches: u64,
+    pub revalidation_attempts: u64,
+    pub revalidation_not_modified: u64,
+    pub revalidation_modified: u64,
+    pub revalidation_failed: u64,
+    pub stale_responses_served: u64,
+    pub stale_responses_denied: u64,
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
 }
@@ -583,6 +770,12 @@ impl OverviewSnapshot {
             overview.bypassed_requests += route.bypass_count;
             overview.shadow_matches += route.shadow_matches;
             overview.shadow_mismatches += route.shadow_mismatches;
+            overview.revalidation_attempts += route.revalidation_attempts;
+            overview.revalidation_not_modified += route.revalidation_not_modified;
+            overview.revalidation_modified += route.revalidation_modified;
+            overview.revalidation_failed += route.revalidation_failed;
+            overview.stale_responses_served += route.stale_served;
+            overview.stale_responses_denied += route.stale_denied;
             if route.state == RouteState::Candidate || route.state == RouteState::ShadowValidated {
                 overview.candidate_routes += 1;
             }
@@ -622,6 +815,12 @@ pub struct RouteSnapshot {
     pub bypass_count: u64,
     pub shadow_matches: u64,
     pub shadow_mismatches: u64,
+    pub revalidation_attempts: u64,
+    pub revalidation_not_modified: u64,
+    pub revalidation_modified: u64,
+    pub revalidation_failed: u64,
+    pub stale_served: u64,
+    pub stale_denied: u64,
     pub status_classes: StatusClassCounts,
     pub latency: LatencySnapshot,
     pub repeat_rate: f64,
@@ -630,6 +829,18 @@ pub struct RouteSnapshot {
     pub score: i16,
     pub reasons: Vec<DecisionReason>,
     pub explanation: Vec<String>,
+    pub route_hint: Option<String>,
+    pub query_params: Vec<QueryParamSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryParamSnapshot {
+    pub name: String,
+    pub seen_count: u64,
+    pub cardinality: String,
+    pub fingerprint_sensitive: bool,
+    pub configured_action: String,
+    pub suggestion: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -659,6 +870,19 @@ pub enum EventType {
     PanicSwitchEnabled,
     PanicSwitchDisabled,
     RouteLimitReached,
+    ResponseRevalidatedNotModified,
+    ResponseRevalidatedModified,
+    ResponseRevalidationFailed,
+    StaleResponseServed,
+    StaleResponseDenied,
+    RouteHintApplied,
+    RouteHintRejected,
+    QueryHintApplied,
+    QueryHintRejected,
+    QueryParamSuggestionCreated,
+    DiskStoreOpened,
+    DiskStoreCorruptEntrySkipped,
+    DiskStoreErrorFailOpen,
 }
 
 fn state_sort_key(state: RouteState) -> u8 {

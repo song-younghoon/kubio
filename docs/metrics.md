@@ -20,6 +20,10 @@ Required metrics include:
 - `kubio_cache_entries`
 - `kubio_cache_bytes`
 - `kubio_cache_evictions_total`
+- `kubio_revalidation_attempts_total`
+- `kubio_revalidation_outcomes_total`
+- `kubio_stale_responses_served_total`
+- `kubio_stale_responses_denied_total`
 - `kubio_request_duration_seconds`
 - `kubio_origin_duration_seconds`
 - `kubio_policy_decisions_total`

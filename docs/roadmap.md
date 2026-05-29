@@ -10,7 +10,7 @@ v0.1.0:
 - Conservative safety policy.
 - Release notes draft: `docs/release-notes-v0.1.0.md`.
 
-v0.2.0 design target:
+v0.2.0:
 
 - Conditional revalidation with ETag and Last-Modified.
 - `Cache-Control: no-cache` as store-with-revalidation when safe.
@@ -19,7 +19,7 @@ v0.2.0 design target:
 - Query parameter intelligence and opt-in query key hints.
 - Process-local disk store.
 - Dashboard, metrics, CLI, and docs for revalidation, stale, query, hint, and disk-store decisions.
-- Design draft: `.design/v0.2.0`.
+- Release notes draft: `docs/release-notes-v0.2.0.md`.
 
 v0.3+ candidates:
 

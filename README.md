@@ -57,7 +57,8 @@ kubio protects:
 - Requests with `Cookie`.
 - Unsafe methods such as POST, PUT, PATCH, and DELETE.
 - Responses with `Set-Cookie`.
-- Responses with `Cache-Control: no-store`, `private`, or `no-cache`.
+- Responses with `Cache-Control: no-store` or `private`.
+- Responses with `Cache-Control: no-cache` unless they can be revalidated with `ETag` or `Last-Modified`.
 - Responses with `Vary: *` or unsupported `Vary` headers.
 - Sensitive-looking routes such as `/me`, `/account`, `/login`, and `/admin`.
 
@@ -67,17 +68,19 @@ Configure `--panic-file /path/to/file` to immediately disable reuse while keepin
 
 ## Project Status
 
-This repository is at v0.1.0 implementation stage. v0.1.0 is local-first and process-local:
+This repository is at v0.2.0 implementation stage. v0.2.0 is local-first and process-local:
 
 - HTTP/1.1 reverse proxy.
 - Local dashboard.
 - Prometheus-style metrics.
 - Configurable metrics path.
-- In-memory observation and cache store.
+- In-memory observation store.
+- In-memory or process-local disk cache store.
+- Conditional revalidation with `ETag` and `Last-Modified`.
+- Bounded stale-if-error when origin headers or route policy explicitly allow it.
+- Route policy hints and query key hints.
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
-
-v0.2.0 is in design draft. The target adds conditional revalidation, bounded stale-if-error, route policy hints, query parameter intelligence, and an optional disk store while preserving v0.1.0 hard safety denies.
 
 See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), and [docs/safety-model.md](docs/safety-model.md).

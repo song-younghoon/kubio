@@ -3,7 +3,7 @@
 use http::{header, HeaderMap, Method, StatusCode};
 use kubio_core::{
     sensitive_path_score, Decision, DecisionReason, EffectiveConfig, FreshnessProfile, Mode,
-    PolicyConfig, RouteState,
+    PolicyConfig, RouteHintConfig, RouteState, StoredCacheControl, Validators,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -28,6 +28,11 @@ impl PolicyEngine {
 
     pub fn freshness_ttl(&self) -> Duration {
         self.freshness.ttl()
+    }
+
+    pub fn freshness_ttl_for_route(&self, hint: Option<&RouteHintConfig>) -> Duration {
+        hint.and_then(|hint| hint.freshness.ttl)
+            .unwrap_or_else(|| self.freshness_ttl())
     }
 
     pub fn request_signals(
@@ -140,6 +145,9 @@ impl PolicyEngine {
         if !response.status_cacheable {
             reasons.push(DecisionReason::StatusNotCacheable);
         }
+        if response.cache_control == CacheControlClass::NoCache {
+            reasons.push(DecisionReason::NoCacheRequiresRevalidation);
+        }
         if body_len as u64 > self.config.max_object_size {
             reasons.push(DecisionReason::ObjectTooLarge);
         }
@@ -153,7 +161,6 @@ impl PolicyEngine {
                 DecisionReason::HasSetCookie
                     | DecisionReason::CacheControlNoStore
                     | DecisionReason::CacheControlPrivate
-                    | DecisionReason::CacheControlNoCache
                     | DecisionReason::VaryUnsupported
                     | DecisionReason::VaryWildcard
                     | DecisionReason::StatusNotCacheable
@@ -210,7 +217,7 @@ impl PolicyEngine {
         match response.cache_control {
             CacheControlClass::NoStore => reasons.push(DecisionReason::CacheControlNoStore),
             CacheControlClass::Private => reasons.push(DecisionReason::CacheControlPrivate),
-            CacheControlClass::NoCache => reasons.push(DecisionReason::CacheControlNoCache),
+            CacheControlClass::NoCache => {}
             CacheControlClass::Absent | CacheControlClass::Public | CacheControlClass::Other => {}
         }
         match &response.vary {
@@ -232,6 +239,47 @@ impl PolicyEngine {
 
     pub fn response_is_store_safe(&self, response: &ResponseSignals) -> bool {
         response.status_cacheable && self.response_hard_deny_reasons(response).is_empty()
+    }
+
+    pub fn validators(&self, headers: &HeaderMap) -> Validators {
+        Validators {
+            etag: bounded_header_value(
+                headers,
+                header::ETAG.as_str(),
+                self.config.revalidation.max_validator_length,
+            ),
+            last_modified: bounded_header_value(
+                headers,
+                header::LAST_MODIFIED.as_str(),
+                self.config.revalidation.max_validator_length,
+            ),
+        }
+    }
+
+    pub fn stored_cache_control(&self, headers: &HeaderMap) -> StoredCacheControl {
+        let Some(value) = headers.get(header::CACHE_CONTROL) else {
+            return StoredCacheControl::default();
+        };
+        let Ok(value) = value.to_str() else {
+            return StoredCacheControl::default();
+        };
+
+        let mut parsed = StoredCacheControl::default();
+        for part in value.split(',') {
+            let trimmed = part.trim();
+            let (name, value) = trimmed
+                .split_once('=')
+                .map(|(name, value)| (name.trim().to_ascii_lowercase(), Some(value.trim())))
+                .unwrap_or_else(|| (trimmed.to_ascii_lowercase(), None));
+            match name.as_str() {
+                "max-age" => parsed.max_age = value.and_then(parse_delta_seconds),
+                "stale-if-error" => parsed.stale_if_error = value.and_then(parse_delta_seconds),
+                "no-cache" => parsed.no_cache = true,
+                "must-revalidate" => parsed.must_revalidate = true,
+                _ => {}
+            }
+        }
+        parsed
     }
 
     pub fn score(
@@ -302,6 +350,23 @@ fn observe_reasons(mut reasons: Vec<DecisionReason>) -> Vec<DecisionReason> {
         reasons.push(DecisionReason::InsufficientShadowValidations);
     }
     reasons
+}
+
+fn bounded_header_value(headers: &HeaderMap, name: &str, max_len: usize) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= max_len)
+        .map(ToOwned::to_owned)
+}
+
+fn parse_delta_seconds(value: &str) -> Option<Duration> {
+    value
+        .trim_matches('"')
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

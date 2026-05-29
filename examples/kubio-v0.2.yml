@@ -1,0 +1,40 @@
+version: 1
+
+server:
+  listen: "0.0.0.0:8080"
+  origin_timeout_ms: 30000
+
+origin: "http://localhost:3000"
+mode: "auto"
+freshness: "balanced"
+
+policy:
+  revalidation:
+    enabled: true
+    prefer_etag: true
+    max_validator_length: 1024
+  stale_if_error:
+    mode: "origin"
+    max_stale: "5m"
+  query_intelligence:
+    enabled: true
+    auto_ignore: false
+
+storage:
+  kind: "disk"
+  path: ".kubio/cache"
+  max_size: "1GiB"
+  max_object_size: "2MiB"
+
+routes:
+  - name: "public products"
+    match:
+      method: GET
+      path: "/api/products"
+    freshness:
+      ttl: "60s"
+    query:
+      ignore: ["utm_*", "gclid", "fbclid"]
+    stale_if_error:
+      enabled: true
+      max_stale: "5m"

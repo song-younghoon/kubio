@@ -1,6 +1,6 @@
 # kubio v0.2.0 Design Index
 
-Status: design draft
+Status: implemented baseline
 Source: v0.1.0 implementation baseline and `docs/roadmap.md`
 Target release: `v0.2.0`
 

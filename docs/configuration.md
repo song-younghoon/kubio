@@ -25,6 +25,8 @@ Important defaults:
 - Storage: in-memory
 - Max cache size: `256MiB`
 - Max object size: `1MiB`
+- Revalidation: enabled
+- Stale-if-error: origin-controlled
 
 Server settings:
 
@@ -45,3 +47,43 @@ observability:
 ```
 
 `metrics_path` must be an absolute dashboard path such as `/metrics` or `/internal/metrics`.
+
+v0.2.0 policy settings:
+
+```yaml
+policy:
+  revalidation:
+    enabled: true
+    prefer_etag: true
+    max_validator_length: 1024
+  stale_if_error:
+    mode: "origin"
+    max_stale: "5m"
+  query_intelligence:
+    enabled: true
+    auto_ignore: false
+```
+
+Disk store:
+
+```yaml
+storage:
+  kind: "disk"
+  path: ".kubio/cache"
+  max_size: "1GiB"
+  max_object_size: "2MiB"
+```
+
+Route hints:
+
+```yaml
+routes:
+  - match:
+      method: GET
+      path: "/api/products"
+    query:
+      ignore: ["utm_*", "gclid"]
+    stale_if_error:
+      enabled: true
+      max_stale: "5m"
+```

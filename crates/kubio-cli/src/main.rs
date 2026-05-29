@@ -1,14 +1,16 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use kubio_core::{
-    parse_size, DashboardConfig, EffectiveConfig, FreshnessProfile, Mode, ObservabilityConfig,
-    PolicyConfig, RouteId, StorageConfig,
+    parse_duration, parse_size, DashboardConfig, EffectiveConfig, FreshnessProfile, Mode,
+    ObservabilityConfig, PolicyConfig, RouteFreshnessConfig, RouteHintConfig, RouteId,
+    RouteMatchConfig, RouteQueryConfig, RouteSafetyConfig, RouteStaleIfErrorConfig,
+    RouteVaryConfig, StorageConfig,
 };
 use kubio_dashboard::{run_dashboard, DashboardState};
 use kubio_observe::{Observer, RouteSnapshot};
 use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
-use kubio_store::{MemoryStore, PurgeResult, PurgeSelector};
+use kubio_store::{CacheStore, DiskStore, MemoryStore, PurgeResult, PurgeSelector};
 use kubio_telemetry::init_tracing;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
@@ -118,7 +120,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
         config.policy.min_key_repeats,
         config.policy.min_shadow_validations,
     ));
-    let store = Arc::new(MemoryStore::new(&config.storage));
+    let store: Arc<dyn CacheStore> = match config.storage.kind.as_str() {
+        "memory" => Arc::new(MemoryStore::new(&config.storage)),
+        "disk" => Arc::new(DiskStore::open(&config.storage)?),
+        _ => unreachable!("storage kind validated before startup"),
+    };
     let policy = Arc::new(PolicyEngine::new(&config));
 
     print_startup(&config);
@@ -179,13 +185,15 @@ async fn routes(args: AdminArgs) -> Result<()> {
     }
     for route in snapshot.routes {
         println!(
-            "{}\t{}\trequests={}\torigin={}\treused={}\tprotected={}",
+            "{}\t{}\trequests={}\torigin={}\treused={}\tprotected={}\trevalidated={}\tstale={}",
             route.route_id.as_label(),
             route.state,
             route.request_count,
             route.origin_count,
             route.reuse_count,
-            route.protected_count
+            route.protected_count,
+            route.revalidation_attempts,
+            route.stale_served
         );
     }
     Ok(())
@@ -213,12 +221,14 @@ async fn explain(args: ExplainArgs) -> Result<()> {
         }
     }
     println!(
-        "\nRequests: {}\nOrigin: {}\nReused: {}\nShadow matches: {}\nShadow mismatches: {}",
+        "\nRequests: {}\nOrigin: {}\nReused: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}",
         route.request_count,
         route.origin_count,
         route.reuse_count,
         route.shadow_matches,
-        route.shadow_mismatches
+        route.shadow_mismatches,
+        route.revalidation_attempts,
+        route.stale_served
     );
     Ok(())
 }
@@ -288,6 +298,11 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
             .unwrap_or(false);
         checks.push(("metrics endpoint", metrics_ok));
     }
+    let store_api_ok = reqwest::get(dashboard_url(dashboard, "/api/store"))
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false);
+    checks.push(("store api", store_api_ok));
 
     if let Some(panic_file) = file_config
         .as_ref()
@@ -364,6 +379,7 @@ fn print_startup(config: &EffectiveConfig) {
     if config.dashboard.enabled {
         println!("\nDashboard: http://{}", config.dashboard.listen);
     }
+    println!("Store: {}", config.storage.kind);
 }
 
 async fn shutdown_signal() {
@@ -505,6 +521,12 @@ fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<(
                 parse_size(&max_object_size).map_err(anyhow::Error::msg)?;
             config.policy.max_object_size = config.storage.max_object_size;
         }
+        if let Some(path) = storage.path {
+            config.storage.path = Some(PathBuf::from(path));
+        }
+        if let Some(sync) = storage.sync {
+            config.storage.sync = sync;
+        }
     }
     if let Some(observability) = file.observability {
         if let Some(metrics) = observability.metrics {
@@ -525,6 +547,12 @@ fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<(
     }
     if let Some(admin_token) = file.admin_token {
         config.admin_token = Some(admin_token);
+    }
+    if let Some(routes) = file.routes {
+        config.routes = routes
+            .into_iter()
+            .map(RouteHintConfig::try_from)
+            .collect::<Result<Vec<_>>>()?;
     }
     Ok(())
 }
@@ -560,6 +588,34 @@ fn apply_policy_config(config: &mut PolicyConfig, policy: FilePolicyConfig) -> R
     if let Some(value) = policy.max_shadow_mismatch_rate {
         config.max_shadow_mismatch_rate = value;
     }
+    if let Some(revalidation) = policy.revalidation {
+        if let Some(enabled) = revalidation.enabled {
+            config.revalidation.enabled = enabled;
+        }
+        if let Some(prefer_etag) = revalidation.prefer_etag {
+            config.revalidation.prefer_etag = prefer_etag;
+        }
+        if let Some(max_validator_length) = revalidation.max_validator_length {
+            config.revalidation.max_validator_length = max_validator_length;
+        }
+    }
+    if let Some(stale_if_error) = policy.stale_if_error {
+        if let Some(mode) = stale_if_error.mode {
+            config.stale_if_error.mode = mode.parse().map_err(anyhow::Error::msg)?;
+        }
+        if let Some(max_stale) = stale_if_error.max_stale {
+            config.stale_if_error.max_stale =
+                parse_duration(&max_stale).map_err(anyhow::Error::msg)?;
+        }
+    }
+    if let Some(query_intelligence) = policy.query_intelligence {
+        if let Some(enabled) = query_intelligence.enabled {
+            config.query_intelligence.enabled = enabled;
+        }
+        if let Some(auto_ignore) = query_intelligence.auto_ignore {
+            config.query_intelligence.auto_ignore = auto_ignore;
+        }
+    }
     Ok(())
 }
 
@@ -567,8 +623,8 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     if config.origin.scheme() != "http" && config.origin.scheme() != "https" {
         bail!("origin must use http or https");
     }
-    if config.storage.kind != "memory" {
-        bail!("v0.1.0 only supports memory storage");
+    if config.storage.kind != "memory" && config.storage.kind != "disk" {
+        bail!("storage.kind must be memory or disk");
     }
     if config.server.origin_timeout.is_zero() {
         bail!("server.origin_timeout_ms must be greater than zero");
@@ -602,6 +658,13 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     {
         bail!("policy.max_shadow_mismatch_rate must be between 0 and 1");
     }
+    if config.policy.revalidation.max_validator_length == 0 {
+        bail!("policy.revalidation.max_validator_length must be greater than zero");
+    }
+    if config.policy.stale_if_error.max_stale.is_zero() {
+        bail!("policy.stale_if_error.max_stale must be greater than zero");
+    }
+    validate_route_hints(&config.routes)?;
     if !valid_dashboard_path(&config.observability.metrics_path) {
         bail!("observability.metrics_path must be an absolute dashboard path");
     }
@@ -624,6 +687,41 @@ fn valid_dashboard_path(path: &str) -> bool {
         && !path.contains('}')
         && !path.contains('*')
         && !path.chars().any(char::is_control)
+}
+
+fn validate_route_hints(routes: &[RouteHintConfig]) -> Result<()> {
+    for route in routes {
+        if route.route_match.method.trim().is_empty() {
+            bail!("routes[].match.method must not be empty");
+        }
+        if !route.route_match.path.starts_with('/') {
+            bail!("routes[].match.path must be absolute");
+        }
+        for include in &route.query.include {
+            if route.query.ignore.iter().any(|ignore| ignore == include) {
+                bail!("query parameter `{include}` cannot appear in both include and ignore lists");
+            }
+        }
+        for pattern in route.query.ignore.iter().chain(route.query.include.iter()) {
+            if pattern.is_empty() {
+                bail!("query hint patterns must not be empty");
+            }
+            if pattern.matches('*').count() > 1
+                || (pattern.contains('*') && !pattern.ends_with('*'))
+            {
+                bail!("query hint glob patterns only support a trailing *");
+            }
+        }
+        if route
+            .stale_if_error
+            .max_stale
+            .map(|duration| duration.is_zero())
+            .unwrap_or(false)
+        {
+            bail!("routes[].stale_if_error.max_stale must be greater than zero");
+        }
+    }
+    Ok(())
 }
 
 fn parse_route_id(value: &str) -> Option<RouteId> {
@@ -662,6 +760,7 @@ struct FileConfig {
     policy: Option<FilePolicyConfig>,
     storage: Option<FileStorageConfig>,
     observability: Option<FileObservabilityConfig>,
+    routes: Option<Vec<FileRouteHintConfig>>,
     debug_headers: Option<bool>,
     panic_file: Option<String>,
     admin_token: Option<String>,
@@ -693,6 +792,28 @@ struct FilePolicyConfig {
     min_key_repeats: Option<u64>,
     min_shadow_validations: Option<u64>,
     max_shadow_mismatch_rate: Option<f64>,
+    revalidation: Option<FileRevalidationConfig>,
+    stale_if_error: Option<FileStaleIfErrorConfig>,
+    query_intelligence: Option<FileQueryIntelligenceConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileRevalidationConfig {
+    enabled: Option<bool>,
+    prefer_etag: Option<bool>,
+    max_validator_length: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileStaleIfErrorConfig {
+    mode: Option<String>,
+    max_stale: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileQueryIntelligenceConfig {
+    enabled: Option<bool>,
+    auto_ignore: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -700,6 +821,8 @@ struct FileStorageConfig {
     kind: Option<String>,
     max_size: Option<String>,
     max_object_size: Option<String>,
+    path: Option<String>,
+    sync: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -707,6 +830,71 @@ struct FileObservabilityConfig {
     metrics: Option<bool>,
     metrics_path: Option<String>,
     tracing: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileRouteHintConfig {
+    name: Option<String>,
+    #[serde(rename = "match")]
+    route_match: FileRouteMatchConfig,
+    freshness: Option<FileRouteFreshnessConfig>,
+    query: Option<RouteQueryConfig>,
+    vary: Option<RouteVaryConfig>,
+    stale_if_error: Option<FileRouteStaleIfErrorConfig>,
+    safety: Option<RouteSafetyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileRouteMatchConfig {
+    method: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileRouteFreshnessConfig {
+    ttl: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileRouteStaleIfErrorConfig {
+    enabled: Option<bool>,
+    max_stale: Option<String>,
+}
+
+impl TryFrom<FileRouteHintConfig> for RouteHintConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(value: FileRouteHintConfig) -> Result<Self> {
+        let freshness = RouteFreshnessConfig {
+            ttl: value
+                .freshness
+                .and_then(|freshness| freshness.ttl)
+                .map(|ttl| parse_duration(&ttl).map_err(anyhow::Error::msg))
+                .transpose()?,
+        };
+        let stale_if_error = match value.stale_if_error {
+            Some(stale) => RouteStaleIfErrorConfig {
+                enabled: stale.enabled.unwrap_or(false),
+                max_stale: stale
+                    .max_stale
+                    .map(|duration| parse_duration(&duration).map_err(anyhow::Error::msg))
+                    .transpose()?,
+            },
+            None => RouteStaleIfErrorConfig::default(),
+        };
+        Ok(RouteHintConfig {
+            name: value.name,
+            route_match: RouteMatchConfig {
+                method: value.route_match.method,
+                path: value.route_match.path,
+            },
+            freshness,
+            query: value.query.unwrap_or_default(),
+            vary: value.vary.unwrap_or_default(),
+            stale_if_error,
+            safety: value.safety.unwrap_or_default(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

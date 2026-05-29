@@ -2,7 +2,7 @@
 
 use kubio_core::{Decision, StatusClass};
 use kubio_observe::ObserverSnapshot;
-use kubio_store::StoreStats;
+use kubio_store::{StoreKind, StoreStats};
 use tracing_subscriber::EnvFilter;
 
 pub fn init_tracing() {
@@ -107,9 +107,20 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
     );
 
     line(&mut out, "kubio_cache_entries", "Cache entries.", "gauge");
-    metric(&mut out, "kubio_cache_entries", &[], store.entries);
+    let store_kind = store_kind_label(store.kind);
+    metric(
+        &mut out,
+        "kubio_cache_entries",
+        &[("store", store_kind)],
+        store.entries,
+    );
     line(&mut out, "kubio_cache_bytes", "Cache bytes.", "gauge");
-    metric(&mut out, "kubio_cache_bytes", &[], store.bytes);
+    metric(
+        &mut out,
+        "kubio_cache_bytes",
+        &[("store", store_kind)],
+        store.bytes,
+    );
     line(
         &mut out,
         "kubio_cache_evictions_total",
@@ -119,8 +130,69 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
     metric(
         &mut out,
         "kubio_cache_evictions_total",
-        &[],
+        &[("store", store_kind)],
         store.evictions,
+    );
+
+    line(
+        &mut out,
+        "kubio_revalidation_attempts_total",
+        "Total conditional revalidation attempts.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_revalidation_attempts_total",
+        &[],
+        snapshot.overview.revalidation_attempts,
+    );
+    line(
+        &mut out,
+        "kubio_revalidation_outcomes_total",
+        "Conditional revalidation outcomes.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_revalidation_outcomes_total",
+        &[("outcome", "not_modified")],
+        snapshot.overview.revalidation_not_modified,
+    );
+    metric(
+        &mut out,
+        "kubio_revalidation_outcomes_total",
+        &[("outcome", "modified")],
+        snapshot.overview.revalidation_modified,
+    );
+    metric(
+        &mut out,
+        "kubio_revalidation_outcomes_total",
+        &[("outcome", "failed")],
+        snapshot.overview.revalidation_failed,
+    );
+    line(
+        &mut out,
+        "kubio_stale_responses_served_total",
+        "Total stale responses served during origin errors.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_stale_responses_served_total",
+        &[],
+        snapshot.overview.stale_responses_served,
+    );
+    line(
+        &mut out,
+        "kubio_stale_responses_denied_total",
+        "Total stale responses denied.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_stale_responses_denied_total",
+        &[],
+        snapshot.overview.stale_responses_denied,
     );
 
     line(
@@ -230,6 +302,13 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
     }
 
     out
+}
+
+fn store_kind_label(kind: StoreKind) -> &'static str {
+    match kind {
+        StoreKind::Memory => "memory",
+        StoreKind::Disk => "disk",
+    }
 }
 
 pub fn sanitize_label(value: &str) -> String {
@@ -343,6 +422,12 @@ mod tests {
                 bypass_count: 0,
                 shadow_matches: 0,
                 shadow_mismatches: 0,
+                revalidation_attempts: 0,
+                revalidation_not_modified: 0,
+                revalidation_modified: 0,
+                revalidation_failed: 0,
+                stale_served: 0,
+                stale_denied: 0,
                 status_classes: StatusClassCounts::default(),
                 latency: LatencySnapshot {
                     p50_ms: 1.0,
@@ -361,6 +446,8 @@ mod tests {
                 score: 0,
                 reasons: vec![],
                 explanation: vec![],
+                route_hint: None,
+                query_params: vec![],
             }],
             events: vec![],
         };
@@ -372,6 +459,10 @@ mod tests {
                 evictions: 0,
                 max_size: 1,
                 max_object_size: 1,
+                kind: StoreKind::Memory,
+                disk_path: None,
+                startup_recovered_entries: None,
+                corrupt_entries_skipped: None,
             },
         );
 

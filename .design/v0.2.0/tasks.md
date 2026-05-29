@@ -1,6 +1,6 @@
 # v0.2.0 Implementation Tasks
 
-Status: design draft
+Status: implementation baseline complete; release packaging follow-up remains
 Target release: `v0.2.0`
 
 Task states:
@@ -21,7 +21,7 @@ v0.1.0 baseline exists:
 - Local dashboard, JSON APIs, metrics, admin purge, doctor.
 - Release workflow and safety tests.
 
-v0.2.0 starts from that baseline and should keep it working after every milestone.
+v0.2.0 implementation baseline now includes conditional revalidation, `no-cache` with validators, bounded stale-if-error, route/query hints, disk store, dashboard/API/CLI/metrics updates, examples, docs, and targeted regression tests. Release artifact smoke automation remains a follow-up.
 
 ## M0: Design and Schema Preparation
 

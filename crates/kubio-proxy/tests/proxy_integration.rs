@@ -1,10 +1,13 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::Request;
+use axum::http::{HeaderMap, Request};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
-use kubio_core::{DecisionReason, EffectiveConfig, Mode, RouteState};
+use kubio_core::{
+    DecisionReason, EffectiveConfig, Mode, RouteHintConfig, RouteMatchConfig, RouteQueryConfig,
+    RouteState,
+};
 use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
@@ -354,6 +357,116 @@ async fn panic_switch_stops_and_restores_reuse() {
     origin.shutdown().await;
 }
 
+#[tokio::test]
+async fn stale_etag_entry_revalidates_with_304() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..3 {
+        let body = reqwest::get(format!("{}/etag", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "etag-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.revalidation_not_modified, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn no_cache_with_validator_revalidates_before_reuse() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..3 {
+        let body = reqwest::get(format!("{}/nocache-etag", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "nocache-etag-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.revalidation_not_modified, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn stale_if_error_serves_verified_stale_response() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..3 {
+        let body = reqwest::get(format!("{}/stale-error", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "stale-error-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.stale_responses_served, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn route_query_hint_ignores_configured_parameters() {
+    let origin = TestOrigin::start().await;
+    let hint = RouteHintConfig {
+        name: Some("query test".to_string()),
+        route_match: RouteMatchConfig {
+            method: "GET".to_string(),
+            path: "/query".to_string(),
+        },
+        query: RouteQueryConfig {
+            include: Vec::new(),
+            ignore: vec!["utm_*".to_string()],
+        },
+        ..route_hint_defaults("GET", "/query")
+    };
+    let runtime =
+        TestRuntime::start_with_routes(origin.url(), Mode::Auto, 2, 2, 1, vec![hint]).await;
+
+    for suffix in ["?utm_source=a", "?utm_source=b", "?utm_source=c"] {
+        let body = reqwest::get(format!("{}/query{}", runtime.proxy_url(), suffix))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "query");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    let query_route = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /query")
+        .unwrap();
+    assert!(query_route
+        .query_params
+        .iter()
+        .any(|param| param.name == "utm_source" && param.configured_action == "ignore"));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
 struct TestOrigin {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
@@ -372,6 +485,10 @@ impl TestOrigin {
             .route("/nostore", get(no_store))
             .route("/private", get(private))
             .route("/nocache", get(no_cache))
+            .route("/nocache-etag", get(no_cache_etag))
+            .route("/etag", get(etag))
+            .route("/stale-error", get(stale_error))
+            .route("/query", get(|| async { "query" }))
             .route("/vary-star", get(vary_star))
             .route("/unstable", get(unstable))
             .route("/slow", get(slow))
@@ -421,6 +538,57 @@ async fn private() -> impl IntoResponse {
 
 async fn no_cache() -> impl IntoResponse {
     ([("cache-control", "no-cache")], "no-cache")
+}
+
+async fn no_cache_etag(headers: HeaderMap) -> impl IntoResponse {
+    if headers.contains_key("if-none-match") {
+        (
+            axum::http::StatusCode::NOT_MODIFIED,
+            [("etag", "\"nocache-v1\""), ("cache-control", "no-cache")],
+            "",
+        )
+    } else {
+        (
+            axum::http::StatusCode::OK,
+            [("etag", "\"nocache-v1\""), ("cache-control", "no-cache")],
+            "nocache-etag-body",
+        )
+    }
+}
+
+async fn etag(headers: HeaderMap) -> impl IntoResponse {
+    if headers.contains_key("if-none-match") {
+        (
+            axum::http::StatusCode::NOT_MODIFIED,
+            [("etag", "\"etag-v1\""), ("cache-control", "max-age=0")],
+            "",
+        )
+    } else {
+        (
+            axum::http::StatusCode::OK,
+            [("etag", "\"etag-v1\""), ("cache-control", "max-age=0")],
+            "etag-body",
+        )
+    }
+}
+
+async fn stale_error(headers: HeaderMap) -> impl IntoResponse {
+    if headers.contains_key("if-none-match") {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            [("etag", "\"stale-v1\""), ("cache-control", "max-age=0")],
+            "origin-error",
+        )
+    } else {
+        (
+            axum::http::StatusCode::OK,
+            [
+                ("etag", "\"stale-v1\""),
+                ("cache-control", "max-age=0, stale-if-error=60"),
+            ],
+            "stale-error-body",
+        )
+    }
 }
 
 async fn vary_star() -> impl IntoResponse {
@@ -491,6 +659,27 @@ impl TestRuntime {
         Self::start_with_options(origin, mode, 100, 5, 20, None, Some(origin_timeout)).await
     }
 
+    async fn start_with_routes(
+        origin: Url,
+        mode: Mode,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        routes: Vec<RouteHintConfig>,
+    ) -> Self {
+        Self::start_with_options_and_routes(
+            origin,
+            mode,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            None,
+            None,
+            routes,
+        )
+        .await
+    }
+
     async fn start_with_options(
         origin: Url,
         mode: Mode,
@@ -499,6 +688,30 @@ impl TestRuntime {
         min_shadow_validations: u64,
         panic_file: Option<PathBuf>,
         origin_timeout: Option<Duration>,
+    ) -> Self {
+        Self::start_with_options_and_routes(
+            origin,
+            mode,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            panic_file,
+            origin_timeout,
+            Vec::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_with_options_and_routes(
+        origin: Url,
+        mode: Mode,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        panic_file: Option<PathBuf>,
+        origin_timeout: Option<Duration>,
+        routes: Vec<RouteHintConfig>,
     ) -> Self {
         let addr = unused_addr().await;
         let defaults = EffectiveConfig::default();
@@ -517,6 +730,7 @@ impl TestRuntime {
             server: server_config,
             policy: policy_config,
             panic_file,
+            routes,
             ..defaults
         };
 
@@ -591,4 +805,19 @@ fn temp_panic_file() -> PathBuf {
         std::fs::remove_file(&path).unwrap();
     }
     path
+}
+
+fn route_hint_defaults(method: &str, path: &str) -> RouteHintConfig {
+    RouteHintConfig {
+        name: None,
+        route_match: RouteMatchConfig {
+            method: method.to_string(),
+            path: path.to_string(),
+        },
+        freshness: Default::default(),
+        query: Default::default(),
+        vary: Default::default(),
+        stale_if_error: Default::default(),
+        safety: Default::default(),
+    }
 }

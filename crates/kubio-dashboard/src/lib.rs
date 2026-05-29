@@ -28,11 +28,13 @@ pub fn router(state: DashboardState) -> Router {
         .route("/routes/{route_hash}", get(route_page))
         .route("/events", get(events_page))
         .route("/config", get(config_page))
+        .route("/store", get(store_page))
         .route("/api/overview", get(api_overview))
         .route("/api/routes", get(api_routes))
         .route("/api/routes/by-hash/{route_hash}", get(api_route_detail))
         .route("/api/events", get(api_events))
         .route("/api/config", get(api_config))
+        .route("/api/store", get(api_store))
         .route("/api/purge", post(api_purge));
 
     if state.config.observability.metrics {
@@ -72,6 +74,9 @@ async fn index(State(state): State<DashboardState>) -> Html<String> {
     <dt>Auto routes</dt><dd>{}</dd>
     <dt>Shadow matches</dt><dd>{}</dd>
     <dt>Shadow mismatches</dt><dd>{}</dd>
+    <dt>Revalidated</dt><dd>{}</dd>
+    <dt>Stale served</dt><dd>{}</dd>
+    <dt>Store</dt><dd>{:?}</dd>
   </dl>
 </section>
 "#,
@@ -85,6 +90,9 @@ async fn index(State(state): State<DashboardState>) -> Html<String> {
             snapshot.overview.auto_routes,
             snapshot.overview.shadow_matches,
             snapshot.overview.shadow_mismatches,
+            snapshot.overview.revalidation_attempts,
+            snapshot.overview.stale_responses_served,
+            state.store.stats().kind,
         ),
     ))
 }
@@ -142,6 +150,8 @@ async fn route_page(
     <dt>Reused responses</dt><dd>{}</dd>
     <dt>Shadow matches</dt><dd>{}</dd>
     <dt>Shadow mismatches</dt><dd>{}</dd>
+    <dt>Revalidated</dt><dd>{}</dd>
+    <dt>Stale served</dt><dd>{}</dd>
     <dt>p95 latency</dt><dd>{:.2} ms</dd>
   </dl>
 </section>
@@ -154,6 +164,8 @@ async fn route_page(
             route.reuse_count,
             route.shadow_matches,
             route.shadow_mismatches,
+            route.revalidation_attempts,
+            route.stale_served,
             route.latency.p95_ms,
         ),
     ))
@@ -191,6 +203,14 @@ async fn config_page(State(state): State<DashboardState>) -> Html<String> {
     ))
 }
 
+async fn store_page(State(state): State<DashboardState>) -> Html<String> {
+    let body = serde_json::to_string_pretty(&state.store.stats()).unwrap_or_default();
+    Html(layout(
+        "Store",
+        &format!("<pre>{}</pre>", escape_html(&body)),
+    ))
+}
+
 async fn api_overview(State(state): State<DashboardState>) -> Json<OverviewResponse> {
     let snapshot = state.observer.snapshot();
     Json(OverviewResponse {
@@ -207,10 +227,17 @@ async fn api_overview(State(state): State<DashboardState>) -> Json<OverviewRespo
         actual_reuse_rate: snapshot.overview.actual_reuse_rate,
         shadow_matches: snapshot.overview.shadow_matches,
         shadow_mismatches: snapshot.overview.shadow_mismatches,
+        revalidation_attempts: snapshot.overview.revalidation_attempts,
+        revalidation_not_modified: snapshot.overview.revalidation_not_modified,
+        revalidation_modified: snapshot.overview.revalidation_modified,
+        revalidation_failed: snapshot.overview.revalidation_failed,
+        stale_responses_served: snapshot.overview.stale_responses_served,
+        stale_responses_denied: snapshot.overview.stale_responses_denied,
         p50_latency_ms: snapshot.overview.p50_latency_ms,
         p95_latency_ms: snapshot.overview.p95_latency_ms,
         cache_entries: state.store.stats().entries,
         cache_bytes: state.store.stats().bytes,
+        store_kind: format!("{:?}", state.store.stats().kind).to_ascii_lowercase(),
     })
 }
 
@@ -234,6 +261,10 @@ async fn api_events(State(state): State<DashboardState>) -> Json<ObserverSnapsho
 
 async fn api_config(State(state): State<DashboardState>) -> Json<RedactedConfig> {
     Json(state.config.redacted())
+}
+
+async fn api_store(State(state): State<DashboardState>) -> Json<StoreStats> {
+    Json(state.store.stats())
 }
 
 async fn api_purge(
@@ -342,7 +373,7 @@ pre {{ background: #f6f8fa; padding: 1rem; overflow: auto; }}
 </style>
 </head>
 <body>
-<nav><a href="/">Overview</a><a href="/routes">Routes</a><a href="/events">Events</a><a href="/config">Config</a></nav>
+<nav><a href="/">Overview</a><a href="/routes">Routes</a><a href="/events">Events</a><a href="/config">Config</a><a href="/store">Store</a></nav>
 <main>{}</main>
 </body>
 </html>"#,
@@ -374,10 +405,17 @@ pub struct OverviewResponse {
     pub actual_reuse_rate: f64,
     pub shadow_matches: u64,
     pub shadow_mismatches: u64,
+    pub revalidation_attempts: u64,
+    pub revalidation_not_modified: u64,
+    pub revalidation_modified: u64,
+    pub revalidation_failed: u64,
+    pub stale_responses_served: u64,
+    pub stale_responses_denied: u64,
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
     pub cache_entries: u64,
     pub cache_bytes: u64,
+    pub store_kind: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
