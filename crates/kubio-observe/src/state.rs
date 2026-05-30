@@ -240,7 +240,7 @@ impl RouteStats {
         config.enabled
             && public_object.enabled
             && self.state != RouteState::Protected
-            && (self.shadow_mismatches as u64) <= public_object.max_shadow_mismatches
+            && self.shadow_mismatches <= public_object.max_shadow_mismatches
             && self.request_count >= public_object.min_route_samples
             && self.distinct_key_count() >= public_object.min_distinct_keys
             && self.dynamic_value_count() >= public_object.min_distinct_keys
@@ -259,7 +259,7 @@ impl RouteStats {
             && (self.id_like_path_samples > 0
                 || self.slug_like_path_samples > 0
                 || self.distinct_key_count() > 1)
-            && (self.shadow_mismatches as u64) <= config.public_object.max_shadow_mismatches
+            && self.shadow_mismatches <= config.public_object.max_shadow_mismatches
             && self.cooldown_remaining_seconds().is_none()
     }
 
@@ -293,7 +293,7 @@ impl RouteStats {
         if self.state == RouteState::Protected {
             blockers.push(AdaptiveReuseBlocker::ProtectedRoute);
         }
-        if (self.shadow_mismatches as u64) > config.public_object.max_shadow_mismatches {
+        if self.shadow_mismatches > config.public_object.max_shadow_mismatches {
             blockers.push(AdaptiveReuseBlocker::ShadowMismatch);
         }
         if self.cooldown_remaining_seconds().is_some() {
