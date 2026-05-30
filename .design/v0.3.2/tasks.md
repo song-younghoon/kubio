@@ -113,11 +113,11 @@ Acceptance:
 
 ### M2.3 `kubio-telemetry`
 
-- [ ] M2.3.1 Move tracing setup into `tracing.rs`.
-- [ ] M2.3.2 Move metrics rendering into `render.rs`.
-- [ ] M2.3.3 Move label sanitization into `labels.rs`.
-- [ ] M2.3.4 Move store metrics and histogram helpers into focused modules.
-- [ ] M2.3.5 Re-export existing public telemetry API.
+- [x] M2.3.1 Move tracing setup into `tracing.rs`.
+- [x] M2.3.2 Move metrics rendering into `render.rs`.
+- [x] M2.3.3 Move label sanitization into `labels.rs`.
+- [x] M2.3.4 Move store metrics and histogram helpers into focused modules.
+- [x] M2.3.5 Re-export existing public telemetry API.
 
 Acceptance:
 
