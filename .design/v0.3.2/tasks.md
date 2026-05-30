@@ -161,11 +161,11 @@ Acceptance:
 - [x] M3.2.2 Move router and listener startup into `router.rs`.
 - [x] M3.2.3 Move route hint lookup into `route_hints.rs`.
 - [x] M3.2.4 Move in-flight permit accounting into `in_flight.rs`.
-- [ ] M3.2.5 Move origin request execution and fallback into `origin.rs`.
-- [ ] M3.2.6 Move cache entry response/freshness helpers into `cache.rs` and `revalidation.rs`.
-- [ ] M3.2.7 Move response construction into `response.rs`.
+- [x] M3.2.5 Move origin request execution and fallback into `origin.rs`.
+- [x] M3.2.6 Move cache entry response/freshness helpers into `cache.rs` and `revalidation.rs`.
+- [x] M3.2.7 Move response construction into `response.rs`.
 - [x] M3.2.8 Move Alt-Svc decision logic into `alt_svc.rs`.
-- [ ] M3.2.9 Move query observation and header/protocol helpers into focused modules.
+- [x] M3.2.9 Move query observation and header/protocol helpers into focused modules.
 - [x] M3.2.10 Keep the main request flow in `handler.rs`.
 - [x] M3.2.11 Re-export `ProxyState`, `router`, and `run_proxy`.
 
