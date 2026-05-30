@@ -2,8 +2,7 @@ use anyhow::{bail, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use http::Request;
 use quinn::crypto::rustls::QuicClientConfig;
-use std::fs::File;
-use std::io::BufReader;
+use quinn::rustls::pki_types::{pem::PemObject, CertificateDer};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,8 +69,7 @@ pub(crate) fn tls_key_path() -> PathBuf {
 
 fn h3_quinn_client_config() -> Result<quinn::ClientConfig> {
     let mut roots = quinn::rustls::RootCertStore::empty();
-    let file = File::open(tls_cert_path())?;
-    for cert in rustls_pemfile::certs(&mut BufReader::new(file)) {
+    for cert in CertificateDer::pem_file_iter(tls_cert_path())? {
         roots.add(cert?)?;
     }
     let mut tls = quinn::rustls::ClientConfig::builder_with_provider(Arc::new(

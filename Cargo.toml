@@ -38,7 +38,6 @@ percent-encoding = "2.3"
 proptest = "1.6"
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls", "stream"] }
-rustls-pemfile = "2.2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

@@ -6,14 +6,13 @@ use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use kubio_core::{EffectiveConfig, TlsConfig};
 use quinn::crypto::rustls::QuicServerConfig as RustlsQuicServerConfig;
+use quinn::rustls::pki_types::{pem::PemObject, CertificateDer};
 use quinn::{
     Endpoint, EndpointConfig, Incoming as QuinnIncoming, ServerConfig as QuinnServerConfig,
     TokioRuntime, TransportConfig, VarInt,
 };
 use std::collections::HashMap;
-use std::fs::File;
 use std::future::Future;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -346,9 +345,9 @@ fn http3_origin_client_config(config: &EffectiveConfig) -> anyhow::Result<quinn:
     let mut roots = quinn::rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for cert_path in &config.origin_protocol.http3_ca_certs {
-        let file = File::open(cert_path)
+        let certs = CertificateDer::pem_file_iter(cert_path)
             .with_context(|| format!("open origin HTTP/3 CA cert {}", cert_path.display()))?;
-        for cert in rustls_pemfile::certs(&mut BufReader::new(file)) {
+        for cert in certs {
             roots
                 .add(cert.context("read origin HTTP/3 CA cert")?)
                 .context("add origin HTTP/3 CA cert")?;

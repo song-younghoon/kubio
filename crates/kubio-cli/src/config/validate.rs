@@ -284,7 +284,7 @@ fn query_patterns_overlap(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{apply_file_config, FileConfig};
+    use crate::config::{apply_file_config, file::FileConfig};
     use kubio_core::{
         RouteFreshnessConfig, RouteMatchConfig, RouteQueryConfig, RouteSafetyConfig,
         RouteStaleIfErrorConfig, RouteVaryConfig, TlsConfig,

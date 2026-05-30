@@ -7,7 +7,7 @@ repository.workspace = true
 
 [features]
 default = []
-experimental-http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn", "dep:rustls-pemfile", "dep:webpki-roots"]
+experimental-http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn", "dep:webpki-roots"]
 
 [dependencies]
 anyhow.workspace = true
@@ -23,7 +23,6 @@ hyper-util.workspace = true
 kubio-core.workspace = true
 quinn = { workspace = true, optional = true }
 reqwest.workspace = true
-rustls-pemfile = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-rustls.workspace = true
 tower.workspace = true

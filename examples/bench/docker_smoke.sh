@@ -6,11 +6,14 @@ ORIGIN_PORT="${ORIGIN_PORT:-13003}"
 PROXY_PORT="${PROXY_PORT:-18083}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-19903}"
 ORIGIN_IMAGE="${ORIGIN_IMAGE:-python:3-alpine}"
+DOCKER_USER="${DOCKER_USER:-$(id -u):$(id -g)}"
 
 origin_dir="$(mktemp -d)"
 cache_dir="$(mktemp -d)"
 config_file="$(mktemp)"
 http3_config_file="$(mktemp)"
+chmod 0777 "${cache_dir}"
+chmod 0644 "${config_file}" "${http3_config_file}"
 network_name="kubio-smoke-$RANDOM-$$"
 origin_name="kubio-smoke-origin-$RANDOM-$$"
 origin_container_id=""
@@ -22,6 +25,13 @@ cleanup() {
   fi
   if [[ -n "${origin_container_id}" ]]; then
     docker rm -f "${origin_container_id}" >/dev/null 2>&1 || true
+  fi
+  if [[ -d "${cache_dir}" ]]; then
+    docker run --rm \
+      --entrypoint sh \
+      -v "${cache_dir}:/cache" \
+      "${ORIGIN_IMAGE}" -c 'find /cache -mindepth 1 -exec rm -rf {} +' \
+      >/dev/null 2>&1 || true
   fi
   docker network rm "${network_name}" >/dev/null 2>&1 || true
   rm -rf "${origin_dir}" "${cache_dir}" "${config_file}" "${http3_config_file}"
@@ -84,6 +94,7 @@ EOF
 container_id="$(
   docker run -d \
     --network "${network_name}" \
+    --user "${DOCKER_USER}" \
     -p "127.0.0.1:${PROXY_PORT}:${PROXY_PORT}" \
     -p "127.0.0.1:${DASHBOARD_PORT}:${DASHBOARD_PORT}" \
     -v "${config_file}:/config.yml:ro" \

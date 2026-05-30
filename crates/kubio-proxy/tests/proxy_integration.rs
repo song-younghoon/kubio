@@ -21,9 +21,7 @@ use kubio_transport::{serve_http3_router, Http3ServerTelemetry};
 #[cfg(feature = "experimental-http3")]
 use quinn::crypto::rustls::QuicClientConfig;
 #[cfg(feature = "experimental-http3")]
-use std::fs::File;
-#[cfg(feature = "experimental-http3")]
-use std::io::BufReader;
+use quinn::rustls::pki_types::{pem::PemObject, CertificateDer};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1548,8 +1546,7 @@ fn h3_quinn_client_config() -> anyhow::Result<quinn::ClientConfig> {
 
 #[cfg(feature = "experimental-http3")]
 fn test_tls_certs() -> anyhow::Result<Vec<quinn::rustls::pki_types::CertificateDer<'static>>> {
-    let file = File::open(test_tls_cert_path())?;
-    rustls_pemfile::certs(&mut BufReader::new(file))
+    CertificateDer::pem_file_iter(test_tls_cert_path())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
