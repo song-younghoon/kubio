@@ -1,6 +1,6 @@
 # Key Shaping and Variants
 
-Status: design draft
+Status: implemented
 Target release: `v0.5.1`
 
 ## Goals

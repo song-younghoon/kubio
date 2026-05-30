@@ -1,6 +1,6 @@
 # Precision Reuse Policy
 
-Status: design draft
+Status: implemented
 Target release: `v0.5.1`
 
 ## Goals

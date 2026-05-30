@@ -4,7 +4,10 @@ use crate::h3::{tls_cert_path, tls_key_path, unused_udp_addr};
 use anyhow::{bail, Result};
 #[cfg(feature = "experimental-http3")]
 use kubio_core::TlsConfig;
-use kubio_core::{EffectiveConfig, Mode};
+use kubio_core::{
+    EffectiveConfig, Mode, RouteHintConfig, RouteMatchConfig, RouteQueryConfig,
+    RouteVerifiedIgnoreConfig,
+};
 use kubio_observe::Observer;
 use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
@@ -26,7 +29,11 @@ pub(crate) struct ManagedProxy {
 }
 
 impl ManagedProxy {
-    pub(crate) async fn start(origin: Url, protocol: BenchProtocol) -> Result<Self> {
+    pub(crate) async fn start(
+        origin: Url,
+        protocol: BenchProtocol,
+        scenario: crate::args::Scenario,
+    ) -> Result<Self> {
         let addr = unused_addr().await?;
         let defaults = EffectiveConfig::default();
         let mut server = defaults.server.clone();
@@ -56,11 +63,46 @@ impl ManagedProxy {
         policy.adaptive_reuse.public_object.min_route_samples = 6;
         policy.adaptive_reuse.public_object.min_distinct_keys = 3;
         policy.adaptive_reuse.public_object.min_shadow_matches = 3;
+        policy.adaptive_reuse.precision.canary.enabled =
+            matches!(scenario, crate::args::Scenario::CanaryMismatch);
+        if matches!(scenario, crate::args::Scenario::CanaryMismatch) {
+            policy.adaptive_reuse.precision.canary.probation_rate = 1.0;
+            policy.adaptive_reuse.precision.canary.validated_rate = 1.0;
+            policy.adaptive_reuse.precision.canary.strong_rate = 1.0;
+            policy.adaptive_reuse.precision.canary.min_interval_secs = 0;
+        }
+        if matches!(scenario, crate::args::Scenario::EvidenceDecay) {
+            policy.adaptive_reuse.precision.confidence.fresh_window_secs = 0;
+        }
+        let routes = if matches!(scenario, crate::args::Scenario::QueryNoisyPublicObject) {
+            vec![RouteHintConfig {
+                name: Some("bench verified query ignore".to_string()),
+                route_match: RouteMatchConfig {
+                    method: "GET".to_string(),
+                    path: "/query-intel".to_string(),
+                },
+                freshness: Default::default(),
+                query: RouteQueryConfig {
+                    include: Vec::new(),
+                    ignore: Vec::new(),
+                    verified_ignore: RouteVerifiedIgnoreConfig {
+                        enabled: true,
+                        allow: vec!["utm_*".to_string(), "gclid".to_string()],
+                    },
+                },
+                vary: Default::default(),
+                stale_if_error: Default::default(),
+                safety: Default::default(),
+            }]
+        } else {
+            Vec::new()
+        };
         let config = Arc::new(EffectiveConfig {
             origin,
             mode: Mode::Auto,
             server,
             policy,
+            routes,
             ..defaults
         });
         let observer = Arc::new(Observer::with_adaptive_config(

@@ -271,7 +271,16 @@ fn validate_route_hints(routes: &[RouteHintConfig]) -> Result<()> {
                 bail!("query parameter pattern `{include}` conflicts with the route ignore list");
             }
         }
-        for pattern in route.query.ignore.iter().chain(route.query.include.iter()) {
+        if route.query.verified_ignore.enabled && route.query.verified_ignore.allow.is_empty() {
+            bail!("routes[].query.verified_ignore.allow must not be empty when enabled");
+        }
+        for pattern in route
+            .query
+            .ignore
+            .iter()
+            .chain(route.query.include.iter())
+            .chain(route.query.verified_ignore.allow.iter())
+        {
             if pattern.is_empty() {
                 bail!("query hint patterns must not be empty");
             }
@@ -518,6 +527,7 @@ server:
             query: RouteQueryConfig {
                 include: vec!["utm_source".to_string()],
                 ignore: vec!["utm_*".to_string()],
+                verified_ignore: Default::default(),
             },
             ..test_route_hint("GET", "/api/products")
         };

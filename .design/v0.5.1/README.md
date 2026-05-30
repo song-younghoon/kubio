@@ -1,8 +1,13 @@
 # kubio v0.5.1 Design Index
 
-Status: design draft
+Status: implemented
 Source: v0.5.0 adaptive reuse implementation
 Target release: `v0.5.1`
+
+Implementation state: precision confidence, evidence decay/cooldown, verified
+query equivalence, route-enabled key compaction, slug route evidence, canary
+validation, observability, benchmarks, docs, and release notes are implemented
+on `main`.
 
 v0.5.0 made automatic reuse useful for public object routes without weakening
 the hard safety model. v0.5.1 should make that goal more precise: fewer routes
@@ -116,12 +121,12 @@ hit rate from better proof:
   blockers, not raw IDs, raw query values, cookies, authorization values,
   validators, or body content.
 
-## Milestone Map
+## Milestone Status
 
-- M0: Design, terminology, and schema lock.
-- M1: Precision confidence model and evidence ledger.
-- M2: Query equivalence and key-shaping proof.
-- M3: Slug and variant intelligence.
-- M4: Adaptive store/hit flow, canary validation, decay, and demotion.
-- M5: Dashboard, metrics, CLI, docs, and examples.
-- M6: Benchmarks, safety tests, privacy tests, and release hardening.
+- [x] M0: Design, terminology, and schema lock.
+- [x] M1: Precision confidence model and evidence ledger.
+- [x] M2: Query equivalence and key-shaping proof.
+- [x] M3: Slug and variant intelligence.
+- [x] M4: Adaptive store/hit flow, canary validation, decay, and demotion.
+- [x] M5: Dashboard, metrics, CLI, docs, and examples.
+- [x] M6: Benchmarks, safety tests, privacy tests, and release hardening.

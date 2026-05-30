@@ -25,8 +25,8 @@ use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
 use kubio_core::{
-    build_cache_key_with_query_names, observe_path, CacheKeyHash, Decision, DecisionReason,
-    HttpProtocol, Mode, RouteHintConfig, RouteId,
+    build_cache_key_with_query_names_and_verified_ignores, observe_path, CacheKeyHash, Decision,
+    DecisionReason, HttpProtocol, Mode, RouteHintConfig, RouteId,
 };
 use kubio_observe::{EventType, ObservationRecord, RevalidationOutcome};
 use kubio_store::{CacheEntry, PurgeSelector};
@@ -144,19 +144,36 @@ pub(crate) async fn proxy_handler(
         &request_decision,
     );
 
+    let query_config = route_hint.and_then(|hint| {
+        if hint.query.is_empty() {
+            None
+        } else {
+            Some(&hint.query)
+        }
+    });
+    let verified_query_ignores = state
+        .observer
+        .verified_query_ignores(&route_id, query_config);
+    let vary_names = route_hint_entry
+        .map(|entry| entry.vary_names.as_slice())
+        .unwrap_or_else(|| state.route_hints.default_vary_names());
+    let variant_values = vary_names
+        .iter()
+        .map(|name| {
+            let value = headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            (name.to_ascii_lowercase(), kubio_core::short_hash(value))
+        })
+        .collect::<Vec<_>>();
+    state
+        .observer
+        .record_variant_values(route_id.clone(), variant_values);
+
     let cache_key_hash = if request_signals.method_cacheable {
-        let query_config = route_hint.and_then(|hint| {
-            if hint.query.is_empty() {
-                None
-            } else {
-                Some(&hint.query)
-            }
-        });
-        let vary_names = route_hint_entry
-            .map(|entry| entry.vary_names.as_slice())
-            .unwrap_or_else(|| state.route_hints.default_vary_names());
         Some(
-            build_cache_key_with_query_names(
+            build_cache_key_with_query_names_and_verified_ignores(
                 &method,
                 state.config.origin.scheme(),
                 &origin_authority(&state.config.origin),
@@ -165,6 +182,7 @@ pub(crate) async fn proxy_handler(
                 &headers,
                 vary_names.iter().map(String::as_str),
                 query_config,
+                &verified_query_ignores,
             )
             .hash(),
         )
@@ -174,6 +192,7 @@ pub(crate) async fn proxy_handler(
 
     let mut origin_response_override = None;
     let mut stale_error_candidate: Option<(CacheKeyHash, CacheEntry)> = None;
+    let mut canary_candidate: Option<(CacheKeyHash, CacheEntry)> = None;
 
     if state.config.mode == Mode::Auto
         && request_decision.decision != Decision::Protect
@@ -193,20 +212,24 @@ pub(crate) async fn proxy_handler(
             {
                 match state.store.get(key_hash).await {
                     Ok(Some(entry)) if entry.is_fresh() => {
-                        debug!(route = %route_id, "serving reused response");
-                        state.observer.record_reuse(
-                            route_id.clone(),
-                            key_hash.clone(),
-                            entry.status,
-                            started.elapsed(),
-                        );
-                        return response_from_cache_entry_with_status(
-                            &state,
-                            &route_id,
-                            entry,
-                            "hit",
-                            request_authority.as_deref(),
-                        );
+                        if state.observer.should_canary_validate(&route_id, key_hash) {
+                            canary_candidate = Some((key_hash.clone(), entry));
+                        } else {
+                            debug!(route = %route_id, "serving reused response");
+                            state.observer.record_reuse(
+                                route_id.clone(),
+                                key_hash.clone(),
+                                entry.status,
+                                started.elapsed(),
+                            );
+                            return response_from_cache_entry_with_status(
+                                &state,
+                                &route_id,
+                                entry,
+                                "hit",
+                                request_authority.as_deref(),
+                            );
+                        }
                     }
                     Ok(Some(entry)) if entry.is_stale_usable() => {
                         if state.config.policy.revalidation.enabled && entry.validators.available()
@@ -670,6 +693,38 @@ pub(crate) async fn proxy_handler(
         score: response_decision.score,
         mode: state.config.mode,
     });
+    if let (Some((canary_key, canary_entry)), Some(fingerprint)) =
+        (canary_candidate.as_ref(), fingerprint.as_ref())
+    {
+        let matched = &canary_entry.fingerprint == fingerprint;
+        state
+            .observer
+            .record_canary_validation(route_id.clone(), canary_key.clone(), matched);
+        if !matched {
+            if let Err(err) = state
+                .store
+                .purge(PurgeSelector::Key(canary_key.clone()))
+                .await
+            {
+                warn!(error = %err, "failed to purge cache entry after canary mismatch");
+                state.observer.push_event(
+                    EventType::StoreErrorFailOpen,
+                    Some(route_id.clone()),
+                    Some(canary_key.clone()),
+                    vec![DecisionReason::StoreError],
+                    "failed to purge cache entry after canary mismatch",
+                );
+            } else {
+                state.observer.push_event(
+                    EventType::CacheEntryEvicted,
+                    Some(route_id.clone()),
+                    Some(canary_key.clone()),
+                    vec![DecisionReason::ShadowMismatch],
+                    "purged cache entry after canary mismatch",
+                );
+            }
+        }
+    }
     if observation_outcome.shadow_mismatch {
         if let Err(err) = state
             .store

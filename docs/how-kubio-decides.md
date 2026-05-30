@@ -18,7 +18,7 @@ Every origin response is checked before storage or reuse. kubio does not store r
 
 ## Adaptive Reuse
 
-v0.5.0 separates hard protection from evidence-gated reuse.
+v0.5.x separates hard protection from evidence-gated reuse.
 
 - `key_validated`: one exact cache key has repeated with matching fingerprints.
 - `origin_public`: the origin explicitly sent a safe `Cache-Control: public`
@@ -34,6 +34,24 @@ Route evidence uses normalized route IDs, but cache entries remain exact-key
 entries. `/notice/1` and `/notice/2` can share route confidence while staying
 separate cache objects. `/user/1` remains protected by default because `user` is
 a sensitive path segment.
+
+## Precision Adaptive Reuse
+
+v0.5.1 adds finer proof:
+
+- `confidence_tier`: routes move through `unknown`, `probation`, `validated`,
+  `strong`, and `cooldown` based on fresh bounded evidence.
+- `verified_ignore_candidate`: a query parameter has matching fingerprints
+  across multiple value hashes and may be explicitly enabled for key compaction.
+- `query_compacted`: a route hint enabled verified query ignore, so proven noisy
+  parameters are removed from cache-key construction.
+- public slug routes such as `/articles/{slug}` can collect object-route
+  evidence; sensitive slug routes remain protected.
+- canary validation occasionally sends promoted-route traffic to origin to
+  refresh confidence and demote on mismatch.
+
+Key compaction is never automatic by default. It requires proof and route-level
+enablement or an explicit global auto-compaction setting.
 
 ## Shadow Validation
 

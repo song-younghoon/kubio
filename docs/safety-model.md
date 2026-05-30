@@ -34,6 +34,12 @@ Public object evidence is route-level, but cached responses remain exact-key
 objects. `/notice/1` and `/notice/2` may share confidence while staying separate
 cache entries.
 
+Precision adaptive reuse can compact query keys only after fingerprint proof and
+explicit enablement. Sensitive query names such as `token`, `session`, `jwt`,
+`api_key`, `secret`, `signature`, and `code` are not automatic ignore
+candidates. Canary or shadow mismatches place the affected route or key group
+in cooldown and purge affected entries.
+
 ## Privacy
 
 kubio does not store Authorization values, Cookie values, Set-Cookie values, request bodies, or raw response bodies in observation metadata. Metrics and dashboard APIs use route templates, counts, flags, and hashes.

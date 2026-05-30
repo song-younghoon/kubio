@@ -165,6 +165,7 @@ pub enum ReuseClass {
     PublicObjectCandidate,
     PublicObject,
     OriginPublic,
+    QueryEquivalence,
 }
 
 impl Display for ReuseClass {
@@ -176,6 +177,74 @@ impl Display for ReuseClass {
             Self::PublicObjectCandidate => f.write_str("public_object_candidate"),
             Self::PublicObject => f.write_str("public_object"),
             Self::OriginPublic => f.write_str("origin_public"),
+            Self::QueryEquivalence => f.write_str("query_equivalence"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceTier {
+    #[default]
+    Unknown,
+    Probation,
+    Validated,
+    Strong,
+    Cooldown,
+    HardProtected,
+}
+
+impl Display for ConfidenceTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("unknown"),
+            Self::Probation => f.write_str("probation"),
+            Self::Validated => f.write_str("validated"),
+            Self::Strong => f.write_str("strong"),
+            Self::Cooldown => f.write_str("cooldown"),
+            Self::HardProtected => f.write_str("hard_protected"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryEquivalenceClass {
+    #[default]
+    Unknown,
+    CandidateIgnore,
+    VerifiedIgnoreCandidate,
+    Compacted,
+    SensitiveBlocked,
+    MismatchCooldown,
+}
+
+impl Display for QueryEquivalenceClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("unknown"),
+            Self::CandidateIgnore => f.write_str("candidate_ignore"),
+            Self::VerifiedIgnoreCandidate => f.write_str("verified_ignore_candidate"),
+            Self::Compacted => f.write_str("compacted"),
+            Self::SensitiveBlocked => f.write_str("sensitive_blocked"),
+            Self::MismatchCooldown => f.write_str("mismatch_cooldown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyShape {
+    #[default]
+    Exact,
+    QueryCompacted,
+}
+
+impl Display for KeyShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact => f.write_str("exact"),
+            Self::QueryCompacted => f.write_str("query_compacted"),
         }
     }
 }
@@ -194,6 +263,13 @@ pub enum AdaptiveReuseBlocker {
     LowStoreSafeRate,
     LowPathCardinality,
     NoOriginPublicSignal,
+    StaleEvidence,
+    CooldownActive,
+    CanaryMismatch,
+    SensitiveQueryParam,
+    InsufficientQueryEquivalence,
+    OperatorEnablementRequired,
+    VariantUnbounded,
 }
 
 impl Display for AdaptiveReuseBlocker {
@@ -210,6 +286,13 @@ impl Display for AdaptiveReuseBlocker {
             Self::LowStoreSafeRate => f.write_str("low_store_safe_rate"),
             Self::LowPathCardinality => f.write_str("low_path_cardinality"),
             Self::NoOriginPublicSignal => f.write_str("no_origin_public_signal"),
+            Self::StaleEvidence => f.write_str("stale_evidence"),
+            Self::CooldownActive => f.write_str("cooldown_active"),
+            Self::CanaryMismatch => f.write_str("canary_mismatch"),
+            Self::SensitiveQueryParam => f.write_str("sensitive_query_param"),
+            Self::InsufficientQueryEquivalence => f.write_str("insufficient_query_equivalence"),
+            Self::OperatorEnablementRequired => f.write_str("operator_enablement_required"),
+            Self::VariantUnbounded => f.write_str("variant_unbounded"),
         }
     }
 }

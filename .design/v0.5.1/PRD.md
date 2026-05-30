@@ -1,8 +1,12 @@
 # PRD: kubio v0.5.1
 
-Document status: design draft
+Document status: implemented
 Target release: `v0.5.1`
 Core philosophy: **increase hit rate by proving finer equivalence**
+
+Implementation state: goals and safety constraints are implemented on `main`;
+local workspace and targeted precision regression gates are expected release
+gates.
 
 ## 1. Product Summary
 

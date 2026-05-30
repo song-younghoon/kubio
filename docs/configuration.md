@@ -156,6 +156,36 @@ policy:
       max_shadow_mismatches: 0
     origin_public_fast_path:
       enabled: true
+    precision:
+      enabled: true
+      confidence:
+        fresh_window_secs: 1800
+        min_window_samples: 20
+        strong_window_samples: 100
+        max_negative_events: 0
+        cooldown_secs: 600
+        max_cooldown_secs: 3600
+        cooldown_backoff: 2.0
+      query_equivalence:
+        enabled: true
+        auto_compact: false
+        min_distinct_values: 3
+        min_matching_fingerprints: 3
+        min_base_keys: 1
+        max_mismatches: 0
+      canary:
+        enabled: true
+        probation_rate: 0.10
+        validated_rate: 0.02
+        strong_rate: 0.005
+        min_interval_secs: 30
+      slug:
+        enabled: true
+        min_distinct_values: 3
+        min_route_samples: 20
+      variants:
+        max_values_per_dimension: 8
+        require_variant_evidence: true
   revalidation:
     enabled: true
     prefer_etag: true
@@ -193,6 +223,10 @@ routes:
   - match:
       method: GET
       path: "/notice/{id}"
+    query:
+      verified_ignore:
+        enabled: true
+        allow: ["utm_*", "gclid", "fbclid"]
     safety:
       public_object: true
 ```
@@ -201,3 +235,9 @@ routes:
 routes but does not bypass hard denies such as Authorization, Cookie,
 Set-Cookie, private/no-store, unsupported Vary, sensitive paths, or shadow
 mismatches.
+
+`query.verified_ignore` is stricter than `query.ignore`. kubio first has to
+observe matching fingerprints across different bounded query value hashes. Only
+then will enabled `verified_ignore.allow` patterns compact cache keys. Sensitive
+query names such as `token`, `session`, `jwt`, `api_key`, `secret`, `signature`,
+and `code` are never automatic verified-ignore candidates.

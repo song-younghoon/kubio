@@ -1,4 +1,4 @@
-use crate::{normalize_query_with_config, short_hash, RouteQueryConfig};
+use crate::{normalize_query_with_config_and_verified_ignores, short_hash, RouteQueryConfig};
 use http::{HeaderMap, Method};
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
@@ -103,6 +103,34 @@ pub fn build_cache_key_with_query_names<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
+    build_cache_key_with_query_names_and_verified_ignores(
+        method,
+        scheme,
+        authority,
+        path,
+        query,
+        request_headers,
+        vary_names,
+        query_config,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_cache_key_with_query_names_and_verified_ignores<'a, I>(
+    method: &Method,
+    scheme: &str,
+    authority: &str,
+    path: &str,
+    query: Option<&str>,
+    request_headers: &HeaderMap,
+    vary_names: I,
+    query_config: Option<&RouteQueryConfig>,
+    verified_ignores: &[String],
+) -> CacheKey
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut vary_headers = vary_names
         .into_iter()
         .map(|name| {
@@ -122,7 +150,13 @@ where
         authority: authority.to_string(),
         path: path.to_string(),
         normalized_query: query
-            .map(|query| normalize_query_with_config(query, query_config))
+            .map(|query| {
+                normalize_query_with_config_and_verified_ignores(
+                    query,
+                    query_config,
+                    verified_ignores,
+                )
+            })
             .unwrap_or_default(),
         vary_headers,
     }

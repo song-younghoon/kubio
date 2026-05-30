@@ -31,6 +31,10 @@ Required metrics include:
 - `kubio_query_param_suggestions_total`
 - `kubio_routes_by_reuse_class`
 - `kubio_origin_public_fast_path_total`
+- `kubio_precision_confidence_routes`
+- `kubio_precision_canary_total`
+- `kubio_query_equivalence_candidates_total`
+- `kubio_variant_groups`
 - `kubio_store_errors_total`
 - `kubio_observer_events_dropped_total`
 - `kubio_store_operations_total`

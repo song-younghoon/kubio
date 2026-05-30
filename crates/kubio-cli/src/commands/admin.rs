@@ -17,15 +17,19 @@ pub(crate) async fn routes(args: AdminArgs) -> Result<()> {
     }
     for route in snapshot.routes {
         println!(
-            "{}\t{}\tclass={}\trequests={}\torigin={}\treused={}\tprotected={}\tkeys={}\tpublic={}\trevalidated={}\tstale={}\tdownstream={}\tupstream={}",
+            "{}\t{}\tclass={}\tconfidence={}\trequests={}\torigin={}\treused={}\tprotected={}\tkeys={}\tquery_candidates={}\tcompact={}\tvariants={}\tpublic={}\trevalidated={}\tstale={}\tdownstream={}\tupstream={}",
             route.route_id.as_label(),
             route.state,
             route.reuse_class,
+            route.confidence_tier,
             route.request_count,
             route.origin_count,
             route.reuse_count,
             route.protected_count,
             route.distinct_key_count,
+            route.query_equivalence_candidates,
+            route.query_compacted_groups,
+            route.variant_dimensions,
             route.origin_public_responses,
             route.revalidation_attempts,
             route.stale_served,
@@ -63,14 +67,27 @@ pub(crate) async fn explain(args: ExplainArgs) -> Result<()> {
         }
     }
     println!(
-        "\nRequests: {}\nOrigin: {}\nReused: {}\nDistinct keys: {}\nDynamic path values: {}\nStore-safe rate: {:.2}%\nOrigin public responses: {}\nAdaptive blockers: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}\nDownstream protocols: {}\nUpstream protocols: {}",
+        "\nRequests: {}\nOrigin: {}\nReused: {}\nDistinct keys: {}\nDynamic path values: {}\nSlug values: {}\nStore-safe rate: {:.2}%\nOrigin public responses: {}\nConfidence: {}\nEvidence age: {}s\nCooldown remaining: {}\nCanary: {}/{}\nQuery equivalence candidates: {}\nQuery compacted groups: {}\nVariant dimensions: {}\nVariant unbounded: {}\nAdaptive blockers: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}\nDownstream protocols: {}\nUpstream protocols: {}",
         route.request_count,
         route.origin_count,
         route.reuse_count,
         route.distinct_key_count,
         route.dynamic_value_count,
+        route.slug_value_count,
         route.store_safe_rate * 100.0,
         route.origin_public_responses,
+        route.confidence_tier,
+        route.evidence_window_age_seconds,
+        route
+            .cooldown_remaining_seconds
+            .map(|value| format!("{value}s"))
+            .unwrap_or_else(|| "none".to_string()),
+        route.canary_matches,
+        route.canary_mismatches,
+        route.query_equivalence_candidates,
+        route.query_compacted_groups,
+        route.variant_dimensions,
+        route.variant_unbounded,
         adaptive_blockers_label(&route),
         route.shadow_matches,
         route.shadow_mismatches,

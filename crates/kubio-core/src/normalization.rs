@@ -10,7 +10,12 @@ pub fn normalize_path_template(path: &str) -> String {
     }
 
     let mut segments = Vec::new();
-    for segment in path.trim_matches('/').split('/') {
+    let raw_segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    for (index, segment) in raw_segments.iter().enumerate() {
         if segment.is_empty() {
             continue;
         }
@@ -20,8 +25,10 @@ pub fn normalize_path_template(path: &str) -> String {
             .unwrap_or_else(|_| segment.to_string());
         if is_id_like_segment(&decoded) {
             segments.push("{id}".to_string());
+        } else if is_public_slug_position(&raw_segments, index, &decoded) {
+            segments.push("{slug}".to_string());
         } else {
-            segments.push(segment.to_string());
+            segments.push((*segment).to_string());
         }
     }
 
@@ -37,6 +44,14 @@ pub fn normalize_query(query: &str) -> String {
 }
 
 pub fn normalize_query_with_config(query: &str, query_config: Option<&RouteQueryConfig>) -> String {
+    normalize_query_with_config_and_verified_ignores(query, query_config, &[])
+}
+
+pub fn normalize_query_with_config_and_verified_ignores(
+    query: &str,
+    query_config: Option<&RouteQueryConfig>,
+    verified_ignores: &[String],
+) -> String {
     if query.is_empty() {
         return String::new();
     }
@@ -47,7 +62,9 @@ pub fn normalize_query_with_config(query: &str, query_config: Option<&RouteQuery
         .collect::<Vec<_>>();
 
     if let Some(config) = query_config {
-        pairs.retain(|(_, name, _)| query_param_allowed(name, config));
+        pairs.retain(|(_, name, _)| query_param_allowed(name, config, verified_ignores));
+    } else if !verified_ignores.is_empty() {
+        pairs.retain(|(_, name, _)| !verified_ignores.iter().any(|ignore| ignore == name));
     }
 
     pairs.sort_by(|left, right| match left.1.cmp(&right.1) {
@@ -62,7 +79,10 @@ pub fn normalize_query_with_config(query: &str, query_config: Option<&RouteQuery
     serializer.finish()
 }
 
-fn query_param_allowed(name: &str, config: &RouteQueryConfig) -> bool {
+fn query_param_allowed(name: &str, config: &RouteQueryConfig, verified_ignores: &[String]) -> bool {
+    if verified_ignores.iter().any(|ignore| ignore == name) {
+        return false;
+    }
     if config
         .ignore
         .iter()
@@ -95,9 +115,14 @@ pub fn is_sensitive_query_param(name: &str) -> bool {
             | "auth"
             | "authorization"
             | "session"
+            | "sid"
+            | "jwt"
+            | "api_key"
             | "password"
             | "secret"
             | "key"
+            | "state"
+            | "code"
             | "signature"
             | "sig"
     )
@@ -136,6 +161,82 @@ fn is_ulid_like(segment: &str) -> bool {
         })
 }
 
+pub fn is_slug_like_segment(segment: &str) -> bool {
+    let len = segment.len();
+    (3..=96).contains(&len)
+        && (segment.contains('-') || segment.contains('_'))
+        && segment
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+        && !is_sensitive_path_segment(segment)
+        && !is_token_like_segment(segment)
+}
+
+fn is_public_slug_position(segments: &[&str], index: usize, decoded: &str) -> bool {
+    if !is_slug_like_segment(decoded) || index == 0 {
+        return false;
+    }
+    let Some(previous) = segments.get(index.saturating_sub(1)) else {
+        return false;
+    };
+    let previous = percent_decode_str(previous)
+        .decode_utf8()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|_| previous.to_ascii_lowercase());
+    is_public_resource_segment(&previous)
+}
+
+fn is_public_resource_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "notice"
+            | "notices"
+            | "article"
+            | "articles"
+            | "post"
+            | "posts"
+            | "product"
+            | "products"
+            | "catalog"
+            | "news"
+            | "blog"
+            | "docs"
+            | "doc"
+            | "pages"
+            | "page"
+    )
+}
+
+fn is_sensitive_path_segment(segment: &str) -> bool {
+    matches!(
+        segment.to_ascii_lowercase().as_str(),
+        "me" | "user"
+            | "users"
+            | "account"
+            | "profile"
+            | "session"
+            | "login"
+            | "logout"
+            | "billing"
+            | "payment"
+            | "checkout"
+            | "admin"
+            | "token"
+            | "oauth"
+    )
+}
+
+fn is_token_like_segment(segment: &str) -> bool {
+    segment.len() >= 24
+        && segment
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .count()
+            >= 24
+        && !segment.contains('-')
+        && !segment.contains('_')
+}
+
 pub fn sensitive_path_score(path: &str) -> u8 {
     let keywords = [
         "me", "user", "users", "account", "profile", "session", "login", "logout", "billing",
@@ -159,8 +260,10 @@ pub fn sensitive_path_score(path: &str) -> u8 {
 pub struct PathObservation {
     pub segment_count: u16,
     pub id_like_segment_count: u16,
+    pub slug_like_segment_count: u16,
     pub sensitive_path_score: u8,
     pub dynamic_segment_hashes: Vec<String>,
+    pub slug_segment_hashes: Vec<String>,
 }
 
 pub fn observe_path(path: &str) -> PathObservation {
@@ -169,10 +272,12 @@ pub fn observe_path(path: &str) -> PathObservation {
         ..PathObservation::default()
     };
 
-    for segment in path.trim_matches('/').split('/') {
-        if segment.is_empty() {
-            continue;
-        }
+    let raw_segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    for (index, segment) in raw_segments.iter().enumerate() {
         observation.segment_count = observation.segment_count.saturating_add(1);
         let decoded = percent_decode_str(segment)
             .decode_utf8()
@@ -183,6 +288,10 @@ pub fn observe_path(path: &str) -> PathObservation {
             observation
                 .dynamic_segment_hashes
                 .push(short_hash(&decoded));
+        } else if is_public_slug_position(&raw_segments, index, &decoded) {
+            observation.slug_like_segment_count =
+                observation.slug_like_segment_count.saturating_add(1);
+            observation.slug_segment_hashes.push(short_hash(&decoded));
         }
     }
 
@@ -216,9 +325,33 @@ mod tests {
 
         assert_eq!(observation.segment_count, 2);
         assert_eq!(observation.id_like_segment_count, 1);
+        assert_eq!(observation.slug_like_segment_count, 0);
         assert_eq!(observation.sensitive_path_score, 0);
         assert_eq!(observation.dynamic_segment_hashes.len(), 1);
         assert!(!observation.dynamic_segment_hashes[0].contains("123"));
+    }
+
+    #[test]
+    fn route_clustering_replaces_public_slugs_conservatively() {
+        assert_eq!(
+            normalize_path_template("/articles/summer-release"),
+            "/articles/{slug}"
+        );
+        assert_eq!(
+            normalize_path_template("/users/jane-doe"),
+            "/users/jane-doe"
+        );
+    }
+
+    #[test]
+    fn path_observation_hashes_slug_values_without_raw_segments() {
+        let observation = observe_path("/articles/summer-release");
+
+        assert_eq!(observation.segment_count, 2);
+        assert_eq!(observation.slug_like_segment_count, 1);
+        assert_eq!(observation.sensitive_path_score, 0);
+        assert_eq!(observation.slug_segment_hashes.len(), 1);
+        assert!(!observation.slug_segment_hashes[0].contains("summer-release"));
     }
 
     #[test]
@@ -232,10 +365,23 @@ mod tests {
         let config = RouteQueryConfig {
             include: Vec::new(),
             ignore: vec!["utm_*".to_string(), "gclid".to_string()],
+            verified_ignore: Default::default(),
         };
 
         assert_eq!(
             normalize_query_with_config("b=2&utm_source=x&a=1&gclid=y", Some(&config)),
+            "a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn query_normalization_applies_verified_ignores() {
+        assert_eq!(
+            normalize_query_with_config_and_verified_ignores(
+                "b=2&utm_source=x&a=1",
+                None,
+                &["utm_source".to_string()],
+            ),
             "a=1&b=2"
         );
     }

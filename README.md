@@ -10,7 +10,7 @@ origin service without a hosted control plane or required telemetry.
 
 ## Install
 
-v0.5.0 supports released binaries for Linux x86_64, Linux arm64, and Apple
+v0.5.1 supports released binaries for Linux x86_64, Linux arm64, and Apple
 Silicon macOS.
 
 | Host | Release target |
@@ -30,7 +30,7 @@ build from source.
 Common install variants:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.5.0 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.5.1 bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_INSTALL_DIR=/usr/local/bin bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_FLAVOR=http3-experimental bash
 ```
@@ -129,6 +129,13 @@ responses, and high-cardinality public object routes such as `/notice/{id}`
 become reusable with bounded evidence. Sensitive routes such as `/user/{id}`
 remain protected by default.
 
+v0.5.1 adds precision adaptive reuse. kubio can prove that noisy query
+parameters such as `utm_source` do not affect a route's fingerprint, report them
+as verified ignore candidates, and compact cache keys only when the route
+explicitly enables that behavior. Public slug routes such as
+`/articles/{slug}` can collect public-object evidence, while sensitive slug
+routes such as `/users/jane-doe` remain protected.
+
 Configure `--panic-file /path/to/file` to immediately disable reuse while
 keeping origin pass-through active.
 
@@ -169,6 +176,8 @@ kubio remains local-first and process-local:
 - Route policy hints and query key hints.
 - Adaptive reuse for exact keys, origin-public responses, and public object
   routes.
+- Precision adaptive reuse for verified query equivalence, evidence decay,
+  canary validation, bounded variants, and public slug routes.
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
@@ -182,5 +191,6 @@ kubio remains local-first and process-local:
 - [Metrics](docs/metrics.md)
 - [Safety Model](docs/safety-model.md)
 - [Roadmap](docs/roadmap.md)
+- [v0.5.1 Release Notes](docs/release-notes-v0.5.1.md)
+- [v0.5.1 Design](.design/v0.5.1)
 - [v0.5.0 Release Notes](docs/release-notes-v0.5.0.md)
-- [v0.5.0 Design](.design/v0.5.0)

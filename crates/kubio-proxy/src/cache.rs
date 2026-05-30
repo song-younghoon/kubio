@@ -28,6 +28,15 @@ pub(crate) fn response_from_cache_entry_with_status(
                 .reuse_eligibility(route_id, &entry.cache_key_hash, true, false);
         builder = builder.header("x-kubio-reuse-source", eligibility.reuse_class.to_string());
         builder = builder.header("x-kubio-reuse-class", eligibility.reuse_class.to_string());
+        if let Some(route) = state.observer.route_by_hash(&route_id.hash()) {
+            builder = builder.header("x-kubio-confidence", route.confidence_tier.to_string());
+            let key_shape = if route.query_compacted_groups > 0 {
+                "query_compacted"
+            } else {
+                "exact"
+            };
+            builder = builder.header("x-kubio-key-shape", key_shape);
+        }
     }
     builder = add_alt_svc_header(builder, state, route_id, request_authority);
     builder

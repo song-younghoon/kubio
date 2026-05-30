@@ -376,6 +376,9 @@ fn apply_policy_config(config: &mut PolicyConfig, policy: FilePolicyConfig) -> R
         if let Some(origin_public_fast_path) = adaptive_reuse.origin_public_fast_path {
             config.adaptive_reuse.origin_public_fast_path = origin_public_fast_path;
         }
+        if let Some(precision) = adaptive_reuse.precision {
+            config.adaptive_reuse.precision = precision;
+        }
     }
     Ok(())
 }

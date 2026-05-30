@@ -25,6 +25,11 @@ pub(crate) enum Scenario {
     PublicObjectSweep,
     ProtectedUserSweep,
     OriginPublicFastPath,
+    QueryNoisyPublicObject,
+    SlugPublicObjectSweep,
+    SensitiveSlugSweep,
+    EvidenceDecay,
+    CanaryMismatch,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, PartialEq, Eq)]

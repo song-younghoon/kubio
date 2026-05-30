@@ -270,6 +270,7 @@ pub struct AdaptiveReuseConfig {
     pub key_validation: KeyValidationReuseConfig,
     pub public_object: PublicObjectReuseConfig,
     pub origin_public_fast_path: OriginPublicFastPathConfig,
+    pub precision: PrecisionReuseConfig,
 }
 
 impl Default for AdaptiveReuseConfig {
@@ -279,6 +280,7 @@ impl Default for AdaptiveReuseConfig {
             key_validation: KeyValidationReuseConfig::default(),
             public_object: PublicObjectReuseConfig::default(),
             origin_public_fast_path: OriginPublicFastPathConfig::default(),
+            precision: PrecisionReuseConfig::default(),
         }
     }
 }
@@ -301,6 +303,130 @@ impl AdaptiveReuseConfig {
                 ..PublicObjectReuseConfig::default()
             },
             ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrecisionReuseConfig {
+    pub enabled: bool,
+    pub confidence: PrecisionConfidenceConfig,
+    pub query_equivalence: QueryEquivalenceConfig,
+    pub canary: PrecisionCanaryConfig,
+    pub slug: SlugIntelligenceConfig,
+    pub variants: VariantPrecisionConfig,
+}
+
+impl Default for PrecisionReuseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            confidence: PrecisionConfidenceConfig::default(),
+            query_equivalence: QueryEquivalenceConfig::default(),
+            canary: PrecisionCanaryConfig::default(),
+            slug: SlugIntelligenceConfig::default(),
+            variants: VariantPrecisionConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrecisionConfidenceConfig {
+    pub fresh_window_secs: u64,
+    pub min_window_samples: u64,
+    pub strong_window_samples: u64,
+    pub max_negative_events: u64,
+    pub cooldown_secs: u64,
+    pub max_cooldown_secs: u64,
+    pub cooldown_backoff: f64,
+}
+
+impl Default for PrecisionConfidenceConfig {
+    fn default() -> Self {
+        Self {
+            fresh_window_secs: 30 * 60,
+            min_window_samples: 20,
+            strong_window_samples: 100,
+            max_negative_events: 0,
+            cooldown_secs: 10 * 60,
+            max_cooldown_secs: 60 * 60,
+            cooldown_backoff: 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueryEquivalenceConfig {
+    pub enabled: bool,
+    pub auto_compact: bool,
+    pub min_distinct_values: u64,
+    pub min_matching_fingerprints: u64,
+    pub min_base_keys: u64,
+    pub max_mismatches: u64,
+}
+
+impl Default for QueryEquivalenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_compact: false,
+            min_distinct_values: 3,
+            min_matching_fingerprints: 3,
+            min_base_keys: 1,
+            max_mismatches: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrecisionCanaryConfig {
+    pub enabled: bool,
+    pub probation_rate: f64,
+    pub validated_rate: f64,
+    pub strong_rate: f64,
+    pub min_interval_secs: u64,
+}
+
+impl Default for PrecisionCanaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            probation_rate: 0.10,
+            validated_rate: 0.02,
+            strong_rate: 0.005,
+            min_interval_secs: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlugIntelligenceConfig {
+    pub enabled: bool,
+    pub min_distinct_values: u64,
+    pub min_route_samples: u64,
+}
+
+impl Default for SlugIntelligenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_distinct_values: 3,
+            min_route_samples: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariantPrecisionConfig {
+    pub max_values_per_dimension: u64,
+    pub require_variant_evidence: bool,
+}
+
+impl Default for VariantPrecisionConfig {
+    fn default() -> Self {
+        Self {
+            max_values_per_dimension: 8,
+            require_variant_evidence: true,
         }
     }
 }
@@ -530,11 +656,27 @@ pub struct RouteQueryConfig {
     pub include: Vec<String>,
     #[serde(default)]
     pub ignore: Vec<String>,
+    #[serde(default)]
+    pub verified_ignore: RouteVerifiedIgnoreConfig,
 }
 
 impl RouteQueryConfig {
     pub fn is_empty(&self) -> bool {
-        self.include.is_empty() && self.ignore.is_empty()
+        self.include.is_empty() && self.ignore.is_empty() && self.verified_ignore.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteVerifiedIgnoreConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+impl RouteVerifiedIgnoreConfig {
+    pub fn is_empty(&self) -> bool {
+        !self.enabled && self.allow.is_empty()
     }
 }
 

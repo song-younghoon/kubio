@@ -1,7 +1,7 @@
 use kubio_core::{
-    AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash, Decision, DecisionReason,
-    HttpProtocol, Mode, PathObservation, ResponseFingerprint, ReuseClass, RouteId, RouteState,
-    StatusClass,
+    query_pattern_matches, short_hash, AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash,
+    Decision, DecisionReason, HttpProtocol, Mode, PathObservation, ResponseFingerprint, ReuseClass,
+    RouteId, RouteQueryConfig, RouteState, StatusClass,
 };
 use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
@@ -134,6 +134,19 @@ impl Observer {
             if record.origin && record.shadow_eligible {
                 route.store_safe_count += 1;
             }
+            if record.origin {
+                let now = SystemTime::now();
+                if record.shadow_eligible {
+                    route.precision_positive_samples += 1;
+                    if route.first_evidence_at.is_none() {
+                        route.first_evidence_at = Some(now);
+                    }
+                    route.last_evidence_at = Some(now);
+                } else if record.protected {
+                    route.precision_negative_samples += 1;
+                    route.last_evidence_at = Some(now);
+                }
+            }
             route.score = record.score;
             route.reasons = record.reasons.clone();
             route
@@ -200,6 +213,16 @@ impl Observer {
                     }
                     if outcome.shadow_mismatch {
                         route.shadow_mismatches += 1;
+                        route.precision_negative_samples += 1;
+                        let now = SystemTime::now();
+                        route.last_evidence_at = Some(now);
+                        let cooldown = self
+                            .adaptive_reuse
+                            .precision
+                            .confidence
+                            .cooldown_secs
+                            .min(self.adaptive_reuse.precision.confidence.max_cooldown_secs);
+                        route.cooldown_until = Some(now + Duration::from_secs(cooldown));
                         route.state = RouteState::Protected;
                         route.reasons = vec![DecisionReason::ShadowMismatch];
                     }
@@ -225,20 +248,42 @@ impl Observer {
 
     pub fn record_path_observation(&self, route_id: RouteId, observation: PathObservation) {
         let mut inner = self.inner.write();
-        let route = inner
-            .routes
-            .entry(route_id)
-            .or_insert_with_key(|route_id| RouteStats::new(route_id.clone()));
-        if observation.sensitive_path_score > 0 {
-            route.path_sensitive_samples += 1;
-        }
-        if observation.id_like_segment_count > 0 {
-            route.id_like_path_samples += 1;
-        }
-        for hash in observation.dynamic_segment_hashes {
-            if route.dynamic_segment_hashes.len() < 1024 {
-                route.dynamic_segment_hashes.insert(hash);
+        let mut slug_event_route = None;
+        {
+            let route = inner
+                .routes
+                .entry(route_id)
+                .or_insert_with_key(|route_id| RouteStats::new(route_id.clone()));
+            if observation.sensitive_path_score > 0 {
+                route.path_sensitive_samples += 1;
             }
+            if observation.id_like_segment_count > 0 {
+                route.id_like_path_samples += 1;
+            }
+            if observation.slug_like_segment_count > 0 {
+                route.slug_like_path_samples += 1;
+                slug_event_route = Some(route.route_id.clone());
+            }
+            for hash in observation.dynamic_segment_hashes {
+                if route.dynamic_segment_hashes.len() < 1024 {
+                    route.dynamic_segment_hashes.insert(hash);
+                }
+            }
+            for hash in observation.slug_segment_hashes {
+                if route.slug_segment_hashes.len() < 1024 {
+                    route.slug_segment_hashes.insert(hash);
+                }
+            }
+        }
+        if let Some(route_id) = slug_event_route {
+            self.push_event_locked(
+                &mut inner,
+                EventType::SlugRouteCandidateDetected,
+                Some(route_id),
+                None,
+                vec![DecisionReason::PublicObjectValidated],
+                "slug-like path evidence observed for a public object route",
+            );
         }
     }
 
@@ -427,6 +472,7 @@ impl Observer {
 
         let mut inner = self.inner.write();
         let mut suggestions = Vec::new();
+        let mut verified = Vec::new();
         {
             let route = inner
                 .routes
@@ -439,6 +485,8 @@ impl Observer {
                     .entry(param.name.clone())
                     .or_insert_with(|| QueryParamStats::new(param.name.clone()));
                 let had_suggestion = stats.suggestion().is_some();
+                let was_verified = stats
+                    .verified_ignore_candidate(&self.adaptive_reuse.precision.query_equivalence);
                 stats.record_fingerprint(param, &fingerprint_hash);
                 if !had_suggestion
                     && stats.suggestion().is_some()
@@ -447,6 +495,12 @@ impl Observer {
                     stats.suggestion_event_emitted = true;
                     suggestions.push(stats.name.clone());
                     route.query_param_suggestions += 1;
+                }
+                if !was_verified
+                    && stats
+                        .verified_ignore_candidate(&self.adaptive_reuse.precision.query_equivalence)
+                {
+                    verified.push(stats.name.clone());
                 }
             }
         }
@@ -459,6 +513,16 @@ impl Observer {
                 None,
                 vec![DecisionReason::QueryHintApplied],
                 format!("query parameter `{name}` is a candidate for explicit ignore"),
+            );
+        }
+        for name in verified {
+            self.push_event_locked(
+                &mut inner,
+                EventType::QueryEquivalenceCandidateVerified,
+                Some(route_id.clone()),
+                None,
+                vec![DecisionReason::QueryHintApplied],
+                format!("query parameter `{name}` has matching fingerprint evidence for verified ignore"),
             );
         }
     }
@@ -526,6 +590,225 @@ impl Observer {
                 "query hint was not used for this request"
             },
         );
+    }
+
+    pub fn record_variant_values(&self, route_id: RouteId, variants: Vec<(String, String)>) {
+        if variants.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.write();
+        let mut unbounded = false;
+        {
+            let route = inner
+                .routes
+                .entry(route_id.clone())
+                .or_insert_with(|| RouteStats::new(route_id.clone()));
+            for (name, value_hash) in variants {
+                let values = route.variant_value_hashes.entry(name).or_default();
+                if values.len() < 64 {
+                    values.insert(value_hash);
+                }
+                if values.len() as u64
+                    > self
+                        .adaptive_reuse
+                        .precision
+                        .variants
+                        .max_values_per_dimension
+                {
+                    unbounded = true;
+                }
+            }
+        }
+        if unbounded {
+            self.push_event_locked(
+                &mut inner,
+                EventType::VariantUnboundedDetected,
+                Some(route_id),
+                None,
+                vec![DecisionReason::VaryUnsupported],
+                "configured variant dimension exceeded the bounded value limit",
+            );
+        }
+    }
+
+    pub fn verified_query_ignores(
+        &self,
+        route_id: &RouteId,
+        query_config: Option<&RouteQueryConfig>,
+    ) -> Vec<String> {
+        if !self.adaptive_reuse.enabled
+            || !self.adaptive_reuse.precision.enabled
+            || !self.adaptive_reuse.precision.query_equivalence.enabled
+        {
+            return Vec::new();
+        }
+        let route_enabled = query_config
+            .map(|config| config.verified_ignore.enabled)
+            .unwrap_or(false);
+        let allow_patterns = query_config
+            .map(|config| config.verified_ignore.allow.as_slice())
+            .unwrap_or(&[]);
+        let auto_compact = self.adaptive_reuse.precision.query_equivalence.auto_compact;
+        if !route_enabled && !auto_compact {
+            return Vec::new();
+        }
+
+        let mut compacted = Vec::new();
+        let mut inner = self.inner.write();
+        let mut events = Vec::new();
+        if let Some(route) = inner.routes.get_mut(route_id) {
+            for stats in route.query_params.values() {
+                if !stats
+                    .verified_ignore_candidate(&self.adaptive_reuse.precision.query_equivalence)
+                {
+                    continue;
+                }
+                let allowed_by_route = route_enabled
+                    && allow_patterns
+                        .iter()
+                        .any(|pattern| query_pattern_matches(pattern, &stats.name));
+                let allowed_by_auto = auto_compact && known_tracking_query_name(&stats.name);
+                if allowed_by_route || allowed_by_auto {
+                    compacted.push(stats.name.clone());
+                    if route.query_compacted_groups.insert(stats.name.clone()) {
+                        events.push(stats.name.clone());
+                    }
+                }
+            }
+        }
+        for name in events {
+            self.push_event_locked(
+                &mut inner,
+                EventType::QueryEquivalenceCompactionApplied,
+                Some(route_id.clone()),
+                None,
+                vec![DecisionReason::QueryHintApplied],
+                format!("query parameter `{name}` is ignored after verified equivalence proof"),
+            );
+        }
+        compacted.sort();
+        compacted
+    }
+
+    pub fn should_canary_validate(&self, route_id: &RouteId, key_hash: &CacheKeyHash) -> bool {
+        if !self.adaptive_reuse.enabled
+            || !self.adaptive_reuse.precision.enabled
+            || !self.adaptive_reuse.precision.canary.enabled
+        {
+            return false;
+        }
+        let mut inner = self.inner.write();
+        let Some(route) = inner.routes.get_mut(route_id) else {
+            return false;
+        };
+        let tier = route.confidence_tier(&self.adaptive_reuse);
+        let rate = match tier {
+            kubio_core::ConfidenceTier::Probation => {
+                self.adaptive_reuse.precision.canary.probation_rate
+            }
+            kubio_core::ConfidenceTier::Validated => {
+                self.adaptive_reuse.precision.canary.validated_rate
+            }
+            kubio_core::ConfidenceTier::Strong => self.adaptive_reuse.precision.canary.strong_rate,
+            _ => return false,
+        };
+        if rate <= 0.0 {
+            return false;
+        }
+        let now = SystemTime::now();
+        if route
+            .last_canary_at
+            .and_then(|last| now.duration_since(last).ok())
+            .map(|elapsed| {
+                elapsed.as_secs() < self.adaptive_reuse.precision.canary.min_interval_secs
+            })
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let sample = deterministic_sample(route_id, key_hash);
+        if sample < rate {
+            route.last_canary_at = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn record_canary_validation(
+        &self,
+        route_id: RouteId,
+        cache_key_hash: CacheKeyHash,
+        matched: bool,
+    ) {
+        let mut inner = self.inner.write();
+        let mut cooldown_event = false;
+        {
+            let route = inner
+                .routes
+                .entry(route_id.clone())
+                .or_insert_with(|| RouteStats::new(route_id.clone()));
+            let now = SystemTime::now();
+            if matched {
+                route.canary_matches += 1;
+                route.precision_positive_samples += 1;
+                route.last_evidence_at = Some(now);
+                if route.first_evidence_at.is_none() {
+                    route.first_evidence_at = Some(now);
+                }
+            } else {
+                route.canary_mismatches += 1;
+                route.precision_negative_samples += 1;
+                route.shadow_mismatches += 1;
+                route.state = RouteState::Protected;
+                route.reasons = vec![DecisionReason::ShadowMismatch];
+                let base = self.adaptive_reuse.precision.confidence.cooldown_secs;
+                let max = self.adaptive_reuse.precision.confidence.max_cooldown_secs;
+                let exponent = route.cooldown_count.min(8) as i32;
+                let backed_off = (base as f64
+                    * self
+                        .adaptive_reuse
+                        .precision
+                        .confidence
+                        .cooldown_backoff
+                        .powi(exponent)) as u64;
+                let cooldown = backed_off.min(max).max(base);
+                route.cooldown_until = Some(now + Duration::from_secs(cooldown));
+                route.cooldown_count += 1;
+                route.last_evidence_at = Some(now);
+                cooldown_event = true;
+            }
+        }
+        self.push_event_locked(
+            &mut inner,
+            if matched {
+                EventType::PrecisionCanaryMatch
+            } else {
+                EventType::PrecisionCanaryMismatch
+            },
+            Some(route_id.clone()),
+            Some(cache_key_hash),
+            if matched {
+                vec![DecisionReason::ReusableAndFresh]
+            } else {
+                vec![DecisionReason::ShadowMismatch]
+            },
+            if matched {
+                "precision canary matched the stored response fingerprint"
+            } else {
+                "precision canary found a fingerprint mismatch"
+            },
+        );
+        if cooldown_event {
+            self.push_event_locked(
+                &mut inner,
+                EventType::PrecisionCooldownStarted,
+                Some(route_id),
+                None,
+                vec![DecisionReason::ShadowMismatch],
+                "route entered precision cooldown after negative evidence",
+            );
+        }
     }
 
     pub fn record_downstream_protocol(&self, route_id: RouteId, protocol: HttpProtocol) {
@@ -796,10 +1079,22 @@ impl Observer {
             );
         };
 
+        if route.cooldown_remaining_seconds().is_some() {
+            return ReuseEligibility::blocked(
+                ReuseClass::HardProtected,
+                vec![AdaptiveReuseBlocker::CooldownActive],
+            );
+        }
         if route.state == RouteState::Protected {
             return ReuseEligibility::blocked(
                 ReuseClass::HardProtected,
                 vec![AdaptiveReuseBlocker::ProtectedRoute],
+            );
+        }
+        if route.stale_evidence(&self.adaptive_reuse) {
+            return ReuseEligibility::blocked(
+                route.reuse_class(&self.adaptive_reuse),
+                vec![AdaptiveReuseBlocker::StaleEvidence],
             );
         }
         if route.shadow_mismatches as u64 > self.adaptive_reuse.public_object.max_shadow_mismatches
@@ -1107,6 +1402,22 @@ impl Observer {
     }
 }
 
+fn known_tracking_query_name(name: &str) -> bool {
+    name.starts_with("utm_") || matches!(name, "gclid" | "fbclid" | "mc_cid" | "mc_eid")
+}
+
+fn deterministic_sample(route_id: &RouteId, key_hash: &CacheKeyHash) -> f64 {
+    let material = format!("{}:{}", route_id.as_label(), key_hash);
+    let hash = short_hash(&material);
+    let prefix = hash.get(..8).unwrap_or(hash.as_str());
+    let value = u64::from_str_radix(prefix, 16).unwrap_or_else(|_| {
+        prefix.as_bytes().iter().fold(0_u64, |acc, byte| {
+            acc.wrapping_mul(31).wrapping_add(*byte as u64)
+        })
+    });
+    (value % 10_000) as f64 / 10_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,7 +1585,106 @@ mod tests {
         assert_eq!(param.cardinality, "low");
         assert!(!param.fingerprint_sensitive);
         assert_eq!(param.suggestion.as_deref(), Some("candidate_ignore"));
+        assert_eq!(
+            param.equivalence_class,
+            kubio_core::QueryEquivalenceClass::VerifiedIgnoreCandidate
+        );
         assert_eq!(snapshot.overview.query_param_suggestions, 1);
+    }
+
+    #[test]
+    fn verified_query_ignores_require_operator_enablement() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("stable".to_string()));
+
+        for value_hash in ["a", "b", "c"] {
+            let param = QueryParamRecord {
+                name: "utm_source".to_string(),
+                configured_action: "observe".to_string(),
+                value_hash: Some(value_hash.to_string()),
+                sensitive: false,
+            };
+            observer.record_query_params(route.clone(), vec![param.clone()]);
+            observer.record_query_fingerprint(route.clone(), &[param], &fp);
+        }
+
+        assert!(observer.verified_query_ignores(&route, None).is_empty());
+        let query = RouteQueryConfig {
+            include: Vec::new(),
+            ignore: Vec::new(),
+            verified_ignore: kubio_core::RouteVerifiedIgnoreConfig {
+                enabled: true,
+                allow: vec!["utm_*".to_string()],
+            },
+        };
+        assert_eq!(
+            observer.verified_query_ignores(&route, Some(&query)),
+            vec!["utm_source".to_string()]
+        );
+        let snapshot = observer.snapshot();
+        let route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.route_id.template == "/api/products")
+            .unwrap();
+        assert_eq!(route.query_compacted_groups, 1);
+    }
+
+    #[test]
+    fn canary_mismatch_enters_cooldown() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let key = CacheKeyHash("key".to_string());
+
+        observer.record_canary_validation(route.clone(), key.clone(), false);
+
+        let snapshot = observer.snapshot();
+        let route_snapshot = snapshot
+            .routes
+            .iter()
+            .find(|route_snapshot| route_snapshot.route_id == route)
+            .unwrap();
+        assert_eq!(
+            route_snapshot.confidence_tier,
+            kubio_core::ConfidenceTier::Cooldown
+        );
+        assert!(route_snapshot.cooldown_remaining_seconds.is_some());
+        assert!(
+            !observer
+                .reuse_eligibility(&route, &key, true, false)
+                .eligible
+        );
+    }
+
+    #[test]
+    fn stale_precision_evidence_blocks_adaptive_reuse() {
+        let mut config = AdaptiveReuseConfig::default();
+        config.precision.confidence.fresh_window_secs = 1;
+        config.public_object.min_route_samples = 1;
+        config.public_object.min_distinct_keys = 1;
+        config.public_object.min_shadow_matches = 0;
+        let observer = Observer::with_adaptive_config(100, 100, 100, 1, 1, 0, config);
+        let route = RouteId::new("GET", "/notice/{id}");
+        let key = CacheKeyHash("key".to_string());
+        {
+            let mut inner = observer.inner.write();
+            let mut stats = RouteStats::new(route.clone());
+            stats.request_count = 1;
+            stats.origin_count = 1;
+            stats.store_safe_count = 1;
+            stats.distinct_key_hashes.insert(key.clone());
+            stats.dynamic_segment_hashes.insert("id".to_string());
+            stats.last_evidence_at = Some(SystemTime::now() - Duration::from_secs(5));
+            inner.routes.insert(route.clone(), stats);
+        }
+
+        let eligibility = observer.reuse_eligibility(&route, &key, true, false);
+
+        assert!(!eligibility.eligible);
+        assert!(eligibility
+            .blockers
+            .contains(&AdaptiveReuseBlocker::StaleEvidence));
     }
 
     #[test]

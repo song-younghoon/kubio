@@ -1,9 +1,9 @@
 use kubio_core::{
-    AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash, DecisionReason, ReuseClass, RouteId,
-    RouteState, StatusClassCounts,
+    AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash, ConfidenceTier, DecisionReason,
+    ReuseClass, RouteId, RouteState, StatusClassCounts,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::events::Event;
 use crate::latency::latency_snapshot;
@@ -51,8 +51,21 @@ pub(crate) struct RouteStats {
     pub(crate) origin_public_responses: u64,
     pub(crate) distinct_key_hashes: HashSet<CacheKeyHash>,
     pub(crate) dynamic_segment_hashes: HashSet<String>,
+    pub(crate) slug_segment_hashes: HashSet<String>,
     pub(crate) id_like_path_samples: u64,
+    pub(crate) slug_like_path_samples: u64,
     pub(crate) path_sensitive_samples: u64,
+    pub(crate) precision_positive_samples: u64,
+    pub(crate) precision_negative_samples: u64,
+    pub(crate) canary_matches: u64,
+    pub(crate) canary_mismatches: u64,
+    pub(crate) first_evidence_at: Option<SystemTime>,
+    pub(crate) last_evidence_at: Option<SystemTime>,
+    pub(crate) cooldown_until: Option<SystemTime>,
+    pub(crate) cooldown_count: u64,
+    pub(crate) last_canary_at: Option<SystemTime>,
+    pub(crate) query_compacted_groups: HashSet<String>,
+    pub(crate) variant_value_hashes: HashMap<String, HashSet<String>>,
     pub(crate) route_hint: Option<String>,
     pub(crate) route_hint_applied: u64,
     pub(crate) route_hint_rejected: u64,
@@ -90,8 +103,21 @@ impl RouteStats {
             origin_public_responses: 0,
             distinct_key_hashes: HashSet::new(),
             dynamic_segment_hashes: HashSet::new(),
+            slug_segment_hashes: HashSet::new(),
             id_like_path_samples: 0,
+            slug_like_path_samples: 0,
             path_sensitive_samples: 0,
+            precision_positive_samples: 0,
+            precision_negative_samples: 0,
+            canary_matches: 0,
+            canary_mismatches: 0,
+            first_evidence_at: None,
+            last_evidence_at: None,
+            cooldown_until: None,
+            cooldown_count: 0,
+            last_canary_at: None,
+            query_compacted_groups: HashSet::new(),
+            variant_value_hashes: HashMap::new(),
             route_hint: None,
             route_hint_applied: 0,
             route_hint_rejected: 0,
@@ -141,7 +167,72 @@ impl RouteStats {
     }
 
     pub(crate) fn dynamic_value_count(&self) -> u64 {
-        self.dynamic_segment_hashes.len() as u64
+        (self.dynamic_segment_hashes.len() + self.slug_segment_hashes.len()) as u64
+    }
+
+    pub(crate) fn slug_value_count(&self) -> u64 {
+        self.slug_segment_hashes.len() as u64
+    }
+
+    pub(crate) fn evidence_age_seconds(&self) -> u64 {
+        self.last_evidence_at
+            .and_then(|last| SystemTime::now().duration_since(last).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn stale_evidence(&self, config: &AdaptiveReuseConfig) -> bool {
+        config.precision.enabled
+            && self
+                .last_evidence_at
+                .and_then(|last| SystemTime::now().duration_since(last).ok())
+                .map(|age| age.as_secs() >= config.precision.confidence.fresh_window_secs)
+                .unwrap_or(false)
+    }
+
+    pub(crate) fn cooldown_remaining_seconds(&self) -> Option<u64> {
+        self.cooldown_until
+            .and_then(|until| until.duration_since(SystemTime::now()).ok())
+            .map(|duration| duration.as_secs())
+            .filter(|remaining| *remaining > 0)
+    }
+
+    pub(crate) fn confidence_tier(&self, config: &AdaptiveReuseConfig) -> ConfidenceTier {
+        if self.cooldown_remaining_seconds().is_some() {
+            return ConfidenceTier::Cooldown;
+        }
+        if self.state == RouteState::Protected {
+            return ConfidenceTier::HardProtected;
+        }
+        if !config.precision.enabled {
+            return ConfidenceTier::Unknown;
+        }
+        if self.stale_evidence(config) {
+            return ConfidenceTier::Unknown;
+        }
+        if self.precision_negative_samples > config.precision.confidence.max_negative_events {
+            return ConfidenceTier::Cooldown;
+        }
+        if self.precision_positive_samples >= config.precision.confidence.strong_window_samples {
+            ConfidenceTier::Strong
+        } else if self.precision_positive_samples >= config.precision.confidence.min_window_samples
+        {
+            ConfidenceTier::Validated
+        } else if self.public_object_candidate(config) || self.precision_positive_samples > 0 {
+            ConfidenceTier::Probation
+        } else {
+            ConfidenceTier::Unknown
+        }
+    }
+
+    pub(crate) fn variant_dimension_count(&self) -> u64 {
+        self.variant_value_hashes.len() as u64
+    }
+
+    pub(crate) fn variant_unbounded(&self, config: &AdaptiveReuseConfig) -> bool {
+        self.variant_value_hashes
+            .values()
+            .any(|values| values.len() as u64 > config.precision.variants.max_values_per_dimension)
     }
 
     pub(crate) fn public_object_ready(&self, config: &AdaptiveReuseConfig) -> bool {
@@ -156,6 +247,8 @@ impl RouteStats {
             && self.store_safe_rate() >= public_object.min_store_safe_rate
             && self.shadow_matches >= public_object.min_shadow_matches
             && self.path_sensitive_samples == 0
+            && self.cooldown_remaining_seconds().is_none()
+            && !self.stale_evidence(config)
     }
 
     pub(crate) fn public_object_candidate(&self, config: &AdaptiveReuseConfig) -> bool {
@@ -163,8 +256,11 @@ impl RouteStats {
             && config.public_object.enabled
             && self.state != RouteState::Protected
             && self.path_sensitive_samples == 0
-            && (self.id_like_path_samples > 0 || self.distinct_key_count() > 1)
+            && (self.id_like_path_samples > 0
+                || self.slug_like_path_samples > 0
+                || self.distinct_key_count() > 1)
             && (self.shadow_mismatches as u64) <= config.public_object.max_shadow_mismatches
+            && self.cooldown_remaining_seconds().is_none()
     }
 
     pub(crate) fn reuse_class(&self, config: &AdaptiveReuseConfig) -> ReuseClass {
@@ -200,6 +296,12 @@ impl RouteStats {
         if (self.shadow_mismatches as u64) > config.public_object.max_shadow_mismatches {
             blockers.push(AdaptiveReuseBlocker::ShadowMismatch);
         }
+        if self.cooldown_remaining_seconds().is_some() {
+            blockers.push(AdaptiveReuseBlocker::CooldownActive);
+        }
+        if self.stale_evidence(config) {
+            blockers.push(AdaptiveReuseBlocker::StaleEvidence);
+        }
         if self.request_count < config.public_object.min_route_samples {
             blockers.push(AdaptiveReuseBlocker::InsufficientRouteSamples);
         }
@@ -214,6 +316,9 @@ impl RouteStats {
         }
         if config.origin_public_fast_path.enabled && self.origin_public_responses == 0 {
             blockers.push(AdaptiveReuseBlocker::NoOriginPublicSignal);
+        }
+        if config.precision.enabled && self.variant_unbounded(config) {
+            blockers.push(AdaptiveReuseBlocker::VariantUnbounded);
         }
         blockers
     }
@@ -233,8 +338,25 @@ impl RouteStats {
             origin_public_responses: self.origin_public_responses,
             distinct_key_count: self.distinct_key_count(),
             dynamic_value_count: self.dynamic_value_count(),
+            slug_value_count: self.slug_value_count(),
             store_safe_rate: self.store_safe_rate(),
             adaptive_blockers: self.eligibility_blockers(config),
+            confidence_tier: self.confidence_tier(config),
+            evidence_window_age_seconds: self.evidence_age_seconds(),
+            stale_evidence: self.stale_evidence(config),
+            cooldown_remaining_seconds: self.cooldown_remaining_seconds(),
+            canary_matches: self.canary_matches,
+            canary_mismatches: self.canary_mismatches,
+            query_equivalence_candidates: self
+                .query_params
+                .values()
+                .filter(|stats| {
+                    stats.verified_ignore_candidate(&config.precision.query_equivalence)
+                })
+                .count() as u64,
+            query_compacted_groups: self.query_compacted_groups.len() as u64,
+            variant_dimensions: self.variant_dimension_count(),
+            variant_unbounded: self.variant_unbounded(config),
             shadow_matches: self.shadow_matches,
             shadow_mismatches: self.shadow_mismatches,
             revalidation_attempts: self.revalidation_attempts,
@@ -270,7 +392,12 @@ impl RouteStats {
             query_params: self
                 .query_params
                 .values()
-                .map(QueryParamStats::snapshot)
+                .map(|stats| {
+                    stats.snapshot(
+                        &config.precision.query_equivalence,
+                        self.query_compacted_groups.contains(&stats.name),
+                    )
+                })
                 .collect(),
         }
     }

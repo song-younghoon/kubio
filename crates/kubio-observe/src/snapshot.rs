@@ -1,6 +1,6 @@
 use kubio_core::{
-    AdaptiveReuseBlocker, DecisionReason, LatencySnapshot, ReuseClass, RouteId, RouteState,
-    StatusClassCounts,
+    AdaptiveReuseBlocker, ConfidenceTier, DecisionReason, LatencySnapshot, QueryEquivalenceClass,
+    ReuseClass, RouteId, RouteState, StatusClassCounts,
 };
 use serde::{Deserialize, Serialize};
 
@@ -123,8 +123,19 @@ pub struct RouteSnapshot {
     pub origin_public_responses: u64,
     pub distinct_key_count: u64,
     pub dynamic_value_count: u64,
+    pub slug_value_count: u64,
     pub store_safe_rate: f64,
     pub adaptive_blockers: Vec<AdaptiveReuseBlocker>,
+    pub confidence_tier: ConfidenceTier,
+    pub evidence_window_age_seconds: u64,
+    pub stale_evidence: bool,
+    pub cooldown_remaining_seconds: Option<u64>,
+    pub canary_matches: u64,
+    pub canary_mismatches: u64,
+    pub query_equivalence_candidates: u64,
+    pub query_compacted_groups: u64,
+    pub variant_dimensions: u64,
+    pub variant_unbounded: bool,
     pub shadow_matches: u64,
     pub shadow_mismatches: u64,
     pub revalidation_attempts: u64,
@@ -160,6 +171,12 @@ pub struct QueryParamSnapshot {
     pub fingerprint_sensitive: bool,
     pub configured_action: String,
     pub suggestion: Option<String>,
+    pub equivalence_class: QueryEquivalenceClass,
+    pub sensitive: bool,
+    pub distinct_value_count: u64,
+    pub matching_fingerprint_count: u64,
+    pub mismatch_count: u64,
+    pub operator_enabled: bool,
 }
 
 pub(crate) fn state_sort_key(state: RouteState) -> u8 {

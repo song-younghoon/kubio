@@ -17,7 +17,7 @@ pub(crate) async fn run(
         bail!("h3 benchmark requires --features experimental-http3");
     }
     let origin = ManagedOrigin::start().await?;
-    let proxy = ManagedProxy::start(origin.url(), protocol).await?;
+    let proxy = ManagedProxy::start(origin.url(), protocol, scenario).await?;
     let mut client = BenchClient::connect(protocol, &proxy).await?;
     let mut latencies = Vec::with_capacity(requests);
     let mut successes = 0usize;
@@ -81,6 +81,24 @@ fn scenario_request(scenario: Scenario, index: usize) -> (String, &'static str) 
         Scenario::ExactKeyAdaptive => ("/catalog/1".to_string(), "catalog-1"),
         Scenario::OriginPublicFastPath => ("/notice/1".to_string(), "notice-1"),
         Scenario::ProtectedUserSweep => (format!("/user/{}", index % 20), "user-"),
+        Scenario::QueryNoisyPublicObject => {
+            let value = index % 8;
+            (format!("/query-intel?utm_source={value}"), "query-intel")
+        }
+        Scenario::SlugPublicObjectSweep => {
+            let id = if index < 6 {
+                1 + index / 2
+            } else {
+                4 + (index - 6) / 2
+            };
+            (format!("/articles/article-{id}"), "article-")
+        }
+        Scenario::SensitiveSlugSweep => {
+            let id = 1 + (index % 8);
+            (format!("/users/user-{id}"), "user-")
+        }
+        Scenario::EvidenceDecay => ("/catalog/1".to_string(), "catalog-1"),
+        Scenario::CanaryMismatch => ("/canary/1".to_string(), "canary-"),
         Scenario::PublicObjectSweep => {
             let id = if index < 6 {
                 1 + index / 2

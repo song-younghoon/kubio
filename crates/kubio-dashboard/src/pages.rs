@@ -79,16 +79,18 @@ pub(crate) async fn routes_page(State(state): State<DashboardState>) -> Html<Str
         .iter()
         .map(|route| {
             format!(
-                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{class}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td><td>{keys}</td><td>{downstream}</td><td>{upstream}</td></tr>",
+                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{class}</td><td>{confidence}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td><td>{keys}</td><td>{query}</td><td>{downstream}</td><td>{upstream}</td></tr>",
                 hash = route.route_hash,
                 label = escape_html(&route.route_id.as_label()),
                 state = route.state,
                 class = route.reuse_class,
+                confidence = route.confidence_tier,
                 requests = route.request_count,
                 origin = route.origin_count,
                 reuse = route.reuse_count,
                 protected = route.protected_count,
                 keys = route.distinct_key_count,
+                query = route.query_equivalence_candidates,
                 downstream = protocol_counts_html(&route.downstream_protocols),
                 upstream = protocol_counts_html(&route.upstream_protocols),
             )
@@ -97,7 +99,7 @@ pub(crate) async fn routes_page(State(state): State<DashboardState>) -> Html<Str
     Html(layout(
         "Routes",
         &format!(
-            "<table><thead><tr><th>Route</th><th>Status</th><th>Reuse class</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th><th>Keys</th><th>Downstream</th><th>Upstream</th></tr></thead><tbody>{rows}</tbody></table>"
+            "<table><thead><tr><th>Route</th><th>Status</th><th>Reuse class</th><th>Confidence</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th><th>Keys</th><th>Query candidates</th><th>Downstream</th><th>Upstream</th></tr></thead><tbody>{rows}</tbody></table>"
         ),
     ))
 }
@@ -135,6 +137,21 @@ pub(crate) async fn route_page(
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
+    let query_params = route
+        .query_params
+        .iter()
+        .map(|param| {
+            format!(
+                "<li>{}: {} values={} matches={} mismatches={} enabled={}</li>",
+                escape_html(&param.name),
+                param.equivalence_class,
+                param.distinct_value_count,
+                param.matching_fingerprint_count,
+                param.mismatch_count,
+                param.operator_enabled,
+            )
+        })
+        .collect::<String>();
     Html(layout(
         &route.route_id.as_label(),
         &format!(
@@ -143,6 +160,7 @@ pub(crate) async fn route_page(
   <h2>{}</h2>
   <p>Status: {}</p>
   <p>Reuse class: {}</p>
+  <p>Confidence: {}</p>
   <h3>kubio's reasoning</h3>
   <ul>{}</ul>
   <dl>
@@ -151,8 +169,16 @@ pub(crate) async fn route_page(
     <dt>Reused responses</dt><dd>{}</dd>
     <dt>Distinct keys</dt><dd>{}</dd>
     <dt>Dynamic path values</dt><dd>{}</dd>
+    <dt>Slug path values</dt><dd>{}</dd>
     <dt>Store-safe rate</dt><dd>{:.2}%</dd>
     <dt>Origin public responses</dt><dd>{}</dd>
+    <dt>Evidence age</dt><dd>{}s</dd>
+    <dt>Cooldown remaining</dt><dd>{}</dd>
+    <dt>Canary</dt><dd>match {} / mismatch {}</dd>
+    <dt>Query equivalence candidates</dt><dd>{}</dd>
+    <dt>Query compacted groups</dt><dd>{}</dd>
+    <dt>Variant dimensions</dt><dd>{}</dd>
+    <dt>Variant unbounded</dt><dd>{}</dd>
     <dt>Adaptive blockers</dt><dd>{}</dd>
     <dt>Shadow matches</dt><dd>{}</dd>
     <dt>Shadow mismatches</dt><dd>{}</dd>
@@ -162,6 +188,8 @@ pub(crate) async fn route_page(
     <dt>Upstream protocols</dt><dd>{}</dd>
     <dt>p95 latency</dt><dd>{:.2} ms</dd>
   </dl>
+  <h3>Query equivalence</h3>
+  <ul>{}</ul>
   <h3>Recent bounded events</h3>
   <ul>{}</ul>
 </section>
@@ -169,14 +197,29 @@ pub(crate) async fn route_page(
             escape_html(&route.route_id.as_label()),
             route.state,
             route.reuse_class,
+            route.confidence_tier,
             reasons,
             route.request_count,
             route.origin_count,
             route.reuse_count,
             route.distinct_key_count,
             route.dynamic_value_count,
+            route.slug_value_count,
             route.store_safe_rate * 100.0,
             route.origin_public_responses,
+            route.evidence_window_age_seconds,
+            escape_html(
+                &route
+                    .cooldown_remaining_seconds
+                    .map(|value| format!("{value}s"))
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+            route.canary_matches,
+            route.canary_mismatches,
+            route.query_equivalence_candidates,
+            route.query_compacted_groups,
+            route.variant_dimensions,
+            route.variant_unbounded,
             escape_html(if blockers.is_empty() {
                 "none"
             } else {
@@ -189,6 +232,7 @@ pub(crate) async fn route_page(
             protocol_counts_html(&route.downstream_protocols),
             protocol_counts_html(&route.upstream_protocols),
             route.latency.p95_ms,
+            query_params,
             events,
         ),
     ))

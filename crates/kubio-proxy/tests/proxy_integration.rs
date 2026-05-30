@@ -11,7 +11,7 @@ use kubio_core::TlsConfig;
 use kubio_core::{
     AdaptiveReuseConfig, DecisionReason, EffectiveConfig, KeyValidationReuseConfig, Mode,
     OriginProtocolPreference, PublicObjectReuseConfig, RouteHintConfig, RouteMatchConfig,
-    RouteQueryConfig, RouteSafetyConfig, RouteState,
+    RouteQueryConfig, RouteSafetyConfig, RouteState, RouteVerifiedIgnoreConfig,
 };
 use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
@@ -1358,6 +1358,7 @@ async fn route_query_hint_ignores_configured_parameters() {
         query: RouteQueryConfig {
             include: Vec::new(),
             ignore: vec!["utm_*".to_string()],
+            verified_ignore: Default::default(),
         },
         ..route_hint_defaults("GET", "/query")
     };
@@ -1407,6 +1408,7 @@ async fn route_query_hint_does_not_apply_to_non_matching_route() {
         query: RouteQueryConfig {
             include: Vec::new(),
             ignore: vec!["utm_*".to_string()],
+            verified_ignore: Default::default(),
         },
         ..route_hint_defaults("GET", "/query")
     };
@@ -1443,6 +1445,7 @@ async fn route_and_query_hint_rejections_are_observed() {
         query: RouteQueryConfig {
             include: Vec::new(),
             ignore: vec!["utm_*".to_string()],
+            verified_ignore: Default::default(),
         },
         ..route_hint_defaults("GET", "/auth")
     };
@@ -1579,6 +1582,206 @@ async fn query_intelligence_marks_fingerprint_sensitive_params() {
         .unwrap();
     assert!(variant.fingerprint_sensitive);
     assert_eq!(variant.suggestion, None);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn verified_query_ignore_compacts_keys_only_after_route_enablement() {
+    let origin = TestOrigin::start().await;
+    let hint = RouteHintConfig {
+        name: Some("verified query ignore".to_string()),
+        route_match: RouteMatchConfig {
+            method: "GET".to_string(),
+            path: "/query-intel".to_string(),
+        },
+        query: RouteQueryConfig {
+            include: Vec::new(),
+            ignore: Vec::new(),
+            verified_ignore: RouteVerifiedIgnoreConfig {
+                enabled: true,
+                allow: vec!["utm_*".to_string()],
+            },
+        },
+        ..route_hint_defaults("GET", "/query-intel")
+    };
+    let defaults = EffectiveConfig::default();
+    let mut policy = defaults.policy.clone();
+    policy.min_key_repeats = 2;
+    policy.min_shadow_validations = 1;
+    policy.adaptive_reuse.key_validation = KeyValidationReuseConfig {
+        min_observations: 2,
+        min_shadow_matches: 1,
+        max_shadow_mismatches: 0,
+    };
+    policy.adaptive_reuse.precision.canary.enabled = false;
+    let mut server = defaults.server.clone();
+    server.listen = unused_addr().await;
+    let runtime = TestRuntime::start_from_config(EffectiveConfig {
+        origin: origin.url(),
+        mode: Mode::Auto,
+        server,
+        policy,
+        routes: vec![hint],
+        ..defaults
+    })
+    .await;
+
+    for suffix in ["?utm_source=a", "?utm_source=b", "?utm_source=c"] {
+        let body = reqwest::get(format!("{}/query-intel{}", runtime.proxy_url(), suffix))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "query-intel");
+    }
+
+    for suffix in ["?utm_source=d", "?utm_source=e", "?utm_source=f"] {
+        let body = reqwest::get(format!("{}/query-intel{}", runtime.proxy_url(), suffix))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "query-intel");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    let route = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /query-intel")
+        .unwrap();
+    let utm_source = route
+        .query_params
+        .iter()
+        .find(|param| param.name == "utm_source")
+        .unwrap();
+    assert_eq!(utm_source.equivalence_class.to_string(), "compacted");
+    assert!(utm_source.operator_enabled);
+    assert_eq!(route.query_equivalence_candidates, 1);
+    assert_eq!(route.query_compacted_groups, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn sensitive_query_params_never_become_verified_ignore_candidates() {
+    let origin = TestOrigin::start().await;
+    let hint = RouteHintConfig {
+        name: Some("sensitive query ignore".to_string()),
+        route_match: RouteMatchConfig {
+            method: "GET".to_string(),
+            path: "/query-sensitive".to_string(),
+        },
+        query: RouteQueryConfig {
+            include: Vec::new(),
+            ignore: Vec::new(),
+            verified_ignore: RouteVerifiedIgnoreConfig {
+                enabled: true,
+                allow: vec!["token".to_string()],
+            },
+        },
+        ..route_hint_defaults("GET", "/query-sensitive")
+    };
+    let runtime =
+        TestRuntime::start_with_routes(origin.url(), Mode::Auto, 100, 2, 1, vec![hint]).await;
+
+    for suffix in ["?token=raw-a", "?token=raw-b", "?token=raw-c"] {
+        let _ = reqwest::get(format!("{}/query-sensitive{}", runtime.proxy_url(), suffix))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap();
+    assert!(!snapshot_json.contains("raw-a"));
+    let route = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /query-sensitive")
+        .unwrap();
+    let token = route
+        .query_params
+        .iter()
+        .find(|param| param.name == "token")
+        .unwrap();
+    assert_eq!(token.equivalence_class.to_string(), "sensitive_blocked");
+    assert_eq!(route.query_compacted_groups, 0);
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn slug_public_object_routes_collect_evidence_while_sensitive_slugs_stay_protected() {
+    let origin = TestOrigin::start().await;
+    let defaults = EffectiveConfig::default();
+    let mut policy = defaults.policy.clone();
+    policy.adaptive_reuse.public_object = PublicObjectReuseConfig {
+        enabled: true,
+        min_route_samples: 3,
+        min_distinct_keys: 2,
+        min_store_safe_rate: 0.98,
+        min_shadow_matches: 1,
+        max_shadow_mismatches: 0,
+    };
+    policy
+        .adaptive_reuse
+        .precision
+        .confidence
+        .min_window_samples = 1;
+    policy
+        .adaptive_reuse
+        .precision
+        .confidence
+        .strong_window_samples = 3;
+    let mut server = defaults.server.clone();
+    server.listen = unused_addr().await;
+    let runtime = TestRuntime::start_from_config(EffectiveConfig {
+        origin: origin.url(),
+        mode: Mode::Auto,
+        server,
+        policy,
+        ..defaults
+    })
+    .await;
+
+    for path in [
+        "/articles/summer-release",
+        "/articles/winter-update",
+        "/articles/summer-release",
+        "/articles/winter-update",
+        "/users/jane-doe",
+    ] {
+        let response = reqwest::get(format!("{}{}", runtime.proxy_url(), path))
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    let articles = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /articles/{slug}")
+        .unwrap();
+    assert!(articles.slug_value_count >= 2);
+    assert!(
+        articles.reuse_class.to_string() == "public_object"
+            || articles.reuse_class.to_string() == "public_object_candidate"
+    );
+    let users = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /users/jane-doe")
+        .unwrap();
+    assert_eq!(users.reuse_class.to_string(), "hard_protected");
     runtime.shutdown().await;
     origin.shutdown().await;
 }
@@ -1790,6 +1993,15 @@ impl TestOrigin {
             .route("/other-query", get(|| async { "other-query" }))
             .route("/query-intel", get(|| async { "query-intel" }))
             .route("/query-sensitive", get(query_sensitive))
+            .route(
+                "/articles/summer-release",
+                get(|| async { "article-summer" }),
+            )
+            .route(
+                "/articles/winter-update",
+                get(|| async { "article-winter" }),
+            )
+            .route("/users/jane-doe", get(|| async { "user-jane" }))
             .route("/vary-star", get(vary_star))
             .route("/unstable", get(unstable))
             .route("/large-private", get(large_private))

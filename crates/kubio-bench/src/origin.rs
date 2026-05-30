@@ -1,8 +1,10 @@
 use anyhow::Result;
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::Router;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use url::Url;
@@ -16,6 +18,7 @@ impl ManagedOrigin {
     pub(crate) async fn start() -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
+        let hits = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route(
                 "/stable",
@@ -23,7 +26,12 @@ impl ManagedOrigin {
             )
             .route("/notice/{id}", get(public_notice))
             .route("/catalog/{id}", get(public_catalog))
-            .route("/user/{id}", get(public_user));
+            .route("/user/{id}", get(public_user))
+            .route("/query-intel", get(|| async { "query-intel" }))
+            .route("/articles/{slug}", get(public_article))
+            .route("/users/{slug}", get(public_user_slug))
+            .route("/canary/1", get(canary_changing))
+            .with_state(hits);
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app)
@@ -58,6 +66,27 @@ async fn public_user(Path(id): Path<String>) -> impl axum::response::IntoRespons
     (
         [("cache-control", "public, max-age=60")],
         format!("user-{id}"),
+    )
+}
+
+async fn public_article(Path(slug): Path<String>) -> String {
+    format!("article-{slug}")
+}
+
+async fn public_user_slug(Path(slug): Path<String>) -> impl axum::response::IntoResponse {
+    (
+        [("cache-control", "public, max-age=60")],
+        format!("user-{slug}"),
+    )
+}
+
+async fn canary_changing(
+    State(hits): State<Arc<AtomicUsize>>,
+) -> impl axum::response::IntoResponse {
+    let hit = hits.fetch_add(1, Ordering::SeqCst);
+    (
+        [("cache-control", "public, max-age=60")],
+        format!("canary-{hit}"),
     )
 }
 

@@ -1,4 +1,4 @@
-use kubio_core::ResponseFingerprint;
+use kubio_core::{QueryEquivalenceClass, QueryEquivalenceConfig, ResponseFingerprint};
 use std::collections::{HashMap, HashSet};
 
 use crate::records::QueryParamRecord;
@@ -19,6 +19,7 @@ pub(crate) struct QueryParamStats {
     pub(crate) fingerprints_by_value: HashMap<String, String>,
     pub(crate) fingerprint_hashes: HashSet<String>,
     pub(crate) fingerprint_observations: u64,
+    pub(crate) fingerprint_mismatches: u64,
     pub(crate) suggestion_event_emitted: bool,
 }
 
@@ -35,6 +36,7 @@ impl QueryParamStats {
             fingerprints_by_value: HashMap::new(),
             fingerprint_hashes: HashSet::new(),
             fingerprint_observations: 0,
+            fingerprint_mismatches: 0,
             suggestion_event_emitted: false,
         }
     }
@@ -68,6 +70,7 @@ impl QueryParamStats {
         if !self.fingerprint_hashes.contains(fingerprint_hash) {
             if !self.fingerprint_hashes.is_empty() {
                 self.fingerprint_sensitive = true;
+                self.fingerprint_mismatches += 1;
             }
             if self.fingerprint_hashes.len() < QUERY_VALUE_SAMPLE_LIMIT {
                 self.fingerprint_hashes.insert(fingerprint_hash.to_string());
@@ -79,6 +82,7 @@ impl QueryParamStats {
         if let Some(previous) = self.fingerprints_by_value.get(value_hash) {
             if previous != fingerprint_hash {
                 self.fingerprint_sensitive = true;
+                self.fingerprint_mismatches += 1;
             }
         } else if self.fingerprints_by_value.len() < QUERY_VALUE_SAMPLE_LIMIT {
             self.fingerprints_by_value
@@ -127,7 +131,42 @@ impl QueryParamStats {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> QueryParamSnapshot {
+    pub(crate) fn verified_ignore_candidate(&self, config: &QueryEquivalenceConfig) -> bool {
+        config.enabled
+            && !self.sensitive
+            && !self.fingerprint_sensitive
+            && self.value_count() as u64 >= config.min_distinct_values
+            && self.fingerprint_observations >= config.min_matching_fingerprints
+            && self.fingerprint_mismatches <= config.max_mismatches
+            && self.fingerprint_hashes.len() == 1
+    }
+
+    pub(crate) fn equivalence_class(
+        &self,
+        config: &QueryEquivalenceConfig,
+        operator_enabled: bool,
+    ) -> QueryEquivalenceClass {
+        if self.sensitive {
+            QueryEquivalenceClass::SensitiveBlocked
+        } else if self.fingerprint_mismatches > config.max_mismatches {
+            QueryEquivalenceClass::MismatchCooldown
+        } else if self.verified_ignore_candidate(config) && operator_enabled {
+            QueryEquivalenceClass::Compacted
+        } else if self.verified_ignore_candidate(config) {
+            QueryEquivalenceClass::VerifiedIgnoreCandidate
+        } else if self.suggestion().is_some() {
+            QueryEquivalenceClass::CandidateIgnore
+        } else {
+            QueryEquivalenceClass::Unknown
+        }
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        config: &QueryEquivalenceConfig,
+        operator_enabled: bool,
+    ) -> QueryParamSnapshot {
+        let equivalence_class = self.equivalence_class(config, operator_enabled);
         QueryParamSnapshot {
             name: self.name.clone(),
             seen_count: self.seen_count,
@@ -135,6 +174,12 @@ impl QueryParamStats {
             fingerprint_sensitive: self.fingerprint_sensitive,
             configured_action: self.configured_action.clone(),
             suggestion: self.suggestion(),
+            equivalence_class,
+            sensitive: self.sensitive,
+            distinct_value_count: self.value_count() as u64,
+            matching_fingerprint_count: self.fingerprint_observations,
+            mismatch_count: self.fingerprint_mismatches,
+            operator_enabled,
         }
     }
 }

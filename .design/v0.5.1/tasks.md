@@ -1,6 +1,6 @@
 # v0.5.1 Implementation Tasks
 
-Status: design draft
+Status: implemented and verified locally
 Target release: `v0.5.1`
 
 Task states:
@@ -51,13 +51,13 @@ Acceptance:
 
 Goal: add confidence tiers and scoped eligibility objects.
 
-- [ ] M1.1 Add `ConfidenceTier`.
-- [ ] M1.2 Add `PrecisionBlocker`.
-- [ ] M1.3 Add structured `PrecisionEligibility`.
-- [ ] M1.4 Split store, serve, and key-shape eligibility.
-- [ ] M1.5 Preserve v0.5.0 behavior when precision is disabled.
-- [ ] M1.6 Add unit tests for tier transitions.
-- [ ] M1.7 Add unit tests proving hard denies block all three eligibility
+- [x] M1.1 Add `ConfidenceTier`.
+- [x] M1.2 Add `PrecisionBlocker`.
+- [x] M1.3 Add structured `PrecisionEligibility`.
+- [x] M1.4 Split store, serve, and key-shape eligibility.
+- [x] M1.5 Preserve v0.5.0 behavior when precision is disabled.
+- [x] M1.6 Add unit tests for tier transitions.
+- [x] M1.7 Add unit tests proving hard denies block all three eligibility
   dimensions.
 
 Acceptance:
@@ -70,14 +70,14 @@ Acceptance:
 
 Goal: replace lifetime-only promotion checks with bounded fresh evidence.
 
-- [ ] M2.1 Add bounded evidence window structs.
-- [ ] M2.2 Track route evidence by window.
-- [ ] M2.3 Track key evidence by window.
-- [ ] M2.4 Track positive and negative evidence separately.
-- [ ] M2.5 Implement positive evidence decay.
-- [ ] M2.6 Implement cooldown with bounded backoff.
-- [ ] M2.7 Add snapshot fields for evidence age and cooldown.
-- [ ] M2.8 Add tests for decay, cooldown, and restart behavior.
+- [x] M2.1 Add bounded evidence window structs.
+- [x] M2.2 Track route evidence by window.
+- [x] M2.3 Track key evidence by window.
+- [x] M2.4 Track positive and negative evidence separately.
+- [x] M2.5 Implement positive evidence decay.
+- [x] M2.6 Implement cooldown with bounded backoff.
+- [x] M2.7 Add snapshot fields for evidence age and cooldown.
+- [x] M2.8 Add tests for decay, cooldown, and restart behavior.
 
 Acceptance:
 
@@ -89,15 +89,15 @@ Acceptance:
 
 Goal: prove and optionally apply safe query key compaction.
 
-- [ ] M3.1 Add query equivalence evidence structs.
-- [ ] M3.2 Track bounded query value hashes by route and base key.
-- [ ] M3.3 Add sensitive query-name denylist for auto ignore candidates.
-- [ ] M3.4 Add `verified_ignore_candidate` state.
-- [ ] M3.5 Add config for route-enabled verified ignore.
-- [ ] M3.6 Update cache key building to apply verified ignore only when enabled.
-- [ ] M3.7 Add compaction demotion and scoped purge.
-- [ ] M3.8 Add integration tests for query-noisy public object routes.
-- [ ] M3.9 Add privacy tests for raw query value non-leakage.
+- [x] M3.1 Add query equivalence evidence structs.
+- [x] M3.2 Track bounded query value hashes by route and base key.
+- [x] M3.3 Add sensitive query-name denylist for auto ignore candidates.
+- [x] M3.4 Add `verified_ignore_candidate` state.
+- [x] M3.5 Add config for route-enabled verified ignore.
+- [x] M3.6 Update cache key building to apply verified ignore only when enabled.
+- [x] M3.7 Add compaction demotion and scoped purge.
+- [x] M3.8 Add integration tests for query-noisy public object routes.
+- [x] M3.9 Add privacy tests for raw query value non-leakage.
 
 Acceptance:
 
@@ -110,14 +110,14 @@ Acceptance:
 
 Goal: expand public object evidence to safe slug routes and bounded variants.
 
-- [ ] M4.1 Add slug-like segment classifier.
-- [ ] M4.2 Track slug value hashes without storing raw values.
-- [ ] M4.3 Add sensitive-resource override for slug routes.
-- [ ] M4.4 Add slug public object candidate logic.
-- [ ] M4.5 Track configured variant dimensions.
-- [ ] M4.6 Block unbounded variant cardinality.
-- [ ] M4.7 Keep unsupported `Vary` as hard protection.
-- [ ] M4.8 Add integration tests for public slug and sensitive slug routes.
+- [x] M4.1 Add slug-like segment classifier.
+- [x] M4.2 Track slug value hashes without storing raw values.
+- [x] M4.3 Add sensitive-resource override for slug routes.
+- [x] M4.4 Add slug public object candidate logic.
+- [x] M4.5 Track configured variant dimensions.
+- [x] M4.6 Block unbounded variant cardinality.
+- [x] M4.7 Keep unsupported `Vary` as hard protection.
+- [x] M4.8 Add integration tests for public slug and sensitive slug routes.
 
 Acceptance:
 
@@ -129,13 +129,13 @@ Acceptance:
 
 Goal: continuously validate promoted precision decisions.
 
-- [ ] M5.1 Add deterministic canary sampler.
-- [ ] M5.2 Apply canary to promoted routes and compacted query groups.
-- [ ] M5.3 Record canary match/mismatch evidence.
-- [ ] M5.4 Demote and purge on canary mismatch.
-- [ ] M5.5 Add scoped purge for query-equivalence and variant groups.
-- [ ] M5.6 Add cooldown events.
-- [ ] M5.7 Add integration tests for canary match and mismatch.
+- [x] M5.1 Add deterministic canary sampler.
+- [x] M5.2 Apply canary to promoted routes and compacted query groups.
+- [x] M5.3 Record canary match/mismatch evidence.
+- [x] M5.4 Demote and purge on canary mismatch.
+- [x] M5.5 Add scoped purge for query-equivalence and variant groups.
+- [x] M5.6 Add cooldown events.
+- [x] M5.7 Add integration tests for canary match and mismatch.
 
 Acceptance:
 
@@ -147,15 +147,15 @@ Acceptance:
 
 Goal: make precision behavior actionable.
 
-- [ ] M6.1 Extend route snapshots with confidence, blockers, evidence age, and
+- [x] M6.1 Extend route snapshots with confidence, blockers, evidence age, and
   cooldown.
-- [ ] M6.2 Extend query snapshots with equivalence state.
-- [ ] M6.3 Update dashboard route list and detail.
-- [ ] M6.4 Update `kubio routes`.
-- [ ] M6.5 Update `kubio explain`.
-- [ ] M6.6 Add precision debug headers.
-- [ ] M6.7 Add precision metrics and events.
-- [ ] M6.8 Update README, configuration, how-decides, safety model, metrics,
+- [x] M6.2 Extend query snapshots with equivalence state.
+- [x] M6.3 Update dashboard route list and detail.
+- [x] M6.4 Update `kubio routes`.
+- [x] M6.5 Update `kubio explain`.
+- [x] M6.6 Add precision debug headers.
+- [x] M6.7 Add precision metrics and events.
+- [x] M6.8 Update README, configuration, how-decides, safety model, metrics,
   examples, roadmap, and release notes.
 
 Acceptance:
@@ -167,17 +167,17 @@ Acceptance:
 
 Goal: prove v0.5.1 improves precision without safety regressions.
 
-- [ ] M7.1 Add query-noisy public object benchmark.
-- [ ] M7.2 Add slug public object benchmark.
-- [ ] M7.3 Add sensitive slug benchmark.
-- [ ] M7.4 Add evidence decay benchmark.
-- [ ] M7.5 Add canary mismatch benchmark.
-- [ ] M7.6 Compare v0.5.1 precision scenarios against v0.5.0 baseline.
-- [ ] M7.7 Run full workspace tests.
-- [ ] M7.8 Run HTTP/3 feature tests.
-- [ ] M7.9 Run privacy regression tests.
-- [ ] M7.10 Bump workspace version to `0.5.1`.
-- [ ] M7.11 Add release notes.
+- [x] M7.1 Add query-noisy public object benchmark.
+- [x] M7.2 Add slug public object benchmark.
+- [x] M7.3 Add sensitive slug benchmark.
+- [x] M7.4 Add evidence decay benchmark.
+- [x] M7.5 Add canary mismatch benchmark.
+- [x] M7.6 Compare v0.5.1 precision scenarios against v0.5.0 baseline.
+- [x] M7.7 Run full workspace tests.
+- [x] M7.8 Run HTTP/3 feature tests.
+- [x] M7.9 Run privacy regression tests.
+- [x] M7.10 Bump workspace version to `0.5.1`.
+- [x] M7.11 Add release notes.
 
 Acceptance:
 

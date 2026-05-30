@@ -49,6 +49,13 @@ pub(crate) fn response_from_origin_stream(
         builder = builder.header("x-kubio-status", kubio_status);
         if let Some(route) = state.observer.route_by_hash(&route_id.hash()) {
             builder = builder.header("x-kubio-reuse-class", route.reuse_class.to_string());
+            builder = builder.header("x-kubio-confidence", route.confidence_tier.to_string());
+            let key_shape = if route.query_compacted_groups > 0 {
+                "query_compacted"
+            } else {
+                "exact"
+            };
+            builder = builder.header("x-kubio-key-shape", key_shape);
             if !route.adaptive_blockers.is_empty() {
                 let blockers = route
                     .adaptive_blockers

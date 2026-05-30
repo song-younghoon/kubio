@@ -1,6 +1,6 @@
 //! Prometheus text rendering helpers.
 
-use kubio_core::{Decision, ReuseClass, StatusClass};
+use kubio_core::{ConfidenceTier, Decision, ReuseClass, StatusClass};
 use kubio_observe::ObserverSnapshot;
 use kubio_store::StoreStats;
 
@@ -263,6 +263,7 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
         ReuseClass::PublicObjectCandidate,
         ReuseClass::PublicObject,
         ReuseClass::OriginPublic,
+        ReuseClass::QueryEquivalence,
     ] {
         let count = snapshot
             .routes
@@ -290,6 +291,102 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
             .routes
             .iter()
             .map(|route| route.origin_public_responses)
+            .sum::<u64>(),
+    );
+    line(
+        &mut out,
+        "kubio_precision_confidence_routes",
+        "Observed routes by precision confidence tier.",
+        "gauge",
+    );
+    for tier in [
+        ConfidenceTier::Unknown,
+        ConfidenceTier::Probation,
+        ConfidenceTier::Validated,
+        ConfidenceTier::Strong,
+        ConfidenceTier::Cooldown,
+        ConfidenceTier::HardProtected,
+    ] {
+        let count = snapshot
+            .routes
+            .iter()
+            .filter(|route| route.confidence_tier == tier)
+            .count() as u64;
+        metric(
+            &mut out,
+            "kubio_precision_confidence_routes",
+            &[("tier", tier.to_string().as_str())],
+            count,
+        );
+    }
+    line(
+        &mut out,
+        "kubio_precision_canary_total",
+        "Precision canary validations by outcome.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_precision_canary_total",
+        &[("outcome", "match")],
+        snapshot
+            .routes
+            .iter()
+            .map(|route| route.canary_matches)
+            .sum::<u64>(),
+    );
+    metric(
+        &mut out,
+        "kubio_precision_canary_total",
+        &[("outcome", "mismatch")],
+        snapshot
+            .routes
+            .iter()
+            .map(|route| route.canary_mismatches)
+            .sum::<u64>(),
+    );
+    line(
+        &mut out,
+        "kubio_query_equivalence_candidates_total",
+        "Verified query equivalence candidates.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_query_equivalence_candidates_total",
+        &[("class", "verified_ignore_candidate")],
+        snapshot
+            .routes
+            .iter()
+            .map(|route| route.query_equivalence_candidates)
+            .sum::<u64>(),
+    );
+    line(
+        &mut out,
+        "kubio_variant_groups",
+        "Configured variant dimensions observed for precision reuse.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_variant_groups",
+        &[("dimension_class", "bounded")],
+        snapshot
+            .routes
+            .iter()
+            .filter(|route| !route.variant_unbounded)
+            .map(|route| route.variant_dimensions)
+            .sum::<u64>(),
+    );
+    metric(
+        &mut out,
+        "kubio_variant_groups",
+        &[("dimension_class", "unbounded")],
+        snapshot
+            .routes
+            .iter()
+            .filter(|route| route.variant_unbounded)
+            .map(|route| route.variant_dimensions)
             .sum::<u64>(),
     );
     line(
@@ -748,7 +845,8 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
 mod tests {
     use super::*;
     use kubio_core::{
-        LatencyBucketSnapshot, LatencySnapshot, ReuseClass, RouteId, RouteState, StatusClassCounts,
+        ConfidenceTier, LatencyBucketSnapshot, LatencySnapshot, ReuseClass, RouteId, RouteState,
+        StatusClassCounts,
     };
     use kubio_observe::{ObserverSnapshot, OverviewSnapshot, ProtocolCounts, RouteSnapshot};
     use kubio_store::{StoreKind, StoreOperationMetrics, StoreStats};
@@ -776,8 +874,19 @@ mod tests {
                 origin_public_responses: 0,
                 distinct_key_count: 0,
                 dynamic_value_count: 0,
+                slug_value_count: 0,
                 store_safe_rate: 0.0,
                 adaptive_blockers: vec![],
+                confidence_tier: ConfidenceTier::Unknown,
+                evidence_window_age_seconds: 0,
+                stale_evidence: false,
+                cooldown_remaining_seconds: None,
+                canary_matches: 0,
+                canary_mismatches: 0,
+                query_equivalence_candidates: 0,
+                query_compacted_groups: 0,
+                variant_dimensions: 0,
+                variant_unbounded: false,
                 shadow_matches: 0,
                 shadow_mismatches: 0,
                 revalidation_attempts: 0,
@@ -839,6 +948,10 @@ mod tests {
         assert!(metrics.contains("kubio_query_hints_applied_total"));
         assert!(metrics.contains("kubio_routes_by_reuse_class"));
         assert!(metrics.contains("kubio_origin_public_fast_path_total"));
+        assert!(metrics.contains("kubio_precision_confidence_routes"));
+        assert!(metrics.contains("kubio_precision_canary_total"));
+        assert!(metrics.contains("kubio_query_equivalence_candidates_total"));
+        assert!(metrics.contains("kubio_variant_groups"));
         assert!(metrics.contains("kubio_store_errors_total"));
         assert!(metrics.contains("kubio_store_operations_total"));
         assert!(metrics.contains("kubio_store_operation_duration_seconds_sum"));

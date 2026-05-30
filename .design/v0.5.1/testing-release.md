@@ -1,7 +1,23 @@
 # Testing and Release Plan
 
-Status: design draft
+Status: implemented local gates passing
 Target release: `v0.5.1`
+
+Verification state:
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo check --workspace`
+- [x] `cargo test --workspace`
+- [x] `cargo test --workspace --features experimental-http3`
+- [x] `cargo run -p kubio-bench -- --scenario query-noisy-public-object --requests 12 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario slug-public-object-sweep --requests 12 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario sensitive-slug-sweep --requests 8 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario evidence-decay --requests 4 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario canary-mismatch --requests 4 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario exact-key-adaptive --requests 4 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario public-object-sweep --requests 12 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario protected-user-sweep --requests 6 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario origin-public-fast-path --requests 4 --output json`
 
 ## Unit Tests
 

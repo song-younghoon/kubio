@@ -106,6 +106,20 @@ v0.5.0:
   task checklist.
 - Release notes: `docs/release-notes-v0.5.0.md`.
 
+v0.5.1:
+
+- Precision adaptive reuse on top of v0.5.0.
+- Confidence tiers, evidence decay, cooldown, and canary validation.
+- Verified query equivalence with route-enabled key compaction.
+- Sensitive query parameters blocked from automatic ignore candidates.
+- Public slug route intelligence for routes such as `/articles/{slug}` while
+  sensitive slug routes remain protected.
+- Dashboard, CLI, debug-header, metrics, and benchmark visibility for
+  confidence, query-equivalence, canary, and slug evidence.
+- Design status: `.design/v0.5.1` records the precision adaptive reuse plan and
+  completed task checklist.
+- Release notes: `docs/release-notes-v0.5.1.md`.
+
 v0.5+ candidates:
 
 - Redis-compatible shared store.
