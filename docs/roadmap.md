@@ -75,6 +75,22 @@ v0.4.0:
 - Design status: `.design/v0.4.0` records the installer, artifact, update-check, self-update, test, and release plan.
 - Release notes: `docs/release-notes-v0.4.0.md`.
 
+v0.4.1:
+
+- Distribution platform-coverage patch release.
+- Keep the v0.4.0 one-command install and self-update UX unchanged.
+- Add Linux arm64 release support with `aarch64-unknown-linux-gnu` artifacts.
+- Add Apple Silicon macOS release support with `aarch64-apple-darwin` artifacts.
+- Continue Linux x86_64 support.
+- Publish standard and HTTP/3 experimental binaries for every supported release target.
+- Refactor installer and updater target resolution so platform selection is deterministic and shared by the artifact contract.
+- Use the self-hosted arm64 macOS runner for native macOS build checks and
+  Docker-based Linux arm64 build checks.
+- Refactor release publishing into platform build jobs plus a final aggregated publish job.
+- Keep checksums mandatory and keep unsupported hosts failing before download.
+- Design status: `.design/v0.4.1` records the multi-platform release, installer, updater, workflow, test, and documentation plan.
+- Release notes: `docs/release-notes-v0.4.1.md`.
+
 v0.4+ candidates:
 
 - Redis-compatible shared store.

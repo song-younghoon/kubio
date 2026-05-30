@@ -10,7 +10,14 @@ origin service without a hosted control plane or required telemetry.
 
 ## Install
 
-v0.4.0 supports released binaries for Linux x86_64.
+v0.4.1 supports released binaries for Linux x86_64, Linux arm64, and Apple
+Silicon macOS.
+
+| Host | Release target |
+| --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux arm64 | `aarch64-unknown-linux-gnu` |
+| macOS arm64 | `aarch64-apple-darwin` |
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | bash
@@ -23,7 +30,7 @@ build from source.
 Common install variants:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.0 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.1 bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_INSTALL_DIR=/usr/local/bin bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_FLAVOR=http3-experimental bash
 ```
@@ -168,4 +175,5 @@ kubio remains local-first and process-local:
 - [Metrics](docs/metrics.md)
 - [Safety Model](docs/safety-model.md)
 - [Roadmap](docs/roadmap.md)
-- [v0.4.0 Design](.design/v0.4.0)
+- [v0.4.1 Release Notes](docs/release-notes-v0.4.1.md)
+- [v0.4.1 Design](.design/v0.4.1)

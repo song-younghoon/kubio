@@ -1,7 +1,16 @@
 # Install and Update
 
-kubio v0.4.0 installs released binaries from GitHub Releases. The installer and
-self-update command support Linux x86_64.
+kubio v0.4.1 installs released binaries from GitHub Releases. The installer and
+self-update command support Linux x86_64, Linux arm64, and Apple Silicon macOS.
+
+| Host | Release target |
+| --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux arm64 | `aarch64-unknown-linux-gnu` |
+| macOS arm64 | `aarch64-apple-darwin` |
+
+Unsupported hosts, including Windows and macOS x86_64, fail before downloading a
+release artifact.
 
 ## One-Command Install
 
@@ -11,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/mai
 
 The installer:
 
-- detects Linux x86_64;
+- detects the current supported host target;
 - downloads the selected release artifact and `SHA256SUMS`;
 - verifies the artifact checksum;
 - installs the binary as `kubio`;
@@ -24,7 +33,7 @@ The default install directory is `$HOME/.local/bin` for normal users and
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `KUBIO_VERSION` | `latest` | Install `latest` or a pinned tag such as `v0.4.0`. |
+| `KUBIO_VERSION` | `latest` | Install `latest` or a pinned tag such as `v0.4.1`. |
 | `KUBIO_INSTALL_DIR` | `$HOME/.local/bin` | Install `kubio` into a specific directory. |
 | `KUBIO_FLAVOR` | `standard` | Use `standard` or `http3-experimental`. |
 | `KUBIO_REPO` | `song-younghoon/kubio` | Override the GitHub repository for forks. |
@@ -33,7 +42,7 @@ The default install directory is `$HOME/.local/bin` for normal users and
 Examples:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.0 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.1 bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_INSTALL_DIR=/usr/local/bin bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_FLAVOR=http3-experimental bash
 ```
@@ -93,7 +102,10 @@ kubio serve --no-update-check --to http://localhost:3000
 
 ## Trust Model
 
-kubio v0.4.0 verifies that the downloaded artifact matches `SHA256SUMS` from the
+kubio v0.4.1 verifies that the downloaded artifact matches `SHA256SUMS` from the
 same GitHub Release. This catches partial downloads and asset mismatches, but it
 is not an independent signature. Stronger signed provenance is a future
 supply-chain hardening item.
+
+macOS artifacts are checksum-verified command-line binaries. They are not
+notarized app packages in v0.4.1.

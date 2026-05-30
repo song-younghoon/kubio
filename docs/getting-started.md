@@ -1,7 +1,8 @@
 # Getting Started
 
-This guide starts from the released Linux x86_64 binary. To work from source,
-use `cargo run -p kubio-cli -- serve --to http://localhost:3000` instead of the
+This guide starts from a released binary. v0.4.1 supports Linux x86_64, Linux
+arm64, and Apple Silicon macOS. To work from source, use
+`cargo run -p kubio-cli -- serve --to http://localhost:3000` instead of the
 installed `kubio` command.
 
 ## 1. Install

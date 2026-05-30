@@ -1,7 +1,7 @@
 # Deployment
 
-kubio v0.4.0 is designed for local-first and single-process deployment. The
-released installer currently supports Linux x86_64.
+kubio v0.4.1 is designed for local-first and single-process deployment. The
+released installer supports Linux x86_64, Linux arm64, and Apple Silicon macOS.
 
 ## Install a Release Binary
 
@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/mai
 Pin a release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.0 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.1 bash
 ```
 
 Install the HTTP/3 experimental artifact:

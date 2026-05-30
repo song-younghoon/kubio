@@ -7,10 +7,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  linux-binary:
+  linux-x86_64:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +36,9 @@ jobs:
       - run: cargo build --release -p kubio-cli --features experimental-http3
       - run: cp target/release/kubio dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
       - run: dist/kubio-x86_64-unknown-linux-gnu --help
+      - run: dist/kubio-x86_64-unknown-linux-gnu --version
       - run: dist/kubio-x86_64-unknown-linux-gnu-http3-experimental --help
+      - run: dist/kubio-x86_64-unknown-linux-gnu-http3-experimental --version
       - run: KUBIO_BIN=dist/kubio-x86_64-unknown-linux-gnu bash examples/bench/release_smoke.sh
       - run: cd dist && sha256sum kubio-x86_64-unknown-linux-gnu kubio-x86_64-unknown-linux-gnu-http3-experimental > SHA256SUMS
       - run: |
@@ -58,42 +64,98 @@ jobs:
           install_dir="$(mktemp -d)/bin"
           KUBIO_DOWNLOAD_BASE_URL="file://${PWD}/dist" KUBIO_INSTALL_DIR="$install_dir" KUBIO_FLAVOR=http3-experimental bash install.sh
           "$install_dir/kubio" --help
-      - run: |
-          test -f install.sh
-          test -f dist/kubio-x86_64-unknown-linux-gnu
-          test -f dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
-          test -f dist/SHA256SUMS
-          test -f dist/bench/kubio-bench-h1.json
-          test -f dist/bench/kubio-bench-h2.json
-          test -f dist/bench/kubio-bench-h3.json
       - uses: actions/upload-artifact@v4
         with:
           name: kubio-linux-x86_64
           path: |
             dist/kubio-x86_64-unknown-linux-gnu
             dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
-            dist/SHA256SUMS
-            install.sh
             dist/bench/*.json
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          assets=(
-            dist/kubio-x86_64-unknown-linux-gnu
-            dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
-            dist/SHA256SUMS
-            install.sh
-            dist/bench/kubio-bench-h1.json
-            dist/bench/kubio-bench-h2.json
-            dist/bench/kubio-bench-h3.json
-          )
-          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "${{ github.ref_name }}" "${assets[@]}" --repo "${{ github.repository }}" --clobber
-          else
-            gh release create "${{ github.ref_name }}" "${assets[@]}" --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
-          fi
+
+  linux-arm64-container:
+    runs-on: [self-hosted, macOS, ARM64, kubio-macos-arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          docker version
+          container_arch="$(docker run --rm --platform linux/arm64 alpine uname -m)"
+          case "$container_arch" in
+            aarch64|arm64) ;;
+            *) echo "unexpected linux/arm64 container arch: $container_arch" >&2; exit 1 ;;
+          esac
+      - run: mkdir -p dist
+      - run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${PWD}:/work" \
+            -w /work \
+            -e CARGO_TARGET_DIR=/work/target/linux-arm64 \
+            rust:1-bookworm \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends curl file python3
+              cargo build --release -p kubio-cli
+              cp target/linux-arm64/release/kubio dist/kubio-aarch64-unknown-linux-gnu
+              cargo build --release -p kubio-cli --features experimental-http3
+              cp target/linux-arm64/release/kubio dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
+              dist/kubio-aarch64-unknown-linux-gnu --help
+              dist/kubio-aarch64-unknown-linux-gnu --version
+              dist/kubio-aarch64-unknown-linux-gnu-http3-experimental --help
+              dist/kubio-aarch64-unknown-linux-gnu-http3-experimental --version
+              file dist/kubio-aarch64-unknown-linux-gnu | grep -E "ELF 64-bit.*aarch64|ELF 64-bit.*ARM aarch64"
+              cd dist
+              sha256sum kubio-aarch64-unknown-linux-gnu kubio-aarch64-unknown-linux-gnu-http3-experimental > SHA256SUMS
+              install_dir="$(mktemp -d)/bin"
+              KUBIO_DOWNLOAD_BASE_URL="file:///work/dist" KUBIO_INSTALL_DIR="$install_dir" bash /work/install.sh
+              "$install_dir/kubio" --help
+              "$install_dir/kubio" --version
+              version="$("$install_dir/kubio" --version)"
+              set -- $version
+              "$install_dir/kubio" update --version "v$2" --force --download-base-url "file:///work/dist" --install-dir "$install_dir"
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kubio-linux-arm64
+          path: |
+            dist/kubio-aarch64-unknown-linux-gnu
+            dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
+
+  macos-arm64:
+    runs-on: [self-hosted, macOS, ARM64, kubio-macos-arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kubio-cli
+      - run: mkdir -p dist
+      - run: cargo build --release -p kubio-cli
+      - run: cp target/release/kubio dist/kubio-aarch64-apple-darwin
+      - run: cargo build --release -p kubio-cli --features experimental-http3
+      - run: cp target/release/kubio dist/kubio-aarch64-apple-darwin-http3-experimental
+      - run: dist/kubio-aarch64-apple-darwin --help
+      - run: dist/kubio-aarch64-apple-darwin --version
+      - run: dist/kubio-aarch64-apple-darwin-http3-experimental --help
+      - run: dist/kubio-aarch64-apple-darwin-http3-experimental --version
+      - run: cd dist && shasum -a 256 kubio-aarch64-apple-darwin kubio-aarch64-apple-darwin-http3-experimental > SHA256SUMS
+      - run: |
+          install_dir="$(mktemp -d)/bin"
+          KUBIO_DOWNLOAD_BASE_URL="file://${PWD}/dist" KUBIO_INSTALL_DIR="$install_dir" bash install.sh
+          "$install_dir/kubio" --help
+          "$install_dir/kubio" --version
+          version="$("$install_dir/kubio" --version)"
+          set -- $version
+          "$install_dir/kubio" update --version "v$2" --force --download-base-url "file://${PWD}/dist" --install-dir "$install_dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kubio-macos-arm64
+          path: |
+            dist/kubio-aarch64-apple-darwin
+            dist/kubio-aarch64-apple-darwin-http3-experimental
 
   docker-image:
     runs-on: ubuntu-latest
@@ -102,3 +164,68 @@ jobs:
       - run: docker build -t kubio:${{ github.ref_name }} .
       - run: docker run --rm kubio:${{ github.ref_name }} --help
       - run: KUBIO_IMAGE=kubio:${{ github.ref_name }} bash examples/bench/docker_smoke.sh
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: [linux-x86_64, linux-arm64-container, macos-arm64, docker-image]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+      - run: |
+          mkdir -p dist
+          find downloaded-artifacts -maxdepth 3 -type f -exec cp {} dist/ \;
+      - run: bash -n install.sh
+      - run: |
+          cd dist
+          binaries=(
+            kubio-x86_64-unknown-linux-gnu
+            kubio-x86_64-unknown-linux-gnu-http3-experimental
+            kubio-aarch64-unknown-linux-gnu
+            kubio-aarch64-unknown-linux-gnu-http3-experimental
+            kubio-aarch64-apple-darwin
+            kubio-aarch64-apple-darwin-http3-experimental
+          )
+          for binary in "${binaries[@]}"; do
+            test -f "$binary"
+          done
+          sha256sum "${binaries[@]}" > SHA256SUMS
+          for binary in "${binaries[@]}"; do
+            grep -E "[[:space:]]${binary}$" SHA256SUMS >/dev/null
+          done
+          test -f kubio-bench-h1.json
+          test -f kubio-bench-h2.json
+          test -f kubio-bench-h3.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kubio-release-assets
+          path: |
+            dist/kubio-*
+            dist/SHA256SUMS
+            install.sh
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(
+            dist/kubio-x86_64-unknown-linux-gnu
+            dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
+            dist/kubio-aarch64-unknown-linux-gnu
+            dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
+            dist/kubio-aarch64-apple-darwin
+            dist/kubio-aarch64-apple-darwin-http3-experimental
+            dist/SHA256SUMS
+            install.sh
+            dist/kubio-bench-h1.json
+            dist/kubio-bench-h2.json
+            dist/kubio-bench-h3.json
+          )
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" "${assets[@]}" --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "${{ github.ref_name }}" "${assets[@]}" --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
+          fi

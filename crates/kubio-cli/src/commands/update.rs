@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 const DEFAULT_REPO: &str = "song-younghoon/kubio";
-const TARGET: &str = "x86_64-unknown-linux-gnu";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const UPDATE_CACHE_SCHEMA: u64 = 1;
 const INSTALL_MANIFEST_SCHEMA: u64 = 1;
@@ -99,9 +98,11 @@ async fn self_update(config: &UpdateConfig) -> Result<()> {
         );
     }
 
+    let release_target = ReleaseTarget::current()?;
     let manifest = read_install_manifest();
+    validate_manifest_target(release_target, manifest.as_ref())?;
     let flavor = resolve_flavor(config, manifest.as_ref())?;
-    let artifact = flavor.artifact_name();
+    let artifact = flavor.artifact_name(release_target);
     let base_url = config.download_base_url.as_deref().map_or_else(
         || {
             format!(
@@ -136,13 +137,13 @@ async fn self_update(config: &UpdateConfig) -> Result<()> {
         );
     }
     let sums = sums_response.text()?;
-    verify_sha256(artifact, &artifact_bytes, &sums)?;
+    verify_sha256(&artifact, &artifact_bytes, &sums)?;
     replace_binary(&install_path, &artifact_bytes)?;
     write_install_manifest(&InstallManifest {
         schema_version: INSTALL_MANIFEST_SCHEMA,
         repo: config.repo.clone(),
         installed_path: install_path.clone(),
-        target: TARGET.to_string(),
+        target: release_target.triple().to_string(),
         flavor,
         installed_version: target.version.to_string(),
     });
@@ -421,6 +422,30 @@ fn verify_installed_binary(path: &Path) -> Result<()> {
     }
 }
 
+fn validate_manifest_target(
+    current: ReleaseTarget,
+    manifest: Option<&InstallManifest>,
+) -> Result<()> {
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
+    let target = manifest.target.trim();
+    if target.is_empty() {
+        return Ok(());
+    }
+    let Some(manifest_target) = ReleaseTarget::from_triple(target) else {
+        return Ok(());
+    };
+    if manifest_target != current {
+        bail!(
+            "install manifest target {} does not match current host target {}; reinstall with install.sh",
+            manifest_target.triple(),
+            current.triple()
+        );
+    }
+    Ok(())
+}
+
 fn resolve_flavor(config: &UpdateConfig, manifest: Option<&InstallManifest>) -> Result<Flavor> {
     if let Some(flavor) = config.flavor {
         return Ok(flavor);
@@ -580,6 +605,64 @@ impl UpdateConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseTarget {
+    X86_64UnknownLinuxGnu,
+    Aarch64UnknownLinuxGnu,
+    Aarch64AppleDarwin,
+}
+
+impl ReleaseTarget {
+    fn current() -> Result<Self> {
+        Self::from_os_arch(env::consts::OS, env::consts::ARCH).ok_or_else(|| {
+            anyhow!(
+                "unsupported update platform: os={} arch={}; supported targets: {}",
+                env::consts::OS,
+                env::consts::ARCH,
+                Self::supported_targets()
+            )
+        })
+    }
+
+    fn from_os_arch(os: &str, arch: &str) -> Option<Self> {
+        match (os, arch) {
+            ("linux", "x86_64") | ("Linux", "x86_64") | ("Linux", "amd64") => {
+                Some(Self::X86_64UnknownLinuxGnu)
+            }
+            ("linux", "aarch64")
+            | ("linux", "arm64")
+            | ("Linux", "aarch64")
+            | ("Linux", "arm64") => Some(Self::Aarch64UnknownLinuxGnu),
+            ("macos", "aarch64")
+            | ("macos", "arm64")
+            | ("Darwin", "arm64")
+            | ("Darwin", "aarch64") => Some(Self::Aarch64AppleDarwin),
+            _ => None,
+        }
+    }
+
+    fn from_triple(value: &str) -> Option<Self> {
+        match value {
+            "x86_64-unknown-linux-gnu" => Some(Self::X86_64UnknownLinuxGnu),
+            "aarch64-unknown-linux-gnu" => Some(Self::Aarch64UnknownLinuxGnu),
+            "aarch64-apple-darwin" => Some(Self::Aarch64AppleDarwin),
+            _ => None,
+        }
+    }
+
+    fn triple(self) -> &'static str {
+        match self {
+            Self::X86_64UnknownLinuxGnu => "x86_64-unknown-linux-gnu",
+            Self::Aarch64UnknownLinuxGnu => "aarch64-unknown-linux-gnu",
+            Self::Aarch64AppleDarwin => "aarch64-apple-darwin",
+        }
+    }
+
+    fn supported_targets() -> &'static str {
+        "x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, aarch64-apple-darwin"
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Flavor {
@@ -596,10 +679,12 @@ impl Flavor {
         }
     }
 
-    fn artifact_name(self) -> &'static str {
+    fn artifact_name(self, target: ReleaseTarget) -> String {
         match self {
-            Self::Standard => "kubio-x86_64-unknown-linux-gnu",
-            Self::Http3Experimental => "kubio-x86_64-unknown-linux-gnu-http3-experimental",
+            Self::Standard => format!("kubio-{}", target.triple()),
+            Self::Http3Experimental => {
+                format!("kubio-{}-http3-experimental", target.triple())
+            }
         }
     }
 }
@@ -689,6 +774,7 @@ struct InstallManifest {
     schema_version: u64,
     repo: String,
     installed_path: PathBuf,
+    #[serde(default)]
     target: String,
     flavor: Flavor,
     installed_version: String,
@@ -723,12 +809,73 @@ mod tests {
     #[test]
     fn chooses_artifact_for_flavor() {
         assert_eq!(
-            Flavor::Standard.artifact_name(),
+            Flavor::Standard.artifact_name(ReleaseTarget::X86_64UnknownLinuxGnu),
             "kubio-x86_64-unknown-linux-gnu"
         );
         assert_eq!(
-            Flavor::Http3Experimental.artifact_name(),
+            Flavor::Http3Experimental.artifact_name(ReleaseTarget::X86_64UnknownLinuxGnu),
             "kubio-x86_64-unknown-linux-gnu-http3-experimental"
+        );
+        assert_eq!(
+            Flavor::Standard.artifact_name(ReleaseTarget::Aarch64UnknownLinuxGnu),
+            "kubio-aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            Flavor::Http3Experimental.artifact_name(ReleaseTarget::Aarch64AppleDarwin),
+            "kubio-aarch64-apple-darwin-http3-experimental"
+        );
+    }
+
+    #[test]
+    fn maps_supported_release_targets() {
+        assert_eq!(
+            ReleaseTarget::from_os_arch("linux", "x86_64"),
+            Some(ReleaseTarget::X86_64UnknownLinuxGnu)
+        );
+        assert_eq!(
+            ReleaseTarget::from_os_arch("Linux", "amd64"),
+            Some(ReleaseTarget::X86_64UnknownLinuxGnu)
+        );
+        assert_eq!(
+            ReleaseTarget::from_os_arch("linux", "aarch64"),
+            Some(ReleaseTarget::Aarch64UnknownLinuxGnu)
+        );
+        assert_eq!(
+            ReleaseTarget::from_os_arch("Linux", "arm64"),
+            Some(ReleaseTarget::Aarch64UnknownLinuxGnu)
+        );
+        assert_eq!(
+            ReleaseTarget::from_os_arch("macos", "aarch64"),
+            Some(ReleaseTarget::Aarch64AppleDarwin)
+        );
+        assert_eq!(
+            ReleaseTarget::from_os_arch("Darwin", "arm64"),
+            Some(ReleaseTarget::Aarch64AppleDarwin)
+        );
+        assert_eq!(ReleaseTarget::from_os_arch("macos", "x86_64"), None);
+        assert_eq!(ReleaseTarget::from_os_arch("linux", "armv7l"), None);
+    }
+
+    #[test]
+    fn validates_manifest_target_mismatch() {
+        let mut manifest = InstallManifest {
+            schema_version: INSTALL_MANIFEST_SCHEMA,
+            repo: DEFAULT_REPO.to_string(),
+            installed_path: PathBuf::from("/tmp/kubio"),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            flavor: Flavor::Standard,
+            installed_version: "0.4.0".to_string(),
+        };
+        assert!(
+            validate_manifest_target(ReleaseTarget::X86_64UnknownLinuxGnu, Some(&manifest)).is_ok()
+        );
+        assert!(
+            validate_manifest_target(ReleaseTarget::Aarch64AppleDarwin, Some(&manifest)).is_err()
+        );
+
+        manifest.target = "unknown-target".to_string();
+        assert!(
+            validate_manifest_target(ReleaseTarget::Aarch64AppleDarwin, Some(&manifest)).is_ok()
         );
     }
 
