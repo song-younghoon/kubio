@@ -1477,8 +1477,17 @@ async fn try_h3_get(
     path: &str,
     headers: &[(&str, &str)],
 ) -> anyhow::Result<H3TestResponse> {
-    let mut client = h3_client(runtime.http3_addr()).await?;
-    let uri = format!("https://localhost:{}{path}", runtime.http3_addr().port());
+    try_h3_get_addr(runtime.http3_addr(), path, headers).await
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn try_h3_get_addr(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<H3TestResponse> {
+    let mut client = h3_client(addr).await?;
+    let uri = format!("https://localhost:{}{path}", addr.port());
     let mut request = Request::get(uri);
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -1500,6 +1509,27 @@ async fn try_h3_get(
         status,
         body: String::from_utf8(body.to_vec())?,
     })
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn wait_h3_ready(addr: SocketAddr) {
+    let mut last_error = None;
+    for _ in 0..50 {
+        match try_h3_get_addr(addr, "/stable", &[]).await {
+            Ok(response) if response.status.is_success() => return,
+            Ok(response) => {
+                last_error = Some(anyhow::anyhow!("HTTP/3 status {}", response.status));
+            }
+            Err(err) => last_error = Some(err),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "HTTP/3 origin did not become ready: {}",
+        last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    );
 }
 
 #[cfg(feature = "experimental-http3")]
@@ -1724,7 +1754,7 @@ impl TestHttp3Origin {
             })
             .await;
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_h3_ready(addr).await;
         Self {
             addr,
             shutdown: Some(tx),
