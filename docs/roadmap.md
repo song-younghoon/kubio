@@ -48,6 +48,17 @@ v0.3.1:
 - Design status: `.design/v0.3.1` records the HTTP/3 runtime, benchmark, observability, dependency, and release plan.
 - Release notes: `docs/release-notes-v0.3.1.md`.
 
+v0.3.2:
+
+- Structure-only refactor for maintainable crate internals.
+- Split large single-file crate implementations into focused modules.
+- Preserve existing public crate-root APIs with re-exports.
+- Preserve CLI flags/output, config schema, dashboard APIs, metrics, benchmark output, cache behavior, and protocol behavior.
+- Group HTTP/3 feature-gated code under clearer module boundaries where practical.
+- Move unit tests close to the modules they validate while keeping integration tests intact.
+- Add source-layout documentation after implementation.
+- Design status: `.design/v0.3.2` records the refactor scope, module map, compatibility rules, test gates, and task plan.
+
 v0.4+ candidates:
 
 - Redis-compatible shared store.
