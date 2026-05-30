@@ -111,9 +111,9 @@ Goal: prove every supported release target is usable enough to advertise.
 - [~] M4.3 Validate Linux arm64 artifacts are ELF aarch64 binaries.
 - [~] M4.4 Run Linux arm64 `--help` and `--version` inside Docker
   `linux/arm64`.
-- [~] M4.5 Run native macOS arm64 `--help` and `--version` for both flavors.
-- [~] M4.6 Run native macOS arm64 staged install smoke.
-- [~] M4.7 Run native macOS arm64 staged self-update smoke.
+- [x] M4.5 Run native macOS arm64 `--help` and `--version` for both flavors.
+- [x] M4.6 Run native macOS arm64 staged install smoke.
+- [x] M4.7 Run native macOS arm64 staged self-update smoke.
 - [x] M4.8 Verify checksum mismatch still leaves the existing binary untouched.
 
 Acceptance:
@@ -152,7 +152,7 @@ Goal: ship v0.4.1 as a platform-coverage patch release.
 - [x] M6.2 Confirm `kubio --version` reports `0.4.1`.
 - [x] M6.3 Run full Linux x86_64 release gate.
 - [~] M6.4 Run Linux arm64 Docker build and smoke gate.
-- [~] M6.5 Run macOS arm64 native build and smoke gate.
+- [x] M6.5 Run macOS arm64 native build and smoke gate.
 - [ ] M6.6 Confirm release assets and `SHA256SUMS` after publish.
 - [x] M6.7 Confirm a v0.4.0 Linux x86_64 install can update to v0.4.1.
 

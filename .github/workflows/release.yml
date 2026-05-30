@@ -97,11 +97,10 @@ jobs:
             echo "timed out after ${timeout_secs}s: $*" >&2
             return 124
           }
-          run_with_timeout 60 docker version
-          container_arch="$(run_with_timeout 120 docker run --rm --platform linux/arm64 alpine uname -m)"
-          case "$container_arch" in
-            aarch64|arm64) ;;
-            *) echo "unexpected linux/arm64 container arch: $container_arch" >&2; exit 1 ;;
+          server_platform="$(run_with_timeout 60 docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
+          case "$server_platform" in
+            linux/arm64|linux/aarch64) ;;
+            *) echo "unexpected Docker server platform: $server_platform" >&2; exit 1 ;;
           esac
         timeout-minutes: 5
       - run: mkdir -p dist
