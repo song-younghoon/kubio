@@ -84,12 +84,12 @@ Goal: split crates with clear state and DTO boundaries before touching runtime a
 
 ### M2.1 `kubio-store`
 
-- [ ] M2.1.1 Move `CacheEntry` into `entry.rs`.
-- [ ] M2.1.2 Move `StoreError` into `error.rs`.
-- [ ] M2.1.3 Move memory store implementation into `memory.rs`.
-- [ ] M2.1.4 Move disk store implementation and metadata helpers into `disk.rs` or `metadata.rs`.
-- [ ] M2.1.5 Move purge and stats types into `purge.rs` and `metrics.rs`.
-- [ ] M2.1.6 Re-export existing public store API.
+- [x] M2.1.1 Move `CacheEntry` into `entry.rs`.
+- [x] M2.1.2 Move `StoreError` into `error.rs`.
+- [x] M2.1.3 Move memory store implementation into `memory.rs`.
+- [x] M2.1.4 Move disk store implementation and metadata helpers into `disk.rs` or `metadata.rs`.
+- [x] M2.1.5 Move purge and stats types into `purge.rs` and `metrics.rs`.
+- [x] M2.1.6 Re-export existing public store API.
 
 Acceptance:
 
