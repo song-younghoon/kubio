@@ -4,6 +4,10 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+#[cfg(feature = "experimental-http3")]
+use bytes::{Buf, Bytes, BytesMut};
+#[cfg(feature = "experimental-http3")]
+use kubio_core::TlsConfig;
 use kubio_core::{
     DecisionReason, EffectiveConfig, Mode, OriginProtocolPreference, RouteHintConfig,
     RouteMatchConfig, RouteQueryConfig, RouteSafetyConfig, RouteState,
@@ -12,6 +16,14 @@ use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
 use kubio_store::{CacheStore, MemoryStore};
+#[cfg(feature = "experimental-http3")]
+use kubio_transport::{serve_http3_router, Http3ServerTelemetry};
+#[cfg(feature = "experimental-http3")]
+use quinn::crypto::rustls::QuicClientConfig;
+#[cfg(feature = "experimental-http3")]
+use std::fs::File;
+#[cfg(feature = "experimental-http3")]
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,6 +33,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use url::Url;
+
+static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(30000);
+#[cfg(feature = "experimental-http3")]
+static NEXT_TEST_UDP_PORT: AtomicUsize = AtomicUsize::new(40000);
 
 #[tokio::test]
 async fn watch_mode_forwards_and_observes() {
@@ -217,6 +233,225 @@ async fn h1_and_h2c_share_safe_cache_keys() {
     assert_eq!(snapshot.overview.downstream_http2_requests, 1);
     assert_eq!(snapshot.overview.origin_requests, 2);
     assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn h3_safe_get_reuses_after_shadow_confidence() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..3 {
+        let response = h3_get(&runtime, "/stable").await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, "stable");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.downstream_http3_requests, 3);
+    assert_eq!(snapshot.overview.origin_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    assert_eq!(runtime.store.stats().entries, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn h3_authorization_and_cookie_are_protected() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3(origin.url(), Mode::Auto, 1, 1, 1).await;
+
+    let auth = h3_get_with_headers(&runtime, "/auth", &[("authorization", "Bearer secret")]).await;
+    assert_eq!(auth.status, StatusCode::OK);
+
+    let cookie = h3_get_with_headers(&runtime, "/cookie", &[("cookie", "session=secret")]).await;
+    assert_eq!(cookie.status, StatusCode::OK);
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.protected_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn h3_unsafe_response_headers_are_not_stored() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3(origin.url(), Mode::Auto, 1, 1, 1).await;
+
+    for path in ["/set-cookie", "/nostore", "/private"] {
+        let response = h3_get(&runtime, path).await;
+        assert_eq!(response.status, StatusCode::OK);
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn h3_stale_etag_entry_revalidates_with_304() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..3 {
+        let response = h3_get(&runtime, "/etag").await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, "etag-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.revalidation_not_modified, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn h3_stale_if_error_serves_verified_stale_response() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..3 {
+        let response = h3_get(&runtime, "/stale-error").await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, "stale-error-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.stale_responses_served, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn h1_and_h3_share_safe_cache_keys() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3(origin.url(), Mode::Auto, 2, 2, 1).await;
+    let client = https_client();
+
+    for _ in 0..2 {
+        let body = client
+            .get(format!("{}/stable", runtime.proxy_https_url()))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "stable");
+    }
+
+    let response = h3_get_with_headers(&runtime, "/stable", &[("accept", "*/*")]).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, "stable");
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.downstream_http1_requests, 2);
+    assert_eq!(snapshot.overview.downstream_http3_requests, 1);
+    assert_eq!(snapshot.overview.origin_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn alt_svc_is_emitted_for_configured_authority() {
+    let origin = TestOrigin::start().await;
+    let runtime =
+        TestRuntime::start_http3_advertising_to_localhost(origin.url(), Mode::Watch).await;
+    let response = https_client()
+        .get(format!("{}/stable", runtime.proxy_https_url()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.headers().get("alt-svc").unwrap().to_str().unwrap(),
+        format!("h3=\":{}\"; ma=3600", runtime.http3_addr().port())
+    );
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.alt_svc.advertised, 1);
+    let metrics = kubio_telemetry::render_metrics(&snapshot, &runtime.store.stats());
+    assert!(metrics.contains(
+        "kubio_alt_svc_advertisements_total{outcome=\"advertised\",reason=\"configured_authority\"} 1"
+    ));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn alt_svc_is_skipped_for_unconfigured_authority() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3_advertising_authorities(
+        origin.url(),
+        Mode::Watch,
+        vec!["example.com".to_string()],
+    )
+    .await;
+    let response = https_client()
+        .get(format!("{}/stable", runtime.proxy_https_url()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(!response.headers().contains_key("alt-svc"));
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.alt_svc.skipped_authority_not_allowed, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn alt_svc_requires_exact_authority_match() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3_advertising_authorities(
+        origin.url(),
+        Mode::Watch,
+        vec!["localhost".to_string()],
+    )
+    .await;
+    let response = https_client()
+        .get(format!("{}/stable", runtime.proxy_https_url()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(!response.headers().contains_key("alt-svc"));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn origin_alt_svc_is_not_forwarded_for_unconfigured_authority() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_http3(origin.url(), Mode::Watch, 100, 5, 20).await;
+    let response = https_client()
+        .get(format!("{}/origin-alt-svc", runtime.proxy_https_url()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(!response.headers().contains_key("alt-svc"));
     runtime.shutdown().await;
     origin.shutdown().await;
 }
@@ -658,6 +893,121 @@ async fn required_origin_protocol_mismatch_fails_closed() {
     origin.shutdown().await;
 }
 
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn upstream_h3_origin_success_records_protocol() {
+    let origin = TestHttp3Origin::start().await;
+    let runtime = TestRuntime::start_with_upstream_http3(
+        origin.url(),
+        OriginProtocolPreference::Http3,
+        false,
+    )
+    .await;
+
+    let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    assert_eq!(response.text().await.unwrap(), "stable");
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.upstream_http3_requests, 1);
+    assert_eq!(snapshot.overview.upstream_http3.attempts, 1);
+    assert_eq!(snapshot.overview.upstream_http3.successes, 1);
+    assert_eq!(snapshot.overview.protocol_fallbacks, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn upstream_h3_required_failure_fails_closed() {
+    let unused = unused_udp_addr();
+    let origin = Url::parse(&format!("https://localhost:{}", unused.port())).unwrap();
+    let runtime =
+        TestRuntime::start_with_upstream_http3(origin, OriginProtocolPreference::Http3, false)
+            .await;
+
+    let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.upstream_http3.attempts, 1);
+    assert_eq!(snapshot.overview.upstream_http3.failures, 1);
+    assert_eq!(snapshot.overview.upstream_http3.required_failures, 1);
+    runtime.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn upstream_h3_preferred_falls_back_for_replayable_http_origin() {
+    let origin = TestOrigin::start().await;
+    let runtime =
+        TestRuntime::start_with_upstream_http3(origin.url(), OriginProtocolPreference::Http3, true)
+            .await;
+
+    let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    assert_eq!(response.text().await.unwrap(), "stable");
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.upstream_http3.skipped_not_https, 1);
+    assert_eq!(snapshot.overview.upstream_http3.fallbacks, 1);
+    assert_eq!(snapshot.overview.protocol_fallbacks, 1);
+    assert_eq!(snapshot.overview.upstream_http1_requests, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn upstream_h3_blocks_non_replayable_fallback() {
+    let origin = TestOrigin::start().await;
+    let runtime =
+        TestRuntime::start_with_upstream_http3(origin.url(), OriginProtocolPreference::Http3, true)
+            .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/echo", runtime.proxy_url()))
+        .body("unsafe-body")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.upstream_http3.skipped_non_replayable, 1);
+    assert_eq!(snapshot.overview.upstream_http3.fallbacks, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[cfg(feature = "experimental-http3")]
+#[tokio::test]
+async fn revalidation_can_use_upstream_h3() {
+    let origin = TestHttp3Origin::start().await;
+    let runtime = TestRuntime::start_with_upstream_http3_auto(origin.url()).await;
+
+    for _ in 0..3 {
+        let response = reqwest::get(format!("{}/etag", runtime.proxy_url()))
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(response.text().await.unwrap(), "etag-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.revalidation_not_modified, 1);
+    assert_eq!(snapshot.overview.upstream_http3_requests, 3);
+    assert_eq!(snapshot.overview.upstream_http3.successes, 3);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
 #[tokio::test]
 async fn panic_switch_stops_and_restores_reuse() {
     let origin = TestOrigin::start().await;
@@ -1080,6 +1430,140 @@ fn h2_client() -> reqwest::Client {
         .unwrap()
 }
 
+#[cfg(feature = "experimental-http3")]
+fn https_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap()
+}
+
+#[cfg(feature = "experimental-http3")]
+struct H3TestResponse {
+    status: StatusCode,
+    body: String,
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn h3_get(runtime: &TestRuntime, path: &str) -> H3TestResponse {
+    h3_get_with_headers(runtime, path, &[]).await
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn h3_get_with_headers(
+    runtime: &TestRuntime,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> H3TestResponse {
+    let mut last_error = None;
+    for _ in 0..50 {
+        match try_h3_get(runtime, path, headers).await {
+            Ok(response) => return response,
+            Err(err) => {
+                last_error = Some(err);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    panic!(
+        "HTTP/3 request failed after retries: {}",
+        last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    );
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn try_h3_get(
+    runtime: &TestRuntime,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<H3TestResponse> {
+    let mut client = h3_client(runtime.http3_addr()).await?;
+    let uri = format!("https://localhost:{}{path}", runtime.http3_addr().port());
+    let mut request = Request::get(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut stream = client.send.send_request(request.body(())?).await?;
+    stream.finish().await?;
+
+    let response = stream.recv_response().await?;
+    let status = response.status();
+    let mut body = BytesMut::new();
+    while let Some(mut chunk) = stream.recv_data().await? {
+        let len = chunk.remaining();
+        body.extend_from_slice(&chunk.copy_to_bytes(len));
+    }
+    drop(client.send);
+    client.endpoint.close(0_u32.into(), b"done");
+    client.driver.abort();
+    Ok(H3TestResponse {
+        status,
+        body: String::from_utf8(body.to_vec())?,
+    })
+}
+
+#[cfg(feature = "experimental-http3")]
+struct H3TestClient {
+    send: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    endpoint: quinn::Endpoint,
+    driver: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn h3_client(addr: SocketAddr) -> anyhow::Result<H3TestClient> {
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
+    endpoint.set_default_client_config(h3_quinn_client_config()?);
+    let connection = endpoint.connect(addr, "localhost")?.await?;
+    let quic = h3_quinn::Connection::new(connection);
+    let (mut connection, send) = h3::client::builder().build(quic).await?;
+    let driver = tokio::spawn(async move {
+        let _ = connection.wait_idle().await;
+    });
+    Ok(H3TestClient {
+        send,
+        endpoint,
+        driver,
+    })
+}
+
+#[cfg(feature = "experimental-http3")]
+fn h3_quinn_client_config() -> anyhow::Result<quinn::ClientConfig> {
+    let mut roots = quinn::rustls::RootCertStore::empty();
+    for cert in test_tls_certs()? {
+        roots.add(cert)?;
+    }
+    let mut tls = quinn::rustls::ClientConfig::builder_with_provider(Arc::new(
+        quinn::rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&quinn::rustls::version::TLS13])?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    Ok(quinn::ClientConfig::new(Arc::new(
+        QuicClientConfig::try_from(tls)?,
+    )))
+}
+
+#[cfg(feature = "experimental-http3")]
+fn test_tls_certs() -> anyhow::Result<Vec<quinn::rustls::pki_types::CertificateDer<'static>>> {
+    let file = File::open(test_tls_cert_path())?;
+    rustls_pemfile::certs(&mut BufReader::new(file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+#[cfg(feature = "experimental-http3")]
+fn test_tls_cert_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/localhost-cert.pem")
+}
+
+#[cfg(feature = "experimental-http3")]
+fn test_tls_key_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/localhost-key.pem")
+}
+
 const LARGE_BODY_SIZE: usize = 8192;
 
 struct TestOrigin {
@@ -1100,6 +1584,7 @@ impl TestOrigin {
             .route("/nostore", get(no_store))
             .route("/private", get(private))
             .route("/nocache", get(no_cache))
+            .route("/origin-alt-svc", get(origin_alt_svc))
             .route("/nocache-etag", get(no_cache_etag))
             .route("/etag", get(etag))
             .route("/last-modified", get(last_modified))
@@ -1209,6 +1694,57 @@ impl TestHttp1OnlyOrigin {
     }
 }
 
+#[cfg(feature = "experimental-http3")]
+struct TestHttp3Origin {
+    addr: SocketAddr,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+#[cfg(feature = "experimental-http3")]
+impl TestHttp3Origin {
+    async fn start() -> Self {
+        let addr = unused_udp_addr();
+        let defaults = EffectiveConfig::default();
+        let mut server_config = defaults.server.clone();
+        server_config.listen = unused_addr().await;
+        server_config.tls = Some(TlsConfig {
+            cert: test_tls_cert_path(),
+            key: test_tls_key_path(),
+        });
+        server_config.http3.enabled = true;
+        server_config.http3.listen = Some(addr);
+        let config = Arc::new(EffectiveConfig {
+            server: server_config,
+            ..defaults
+        });
+        let app = Router::new()
+            .route("/stable", get(|| async { "stable" }))
+            .route("/etag", get(etag));
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = serve_http3_router(config, app, Http3ServerTelemetry::default(), async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Self {
+            addr,
+            shutdown: Some(tx),
+        }
+    }
+
+    fn url(&self) -> Url {
+        Url::parse(&format!("https://localhost:{}", self.addr.port())).unwrap()
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 async fn origin_counted(State(hits): State<Arc<AtomicUsize>>) -> String {
     hits.fetch_add(1, Ordering::SeqCst);
     "auth".to_string()
@@ -1228,6 +1764,10 @@ async fn private() -> impl IntoResponse {
 
 async fn no_cache() -> impl IntoResponse {
     ([("cache-control", "no-cache")], "no-cache")
+}
+
+async fn origin_alt_svc() -> impl IntoResponse {
+    ([("alt-svc", "h3=\":443\"; ma=60")], "origin-alt-svc")
 }
 
 async fn no_cache_etag(headers: HeaderMap) -> impl IntoResponse {
@@ -1364,6 +1904,8 @@ async fn echo(request: Request<Body>) -> impl IntoResponse {
 
 struct TestRuntime {
     addr: SocketAddr,
+    #[cfg(feature = "experimental-http3")]
+    http3_addr: Option<SocketAddr>,
     observer: Arc<Observer>,
     store: Arc<MemoryStore>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -1451,6 +1993,8 @@ impl TestRuntime {
 
         let runtime = Self {
             addr,
+            #[cfg(feature = "experimental-http3")]
+            http3_addr: None,
             observer,
             store,
             shutdown: Some(tx),
@@ -1525,6 +2069,110 @@ impl TestRuntime {
 
         let runtime = Self {
             addr,
+            #[cfg(feature = "experimental-http3")]
+            http3_addr: None,
+            observer,
+            store,
+            shutdown: Some(tx),
+        };
+        runtime.wait_ready().await;
+        runtime
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    async fn start_http3(
+        origin: Url,
+        mode: Mode,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+    ) -> Self {
+        Self::start_http3_with_advertise(
+            origin,
+            mode,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            false,
+            Vec::new(),
+        )
+        .await
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    async fn start_http3_advertising_to_localhost(origin: Url, mode: Mode) -> Self {
+        Self::start_http3_with_advertise(origin, mode, 100, 5, 20, true, Vec::new()).await
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    async fn start_http3_advertising_authorities(
+        origin: Url,
+        mode: Mode,
+        authorities: Vec<String>,
+    ) -> Self {
+        Self::start_http3_with_advertise(origin, mode, 100, 5, 20, true, authorities).await
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    async fn start_http3_with_advertise(
+        origin: Url,
+        mode: Mode,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        advertise: bool,
+        authorities: Vec<String>,
+    ) -> Self {
+        let addr = unused_addr().await;
+        let http3_addr = unused_udp_addr();
+        let defaults = EffectiveConfig::default();
+        let mut policy_config = defaults.policy.clone();
+        policy_config.min_route_samples = min_route_samples;
+        policy_config.min_key_repeats = min_key_repeats;
+        policy_config.min_shadow_validations = min_shadow_validations;
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        server_config.tls = Some(TlsConfig {
+            cert: test_tls_cert_path(),
+            key: test_tls_key_path(),
+        });
+        server_config.http3.enabled = true;
+        server_config.http3.listen = Some(http3_addr);
+        server_config.http3.advertise = advertise;
+        server_config.http3.authorities = if authorities.is_empty() && advertise {
+            vec![format!("localhost:{}", addr.port())]
+        } else {
+            authorities
+        };
+        let config = Arc::new(EffectiveConfig {
+            origin,
+            mode,
+            server: server_config,
+            policy: policy_config,
+            ..defaults
+        });
+        let observer = Arc::new(Observer::new(
+            100,
+            100,
+            100,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+        ));
+        let store = Arc::new(MemoryStore::new(&config.storage));
+        let policy = Arc::new(PolicyEngine::new(&config));
+        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = run_proxy(state, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        let runtime = Self {
+            addr,
+            http3_addr: Some(http3_addr),
             observer,
             store,
             shutdown: Some(tx),
@@ -1592,6 +2240,58 @@ impl TestRuntime {
             origin,
             server: server_config,
             origin_protocol,
+            ..defaults
+        })
+        .await
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    async fn start_with_upstream_http3(
+        origin: Url,
+        preferred: OriginProtocolPreference,
+        fallback: bool,
+    ) -> Self {
+        let addr = unused_addr().await;
+        let defaults = EffectiveConfig::default();
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        server_config.origin_timeout = Duration::from_millis(250);
+        let mut origin_protocol = defaults.origin_protocol.clone();
+        origin_protocol.preferred = preferred;
+        origin_protocol.fallback = fallback;
+        origin_protocol.http3_experimental = true;
+        origin_protocol.http3_ca_certs = vec![test_tls_cert_path()];
+        Self::start_from_config(EffectiveConfig {
+            origin,
+            server: server_config,
+            origin_protocol,
+            ..defaults
+        })
+        .await
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    async fn start_with_upstream_http3_auto(origin: Url) -> Self {
+        let addr = unused_addr().await;
+        let defaults = EffectiveConfig::default();
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        server_config.origin_timeout = Duration::from_millis(500);
+        let mut origin_protocol = defaults.origin_protocol.clone();
+        origin_protocol.preferred = OriginProtocolPreference::Http3;
+        origin_protocol.fallback = false;
+        origin_protocol.http3_experimental = true;
+        origin_protocol.http3_ca_certs = vec![test_tls_cert_path()];
+        let mut policy_config = defaults.policy.clone();
+        policy_config.min_route_samples = 2;
+        policy_config.min_key_repeats = 2;
+        policy_config.min_shadow_validations = 1;
+        Self::start_from_config(EffectiveConfig {
+            origin,
+            mode: Mode::Auto,
+            server: server_config,
+            origin_protocol,
+            policy: policy_config,
             ..defaults
         })
         .await
@@ -1673,6 +2373,8 @@ impl TestRuntime {
 
         let runtime = Self {
             addr,
+            #[cfg(feature = "experimental-http3")]
+            http3_addr: None,
             observer,
             store,
             shutdown: Some(tx),
@@ -1705,6 +2407,8 @@ impl TestRuntime {
 
         let runtime = Self {
             addr,
+            #[cfg(feature = "experimental-http3")]
+            http3_addr: None,
             observer,
             store,
             shutdown: Some(tx),
@@ -1715,6 +2419,16 @@ impl TestRuntime {
 
     fn proxy_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    fn proxy_https_url(&self) -> String {
+        format!("https://localhost:{}", self.addr.port())
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    fn http3_addr(&self) -> SocketAddr {
+        self.http3_addr.expect("HTTP/3 test runtime")
     }
 
     async fn wait_ready(&self) {
@@ -1734,9 +2448,35 @@ impl TestRuntime {
 }
 
 async fn unused_addr() -> SocketAddr {
+    for _ in 0..10_000 {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::SeqCst);
+        let port = 30000 + (port % 20000);
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        if let Ok(listener) = TcpListener::bind(addr).await {
+            drop(listener);
+            return addr;
+        }
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
+    addr
+}
+
+#[cfg(feature = "experimental-http3")]
+fn unused_udp_addr() -> SocketAddr {
+    for _ in 0..10_000 {
+        let port = NEXT_TEST_UDP_PORT.fetch_add(1, Ordering::SeqCst);
+        let port = 40000 + (port % 20000);
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        if let Ok(socket) = std::net::UdpSocket::bind(addr) {
+            drop(socket);
+            return addr;
+        }
+    }
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = socket.local_addr().unwrap();
+    drop(socket);
     addr
 }
 

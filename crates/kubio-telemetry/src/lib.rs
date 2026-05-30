@@ -437,6 +437,165 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
         &[],
         snapshot.overview.protocol_fallbacks,
     );
+    line(
+        &mut out,
+        "kubio_alt_svc_advertisements_total",
+        "Alt-Svc advertisement decisions with bounded reasons.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_alt_svc_advertisements_total",
+        &[
+            ("outcome", "advertised"),
+            ("reason", "configured_authority"),
+        ],
+        snapshot.overview.alt_svc.advertised,
+    );
+    metric(
+        &mut out,
+        "kubio_alt_svc_advertisements_total",
+        &[("outcome", "skipped"), ("reason", "http3_disabled")],
+        snapshot.overview.alt_svc.skipped_http3_disabled,
+    );
+    metric(
+        &mut out,
+        "kubio_alt_svc_advertisements_total",
+        &[("outcome", "skipped"), ("reason", "advertise_disabled")],
+        snapshot.overview.alt_svc.skipped_advertise_disabled,
+    );
+    metric(
+        &mut out,
+        "kubio_alt_svc_advertisements_total",
+        &[("outcome", "skipped"), ("reason", "missing_authority")],
+        snapshot.overview.alt_svc.skipped_missing_authority,
+    );
+    metric(
+        &mut out,
+        "kubio_alt_svc_advertisements_total",
+        &[("outcome", "skipped"), ("reason", "authority_not_allowed")],
+        snapshot.overview.alt_svc.skipped_authority_not_allowed,
+    );
+    metric(
+        &mut out,
+        "kubio_alt_svc_advertisements_total",
+        &[("outcome", "skipped"), ("reason", "invalid_value")],
+        snapshot.overview.alt_svc.skipped_invalid_value,
+    );
+    line(
+        &mut out,
+        "kubio_http3_connections_total",
+        "Downstream HTTP/3 connection outcomes.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_http3_connections_total",
+        &[("outcome", "accepted")],
+        snapshot.overview.http3_server.connections_accepted,
+    );
+    metric(
+        &mut out,
+        "kubio_http3_connections_total",
+        &[("outcome", "handshake_failed")],
+        snapshot.overview.http3_server.handshake_failures,
+    );
+    line(
+        &mut out,
+        "kubio_http3_streams_total",
+        "Downstream HTTP/3 request stream outcomes.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_http3_streams_total",
+        &[("outcome", "accepted")],
+        snapshot.overview.http3_server.streams_accepted,
+    );
+    metric(
+        &mut out,
+        "kubio_http3_streams_total",
+        &[("outcome", "malformed_request")],
+        snapshot.overview.http3_server.malformed_requests,
+    );
+    metric(
+        &mut out,
+        "kubio_http3_streams_total",
+        &[("outcome", "request_body_rejected")],
+        snapshot.overview.http3_server.request_body_rejections,
+    );
+    line(
+        &mut out,
+        "kubio_http3_response_write_errors_total",
+        "Downstream HTTP/3 response write errors by bounded phase.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_http3_response_write_errors_total",
+        &[("phase", "headers")],
+        snapshot.overview.http3_server.response_write_header_errors,
+    );
+    metric(
+        &mut out,
+        "kubio_http3_response_write_errors_total",
+        &[("phase", "body")],
+        snapshot.overview.http3_server.response_write_body_errors,
+    );
+    metric(
+        &mut out,
+        "kubio_http3_response_write_errors_total",
+        &[("phase", "finish")],
+        snapshot.overview.http3_server.response_finish_errors,
+    );
+    line(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        "Upstream HTTP/3 attempt and fallback outcomes.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        &[("outcome", "attempt")],
+        snapshot.overview.upstream_http3.attempts,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        &[("outcome", "success")],
+        snapshot.overview.upstream_http3.successes,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        &[("outcome", "failure")],
+        snapshot.overview.upstream_http3.failures,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        &[("outcome", "fallback")],
+        snapshot.overview.upstream_http3.fallbacks,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        &[("outcome", "required_failure")],
+        snapshot.overview.upstream_http3.required_failures,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        &[("outcome", "skipped_not_https")],
+        snapshot.overview.upstream_http3.skipped_not_https,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_http3_requests_total",
+        &[("outcome", "skipped_non_replayable")],
+        snapshot.overview.upstream_http3.skipped_non_replayable,
+    );
 
     line(
         &mut out,
@@ -774,5 +933,9 @@ mod tests {
         assert!(metrics.contains("kubio_in_flight_requests"));
         assert!(metrics.contains("kubio_protocol_fallbacks_total"));
         assert!(metrics.contains("kubio_observer_events_dropped_total"));
+        assert!(metrics.contains("kubio_alt_svc_advertisements_total"));
+        assert!(metrics.contains("kubio_http3_connections_total"));
+        assert!(metrics.contains("kubio_http3_response_write_errors_total"));
+        assert!(metrics.contains("kubio_upstream_http3_requests_total"));
     }
 }

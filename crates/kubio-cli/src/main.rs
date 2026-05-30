@@ -264,8 +264,16 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
                 || config.server.protocols.h2c,
         ));
         checks.push((
-            "http/3 guarded disabled",
-            !config.server.http3.enabled && !config.origin_protocol.http3_experimental,
+            "http/3 build support",
+            (!config.server.http3.enabled && !config.origin_protocol.http3_experimental)
+                || cfg!(feature = "experimental-http3"),
+        ));
+        checks.push((
+            "http/3 runtime config",
+            (!config.server.http3.enabled || config.server.tls.is_some())
+                && (!config.origin_protocol.http3_experimental
+                    || config.origin_protocol.preferred == OriginProtocolPreference::Http3
+                    || config.origin_protocol.preferred == OriginProtocolPreference::Auto),
         ));
     }
 
@@ -422,6 +430,17 @@ fn print_startup(config: &EffectiveConfig) {
         "Origin protocol: {} (fallback={})",
         config.origin_protocol.preferred, config.origin_protocol.fallback
     );
+    println!(
+        "HTTP/3 build support: {}",
+        cfg!(feature = "experimental-http3")
+    );
+    if config.origin_protocol.http3_experimental {
+        println!(
+            "Origin HTTP/3: experimental=true idle_pool={} idle_timeout={}s",
+            config.origin_protocol.http3_max_idle_connections,
+            config.origin_protocol.http3_idle_timeout.as_secs()
+        );
+    }
     println!("Store: {}", config.storage.kind);
 }
 
@@ -571,6 +590,17 @@ fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<(
         if let Some(http3_experimental) = origin_protocol.http3_experimental {
             config.origin_protocol.http3_experimental = http3_experimental;
         }
+        if let Some(http3_max_idle_connections) = origin_protocol.http3_max_idle_connections {
+            config.origin_protocol.http3_max_idle_connections = http3_max_idle_connections;
+        }
+        if let Some(http3_idle_timeout) = origin_protocol.http3_idle_timeout {
+            config.origin_protocol.http3_idle_timeout =
+                parse_duration(&http3_idle_timeout).map_err(anyhow::Error::msg)?;
+        }
+        if let Some(http3_ca_certs) = origin_protocol.http3_ca_certs {
+            config.origin_protocol.http3_ca_certs =
+                http3_ca_certs.into_iter().map(PathBuf::from).collect();
+        }
     }
     if let Some(dashboard) = file.dashboard {
         if let Some(enabled) = dashboard.enabled {
@@ -670,6 +700,11 @@ fn parse_size_u32(value: &str) -> Result<u32> {
     u32::try_from(parsed).context("size exceeds u32 limit")
 }
 
+fn parse_size_u16(value: &str) -> Result<u16> {
+    let parsed = parse_size(value).map_err(anyhow::Error::msg)?;
+    u16::try_from(parsed).context("size exceeds u16 limit")
+}
+
 fn apply_http3_config(config: &mut Http3ServerConfig, http3: FileHttp3Config) -> Result<()> {
     if let Some(enabled) = http3.enabled {
         config.enabled = enabled;
@@ -680,6 +715,12 @@ fn apply_http3_config(config: &mut Http3ServerConfig, http3: FileHttp3Config) ->
     if let Some(advertise) = http3.advertise {
         config.advertise = advertise;
     }
+    if let Some(authorities) = http3.authorities {
+        config.authorities = authorities
+            .into_iter()
+            .map(|authority| authority.trim().to_ascii_lowercase())
+            .collect();
+    }
     if let Some(alt_svc_ma) = http3.alt_svc_ma {
         config.alt_svc_ma = parse_duration(&alt_svc_ma).map_err(anyhow::Error::msg)?;
     }
@@ -689,6 +730,13 @@ fn apply_http3_config(config: &mut Http3ServerConfig, http3: FileHttp3Config) ->
     if let Some(max_field_section_size) = http3.max_field_section_size {
         config.max_field_section_size =
             parse_size(&max_field_section_size).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(qpack_max_table_capacity) = http3.qpack_max_table_capacity {
+        config.qpack_max_table_capacity =
+            parse_size(&qpack_max_table_capacity).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(max_udp_payload_size) = http3.max_udp_payload_size {
+        config.max_udp_payload_size = parse_size_u16(&max_udp_payload_size)?;
     }
     if let Some(idle_timeout) = http3.idle_timeout {
         config.idle_timeout = parse_duration(&idle_timeout).map_err(anyhow::Error::msg)?;
@@ -814,20 +862,13 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     if config.server.http2.max_header_list_size == 0 {
         bail!("server.http2.max_header_list_size must be greater than zero");
     }
-    if config.server.http3.advertise && !config.server.http3.enabled {
-        bail!("server.http3.advertise requires server.http3.enabled: true");
-    }
-    if config.server.http3.enabled {
-        bail!("HTTP/3 runtime is not available in this v0.3.0 build; leave server.http3.enabled false");
-    }
+    validate_http3_server_config(config)?;
     if config.origin_protocol.preferred == OriginProtocolPreference::Http3
         && !config.origin_protocol.http3_experimental
     {
         bail!("origin_protocol.preferred: http3 requires origin_protocol.http3_experimental: true");
     }
-    if config.origin_protocol.http3_experimental {
-        bail!("upstream HTTP/3 is not available in this v0.3.0 build; leave origin_protocol.http3_experimental false");
-    }
+    validate_http3_origin_config(config)?;
     if config.storage.kind != "memory" && config.storage.kind != "disk" {
         bail!("storage.kind must be memory or disk");
     }
@@ -898,6 +939,107 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
         bail!("public dashboard admin API requires admin_token");
     }
     Ok(())
+}
+
+fn validate_http3_server_config(config: &EffectiveConfig) -> Result<()> {
+    let http3 = &config.server.http3;
+    if http3.advertise && !http3.enabled {
+        bail!("server.http3.advertise requires server.http3.enabled: true");
+    }
+    validate_http3_authorities(&http3.authorities)?;
+    if http3.max_concurrent_streams == 0 {
+        bail!("server.http3.max_concurrent_streams must be greater than zero");
+    }
+    if http3.max_field_section_size == 0 {
+        bail!("server.http3.max_field_section_size must be greater than zero");
+    }
+    if http3.max_udp_payload_size < 1200 {
+        bail!("server.http3.max_udp_payload_size must be at least 1200 bytes");
+    }
+    if http3.idle_timeout.is_zero() {
+        bail!("server.http3.idle_timeout must be greater than zero");
+    }
+    if http3.advertise {
+        if http3.authorities.is_empty() {
+            bail!("server.http3.advertise requires at least one server.http3.authorities entry");
+        }
+        if http3.alt_svc_ma.is_zero() {
+            bail!("server.http3.alt_svc_ma must be greater than zero when advertise is enabled");
+        }
+    }
+    if http3.enabled {
+        if config.server.tls.is_none() {
+            bail!("server.http3.enabled requires server.tls");
+        }
+        if http3.qpack_max_table_capacity != 0 {
+            bail!(
+                "server.http3.qpack_max_table_capacity must be 0 with the current HTTP/3 runtime"
+            );
+        }
+        #[cfg(not(feature = "experimental-http3"))]
+        bail!("HTTP/3 runtime requires a kubio binary built with --features experimental-http3");
+    }
+    Ok(())
+}
+
+fn validate_http3_origin_config(config: &EffectiveConfig) -> Result<()> {
+    if config.origin_protocol.http3_max_idle_connections == 0 {
+        bail!("origin_protocol.http3_max_idle_connections must be greater than zero");
+    }
+    if config.origin_protocol.http3_idle_timeout.is_zero() {
+        bail!("origin_protocol.http3_idle_timeout must be greater than zero");
+    }
+    if config.origin_protocol.http3_experimental {
+        #[cfg(not(feature = "experimental-http3"))]
+        bail!("upstream HTTP/3 requires a kubio binary built with --features experimental-http3");
+        #[cfg(feature = "experimental-http3")]
+        {
+            if config.origin_protocol.preferred == OriginProtocolPreference::Http3
+                && config.origin.scheme() != "https"
+                && !config.origin_protocol.fallback
+            {
+                bail!("origin_protocol.preferred: http3 without fallback requires an https origin");
+            }
+            for path in &config.origin_protocol.http3_ca_certs {
+                if !path.exists() {
+                    bail!(
+                        "origin_protocol.http3_ca_certs entry does not exist: {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_http3_authorities(authorities: &[String]) -> Result<()> {
+    for authority in authorities {
+        if !valid_http3_authority(authority) {
+            bail!(
+                "server.http3.authorities entries must be host or host:port values: `{authority}`"
+            );
+        }
+    }
+    for (index, authority) in authorities.iter().enumerate() {
+        if authorities[index + 1..]
+            .iter()
+            .any(|other| other == authority)
+        {
+            bail!("duplicate server.http3.authorities entry `{authority}`");
+        }
+    }
+    Ok(())
+}
+
+fn valid_http3_authority(authority: &str) -> bool {
+    authority.parse::<http::uri::Authority>().is_ok()
+        && !authority.contains("://")
+        && !authority.contains('/')
+        && !authority.contains('@')
+        && !authority
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
 }
 
 fn valid_dashboard_path(path: &str) -> bool {
@@ -1055,9 +1197,12 @@ struct FileHttp3Config {
     enabled: Option<bool>,
     listen: Option<String>,
     advertise: Option<bool>,
+    authorities: Option<Vec<String>>,
     alt_svc_ma: Option<String>,
     max_concurrent_streams: Option<u64>,
     max_field_section_size: Option<String>,
+    qpack_max_table_capacity: Option<String>,
+    max_udp_payload_size: Option<String>,
     idle_timeout: Option<String>,
 }
 
@@ -1067,6 +1212,9 @@ struct FileOriginProtocolConfig {
     fallback: Option<bool>,
     http2_prior_knowledge: Option<bool>,
     http3_experimental: Option<bool>,
+    http3_max_idle_connections: Option<usize>,
+    http3_idle_timeout: Option<String>,
+    http3_ca_certs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1267,13 +1415,146 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_http3_runtime_config() {
+    fn validation_rejects_http3_without_tls() {
         let mut config = EffectiveConfig::default();
         config.server.http3.enabled = true;
 
         let err = validate_config(&config).unwrap_err().to_string();
 
-        assert!(err.contains("HTTP/3 runtime is not available"));
+        assert!(err.contains("server.tls"));
+    }
+
+    #[cfg(not(feature = "experimental-http3"))]
+    #[test]
+    fn validation_rejects_http3_runtime_config() {
+        let mut config = EffectiveConfig::default();
+        config.server.tls = Some(TlsConfig {
+            cert: "cert.pem".into(),
+            key: "key.pem".into(),
+        });
+        config.server.http3.enabled = true;
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("--features experimental-http3"));
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    #[test]
+    fn validation_accepts_http3_runtime_config_with_feature() {
+        let mut config = EffectiveConfig::default();
+        config.server.tls = Some(TlsConfig {
+            cert: "cert.pem".into(),
+            key: "key.pem".into(),
+        });
+        config.server.http3.enabled = true;
+
+        validate_config(&config).unwrap();
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    #[test]
+    fn validation_accepts_http3_alt_svc_config_with_feature() {
+        let mut config = EffectiveConfig::default();
+        config.server.tls = Some(TlsConfig {
+            cert: "cert.pem".into(),
+            key: "key.pem".into(),
+        });
+        config.server.http3.enabled = true;
+        config.server.http3.advertise = true;
+        config.server.http3.authorities = vec!["api.example.com".to_string()];
+
+        validate_config(&config).unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_enabled_http3_nonzero_qpack_capacity() {
+        let mut config = EffectiveConfig::default();
+        config.server.tls = Some(TlsConfig {
+            cert: "cert.pem".into(),
+            key: "key.pem".into(),
+        });
+        config.server.http3.enabled = true;
+        config.server.http3.qpack_max_table_capacity = 4096;
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("qpack_max_table_capacity"));
+    }
+
+    #[test]
+    fn validation_rejects_invalid_http3_authority() {
+        let mut config = EffectiveConfig::default();
+        config.server.http3.authorities = vec!["https://example.com".to_string()];
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("server.http3.authorities"));
+    }
+
+    #[test]
+    fn http3_file_config_applies_v031_fields() {
+        let file: FileConfig = serde_yaml::from_str(
+            r#"
+origin: "http://localhost:3000"
+origin_protocol:
+  http3_max_idle_connections: 8
+  http3_idle_timeout: "45s"
+  http3_ca_certs:
+    - "certs/origin-ca.pem"
+server:
+  http3:
+    enabled: false
+    listen: "127.0.0.1:8443"
+    advertise: false
+    authorities:
+      - "API.EXAMPLE.COM:443"
+    alt_svc_ma: "30m"
+    max_concurrent_streams: 64
+    max_field_section_size: "32KiB"
+    qpack_max_table_capacity: "4KiB"
+    max_udp_payload_size: "1400"
+    idle_timeout: "15s"
+"#,
+        )
+        .unwrap();
+        let mut config = EffectiveConfig::default();
+
+        apply_file_config(&mut config, file).unwrap();
+
+        assert_eq!(
+            config.server.http3.listen,
+            Some("127.0.0.1:8443".parse().unwrap())
+        );
+        assert_eq!(config.server.http3.authorities, vec!["api.example.com:443"]);
+        assert_eq!(config.server.http3.alt_svc_ma, Duration::from_secs(1800));
+        assert_eq!(config.server.http3.max_concurrent_streams, 64);
+        assert_eq!(config.server.http3.max_field_section_size, 32 * 1024);
+        assert_eq!(config.server.http3.qpack_max_table_capacity, 4 * 1024);
+        assert_eq!(config.server.http3.max_udp_payload_size, 1400);
+        assert_eq!(config.server.http3.idle_timeout, Duration::from_secs(15));
+        assert_eq!(config.origin_protocol.http3_max_idle_connections, 8);
+        assert_eq!(
+            config.origin_protocol.http3_idle_timeout,
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            config.origin_protocol.http3_ca_certs,
+            vec![PathBuf::from("certs/origin-ca.pem")]
+        );
+    }
+
+    #[cfg(feature = "experimental-http3")]
+    #[test]
+    fn validation_accepts_upstream_http3_experiment_with_feature() {
+        let mut config = EffectiveConfig {
+            origin: "https://api.example.com".parse().unwrap(),
+            ..Default::default()
+        };
+        config.origin_protocol.preferred = OriginProtocolPreference::Http3;
+        config.origin_protocol.http3_experimental = true;
+
+        validate_config(&config).unwrap();
     }
 
     #[test]

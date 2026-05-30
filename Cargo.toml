@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/kubio-cli",
+    "crates/kubio-bench",
     "crates/kubio-core",
     "crates/kubio-dashboard",
     "crates/kubio-observe",
@@ -8,6 +9,7 @@ members = [
     "crates/kubio-proxy",
     "crates/kubio-store",
     "crates/kubio-telemetry",
+    "crates/kubio-transport",
 ]
 resolver = "2"
 
@@ -24,14 +26,19 @@ axum = { version = "0.8", features = ["http2"] }
 blake3 = "1.5"
 bytes = { version = "1.7", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+futures-core = "0.3"
 http = "1.1"
 http-body-util = "0.1"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
 hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 parking_lot = "0.12"
 percent-encoding = "2.3"
 proptest = "1.6"
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls", "stream"] }
+rustls-pemfile = "2.2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -43,6 +50,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = { version = "2.5", features = ["serde"] }
+webpki-roots = "0.26"
 
 kubio-core = { path = "crates/kubio-core" }
 kubio-dashboard = { path = "crates/kubio-dashboard" }
@@ -51,3 +59,4 @@ kubio-policy = { path = "crates/kubio-policy" }
 kubio-proxy = { path = "crates/kubio-proxy" }
 kubio-store = { path = "crates/kubio-store" }
 kubio-telemetry = { path = "crates/kubio-telemetry" }
+kubio-transport = { path = "crates/kubio-transport" }

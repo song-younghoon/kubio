@@ -6,7 +6,10 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kubio_core::{CacheKeyHash, DecisionReason, EffectiveConfig, RedactedConfig, RouteId};
-use kubio_observe::{EventType, Observer, ObserverSnapshot, ProtocolCounts};
+use kubio_observe::{
+    AltSvcCounts, EventType, Http3ServerCounts, Observer, ObserverSnapshot, ProtocolCounts,
+    UpstreamHttp3Counts,
+};
 use kubio_store::{CacheStore, PurgeResult, PurgeSelector, StoreStats};
 use kubio_telemetry::render_metrics;
 use serde::{Deserialize, Serialize};
@@ -81,6 +84,9 @@ async fn index(State(state): State<DashboardState>) -> Html<String> {
     <dt>In-flight requests</dt><dd>{}/{}</dd>
     <dt>Downstream protocols</dt><dd>h1 {} / h2 {} / h3 {}</dd>
     <dt>Upstream protocols</dt><dd>h1 {} / h2 {} / h3 {}</dd>
+    <dt>HTTP/3 connections</dt><dd>accepted {} / handshake failed {}</dd>
+    <dt>Alt-Svc</dt><dd>advertised {} / authority skipped {}</dd>
+    <dt>Upstream HTTP/3</dt><dd>attempts {} / success {} / fallback {}</dd>
     <dt>Store</dt><dd>{:?}</dd>
   </dl>
 </section>
@@ -107,6 +113,13 @@ async fn index(State(state): State<DashboardState>) -> Html<String> {
             snapshot.overview.upstream_http1_requests,
             snapshot.overview.upstream_http2_requests,
             snapshot.overview.upstream_http3_requests,
+            snapshot.overview.http3_server.connections_accepted,
+            snapshot.overview.http3_server.handshake_failures,
+            snapshot.overview.alt_svc.advertised,
+            snapshot.overview.alt_svc.skipped_authority_not_allowed,
+            snapshot.overview.upstream_http3.attempts,
+            snapshot.overview.upstream_http3.successes,
+            snapshot.overview.upstream_http3.fallbacks,
             state.store.stats().kind,
         ),
     ))
@@ -147,10 +160,25 @@ async fn route_page(
     let Some(route) = state.observer.route_by_hash(&route_hash) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let snapshot = state.observer.snapshot();
     let reasons = route
         .explanation
         .iter()
         .map(|reason| format!("<li>{}</li>", escape_html(reason)))
+        .collect::<String>();
+    let events = snapshot
+        .events
+        .iter()
+        .rev()
+        .filter(|event| event.route_id.as_ref() == Some(&route.route_id))
+        .take(5)
+        .map(|event| {
+            format!(
+                "<li>{:?}: {}</li>",
+                event.event_type,
+                escape_html(&event.message)
+            )
+        })
         .collect::<String>();
     Html(layout(
         &route.route_id.as_label(),
@@ -173,6 +201,8 @@ async fn route_page(
     <dt>Upstream protocols</dt><dd>{}</dd>
     <dt>p95 latency</dt><dd>{:.2} ms</dd>
   </dl>
+  <h3>Recent bounded events</h3>
+  <ul>{}</ul>
 </section>
 "#,
             escape_html(&route.route_id.as_label()),
@@ -188,6 +218,7 @@ async fn route_page(
             protocol_counts_html(&route.downstream_protocols),
             protocol_counts_html(&route.upstream_protocols),
             route.latency.p95_ms,
+            events,
         ),
     ))
     .into_response()
@@ -271,6 +302,9 @@ async fn api_overview(State(state): State<DashboardState>) -> Json<OverviewRespo
         upstream_http1_requests: snapshot.overview.upstream_http1_requests,
         upstream_http2_requests: snapshot.overview.upstream_http2_requests,
         upstream_http3_requests: snapshot.overview.upstream_http3_requests,
+        alt_svc: snapshot.overview.alt_svc,
+        http3_server: snapshot.overview.http3_server,
+        upstream_http3: snapshot.overview.upstream_http3,
         p50_latency_ms: snapshot.overview.p50_latency_ms,
         p95_latency_ms: snapshot.overview.p95_latency_ms,
         cache_entries: state.store.stats().entries,
@@ -473,6 +507,9 @@ pub struct OverviewResponse {
     pub upstream_http1_requests: u64,
     pub upstream_http2_requests: u64,
     pub upstream_http3_requests: u64,
+    pub alt_svc: AltSvcCounts,
+    pub http3_server: Http3ServerCounts,
+    pub upstream_http3: UpstreamHttp3Counts,
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
     pub cache_entries: u64,

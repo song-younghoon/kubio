@@ -296,9 +296,12 @@ pub struct Http3ServerConfig {
     pub enabled: bool,
     pub listen: Option<SocketAddr>,
     pub advertise: bool,
+    pub authorities: Vec<String>,
     pub alt_svc_ma: Duration,
     pub max_concurrent_streams: u64,
     pub max_field_section_size: u64,
+    pub qpack_max_table_capacity: u64,
+    pub max_udp_payload_size: u16,
     pub idle_timeout: Duration,
 }
 
@@ -308,9 +311,12 @@ impl Default for Http3ServerConfig {
             enabled: false,
             listen: None,
             advertise: false,
+            authorities: Vec::new(),
             alt_svc_ma: Duration::from_secs(3600),
             max_concurrent_streams: 128,
             max_field_section_size: 64 * 1024,
+            qpack_max_table_capacity: 0,
+            max_udp_payload_size: 1350,
             idle_timeout: Duration::from_secs(30),
         }
     }
@@ -322,6 +328,9 @@ pub struct OriginProtocolConfig {
     pub fallback: bool,
     pub http2_prior_knowledge: bool,
     pub http3_experimental: bool,
+    pub http3_max_idle_connections: usize,
+    pub http3_idle_timeout: Duration,
+    pub http3_ca_certs: Vec<PathBuf>,
 }
 
 impl Default for OriginProtocolConfig {
@@ -331,6 +340,9 @@ impl Default for OriginProtocolConfig {
             fallback: true,
             http2_prior_knowledge: false,
             http3_experimental: false,
+            http3_max_idle_connections: 32,
+            http3_idle_timeout: Duration::from_secs(90),
+            http3_ca_certs: Vec::new(),
         }
     }
 }

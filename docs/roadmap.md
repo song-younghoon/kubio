@@ -35,12 +35,23 @@ v0.3.0:
 - Design status: `.design/v0.3.0` updated to reflect the implemented slice and deferred runtime work.
 - Release notes: `docs/release-notes-v0.3.0.md`.
 
+v0.3.1:
+
+- Add an `experimental-http3` Cargo feature and HTTP/3-enabled release artifact.
+- Introduce a transport boundary, expected as `crates/kubio-transport`, so QUIC adapters do not leak into policy/cache code.
+- Downstream HTTP/3 runtime over QUIC using h3/h3-quinn/Quinn or equivalent reviewed dependencies.
+- HTTP/3 request normalization and response writing into the existing protocol-neutral handler.
+- Safe `Alt-Svc` advertisement for explicitly configured authorities only.
+- Upstream HTTP/3 experiment for HTTPS origins with deterministic replay-safe fallback to HTTP/2 or HTTP/1.1.
+- HTTP/3 protocol, QUIC, Alt-Svc, and fallback metrics/events with bounded labels.
+- Dedicated `crates/kubio-bench` benchmark crate with h1/h2/h3 scenarios and release budget output.
+- Design status: `.design/v0.3.1` records the HTTP/3 runtime, benchmark, observability, dependency, and release plan.
+- Release notes: `docs/release-notes-v0.3.1.md`.
+
 v0.4+ candidates:
 
 - Redis-compatible shared store.
 - Kubernetes deployment guide or operator.
 - GraphQL opt-in mode.
-- HTTP/3 QUIC runtime.
-- Dedicated benchmark crate and release budgets.
 - Further observer sharding beyond the v0.3 read/write lock split.
 - Runtime config reload.

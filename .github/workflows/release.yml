@@ -16,20 +16,29 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test --workspace --features experimental-http3
       - run: bash examples/bench/baseline_scenarios.sh
+      - run: mkdir -p dist/bench
+      - run: cargo run -p kubio-bench -- --requests 50 --protocol h1 --output json --fail-on-budget > dist/bench/kubio-bench-h1.json
+      - run: cargo run -p kubio-bench -- --requests 50 --protocol h2 --output json --fail-on-budget > dist/bench/kubio-bench-h2.json
+      - run: cargo run -p kubio-bench --features experimental-http3 -- --requests 50 --protocol h3 --output json --fail-on-budget > dist/bench/kubio-bench-h3.json
       - run: cargo build --release -p kubio-cli
       - run: KUBIO_BIN=target/release/kubio bash examples/bench/release_smoke.sh
-      - run: mkdir -p dist
       - run: cp target/release/kubio dist/kubio-x86_64-unknown-linux-gnu
+      - run: cargo build --release -p kubio-cli --features experimental-http3
+      - run: cp target/release/kubio dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
       - run: dist/kubio-x86_64-unknown-linux-gnu --help
+      - run: dist/kubio-x86_64-unknown-linux-gnu-http3-experimental --help
       - run: KUBIO_BIN=dist/kubio-x86_64-unknown-linux-gnu bash examples/bench/release_smoke.sh
-      - run: cd dist && sha256sum kubio-x86_64-unknown-linux-gnu > kubio-x86_64-unknown-linux-gnu.sha256
+      - run: cd dist && sha256sum kubio-x86_64-unknown-linux-gnu kubio-x86_64-unknown-linux-gnu-http3-experimental > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: kubio-linux-x86_64
           path: |
             dist/kubio-x86_64-unknown-linux-gnu
-            dist/kubio-x86_64-unknown-linux-gnu.sha256
+            dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
+            dist/SHA256SUMS
+            dist/bench/*.json
 
   docker-image:
     runs-on: ubuntu-latest

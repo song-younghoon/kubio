@@ -68,14 +68,14 @@ Configure `--panic-file /path/to/file` to immediately disable reuse while keepin
 
 ## Project Status
 
-This repository is at v0.3.0 implementation stage. kubio remains local-first and process-local:
+This repository is at v0.3.1 implementation stage for the deferred HTTP/3 runtime. kubio remains local-first and process-local:
 
 - HTTP/1.1 reverse proxy.
 - HTTP/2 downstream support through explicit h2c prior knowledge or TLS ALPN when certificates are configured, with configured stream/window/keepalive/header-list settings applied through Hyper.
 - HTTP/2 upstream support through reqwest, including optional prior knowledge for trusted origins and HTTP/1.1 retry fallback for replayable safe requests.
 - Local dashboard.
 - Prometheus-style metrics.
-- Bounded protocol, fallback, in-flight, backpressure, store-operation, and observer event-drop counters in snapshots, dashboard pages, metrics, and CLI output.
+- Bounded protocol, fallback, HTTP/3 runtime, Alt-Svc, upstream HTTP/3, in-flight, backpressure, store-operation, and observer event-drop counters in snapshots, dashboard pages, metrics, and CLI output.
 - Configurable metrics path.
 - In-memory observation store.
 - In-memory or process-local disk cache store.
@@ -85,6 +85,7 @@ This repository is at v0.3.0 implementation stage. kubio remains local-first and
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
-- HTTP/3 config is parsed and guarded, but the QUIC runtime is not enabled in the default v0.3.0 build.
+- HTTP/3 support is available behind `--features experimental-http3`: downstream QUIC listener, opt-in Alt-Svc for configured authorities, and an HTTPS-origin upstream HTTP/3 experiment with replay-safe fallback.
+- Dedicated local benchmark crate: `cargo run -p kubio-bench -- --protocol h1 --output json`, plus h3 with `--features experimental-http3`.
 
-See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), [.design/v0.3.0](.design/v0.3.0), and [docs/safety-model.md](docs/safety-model.md).
+See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), [.design/v0.3.0](.design/v0.3.0), [.design/v0.3.1](.design/v0.3.1), and [docs/safety-model.md](docs/safety-model.md).

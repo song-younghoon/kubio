@@ -28,7 +28,8 @@ Important defaults:
 - Revalidation: enabled
 - Stale-if-error: origin-controlled
 - Downstream HTTP/2: disabled unless TLS or explicit h2c config enables it
-- Downstream HTTP/3: disabled and guarded in the default build
+- Downstream HTTP/3: disabled by default; available only in binaries built with
+  `--features experimental-http3`
 
 Server settings:
 
@@ -38,7 +39,7 @@ server:
   origin_timeout_ms: 30000
 ```
 
-v0.3.0 protocol settings:
+Protocol settings:
 
 ```yaml
 server:
@@ -56,11 +57,27 @@ server:
     initial_connection_window_size: "4MiB"
     keepalive_timeout: "10s"
     max_header_list_size: "64KiB"
+  http3:
+    enabled: false
+    listen: "0.0.0.0:8443"
+    advertise: false
+    authorities:
+      - "api.example.com:443"
+    alt_svc_ma: "1h"
+    max_concurrent_streams: 128
+    max_field_section_size: "64KiB"
+    qpack_max_table_capacity: "0"
+    max_udp_payload_size: "1350"
+    idle_timeout: "30s"
 
 origin_protocol:
   preferred: "auto" # auto | http1 | http2 | http3
   fallback: true
   http2_prior_knowledge: false
+  http3_experimental: false
+  http3_max_idle_connections: 32
+  http3_idle_timeout: "90s"
+  http3_ca_certs: []
 ```
 
 HTTP/2 server settings are applied to downstream connections through Hyper's connection builder. When `origin_protocol.fallback` is false, kubio fails closed with a gateway error if the origin response does not use the required protocol. Negotiated fallback is recorded in metrics and events when fallback is enabled, including retry fallback from HTTP/2 prior-knowledge connection failures to HTTP/1.1 for replayable safe requests.
@@ -75,7 +92,22 @@ server:
     h2c: true
 ```
 
-HTTP/3 config is parsed but guarded in the default v0.3.0 build. Setting `server.http3.enabled: true` or `origin_protocol.http3_experimental: true` fails startup with a clear message.
+HTTP/3 config is parsed and validated. The downstream QUIC listener is available
+only in binaries built with `--features experimental-http3`, requires
+`server.tls`, and listens on `server.http3.listen` or falls back to
+`server.listen` as a UDP socket. `server.http3.qpack_max_table_capacity` must
+remain `0` in the current runtime slice. `server.http3.advertise` is opt-in and
+emits `Alt-Svc` only when the request authority exactly matches one of
+`server.http3.authorities`; kubio strips origin `Alt-Svc` instead of forwarding
+it for unconfigured authorities.
+
+Upstream HTTP/3 is experimental and only attempted for HTTPS origins when the
+binary is built with `--features experimental-http3`,
+`origin_protocol.preferred: "http3"`, and
+`origin_protocol.http3_experimental: true`. Replayable GET/HEAD failures can
+fall back when `origin_protocol.fallback: true`; non-replayable fallback is
+blocked before bytes are sent. `origin_protocol.http3_ca_certs` accepts
+additional PEM trust anchors for private origins.
 
 Performance settings:
 
@@ -102,7 +134,7 @@ observability:
 
 `metrics_path` must be an absolute dashboard path such as `/metrics` or `/internal/metrics`.
 
-v0.3.0 observability includes downstream/upstream protocol counts, protocol fallback counts, live in-flight gauges, backpressure rejections, store operation counters/latency totals, store saturation events, and observer event-drop counts.
+v0.3.1 observability includes downstream/upstream protocol counts, protocol fallback counts, HTTP/3 connection/stream/write-error counters, QUIC handshake failure counters, Alt-Svc advertised/skipped counters, upstream HTTP/3 attempt/fallback counters, live in-flight gauges, backpressure rejections, store operation counters/latency totals, store saturation events, and observer event-drop counts.
 
 v0.2.0 policy settings:
 

@@ -1,5 +1,8 @@
 version: 1
 
+origin: "https://api.example.com"
+mode: "auto"
+
 server:
   listen: "0.0.0.0:8443"
   tls:
@@ -22,7 +25,6 @@ server:
     max_udp_payload_size: "1350"
     idle_timeout: "30s"
 
-origin: "https://api.example.com"
 origin_protocol:
   preferred: "http3"
   fallback: true
@@ -32,4 +34,7 @@ origin_protocol:
   http3_idle_timeout: "90s"
   http3_ca_certs: []
 
-mode: "watch"
+policy:
+  min_route_samples: 20
+  min_key_repeats: 5
+  min_shadow_validations: 5

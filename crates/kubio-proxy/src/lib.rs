@@ -3,47 +3,49 @@
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use http::header;
-use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use hyper_util::server::conn::auto::Builder as HyperServerBuilder;
-use hyper_util::service::TowerToHyperService;
 use kubio_core::{
     body_hash, build_cache_key_with_query_names, is_hop_by_hop_header, is_sensitive_query_param,
     query_pattern_matches, short_hash, stable_header_hash, CacheKeyHash, Decision, DecisionReason,
     EffectiveConfig, HttpProtocol, Mode, OriginProtocolPreference, ResponseFingerprint,
-    RouteHintConfig, RouteId, StaleIfErrorMode, StoredCacheControl, TlsConfig, Validators,
+    RouteHintConfig, RouteId, StaleIfErrorMode, StoredCacheControl, Validators,
 };
 use kubio_observe::{
-    EventType, ObservationRecord, Observer, QueryParamRecord, RevalidationOutcome,
+    AltSvcOutcome, AltSvcReason, EventType, ObservationRecord, Observer, QueryParamRecord,
+    RevalidationOutcome,
 };
+#[cfg(feature = "experimental-http3")]
+use kubio_observe::{Http3ServerEvent as ObservedHttp3ServerEvent, UpstreamHttp3Event};
 use kubio_policy::PolicyEngine;
 use kubio_store::{CacheEntry, CacheStore, PurgeSelector};
+use kubio_transport::{
+    origin_client_builder, origin_uses_http2_prior_knowledge, serve_http12_router,
+};
+#[cfg(feature = "experimental-http3")]
+use kubio_transport::{
+    serve_http3_router, Http3OriginClient, Http3OriginResponse,
+    Http3ServerEvent as TransportHttp3ServerEvent, Http3ServerTelemetry,
+};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::io;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpListener;
+#[cfg(feature = "experimental-http3")]
+use tokio::sync::broadcast;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
-use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
-use tokio_rustls::TlsAcceptor;
-use tower::util::ServiceExt;
 use tracing::{debug, warn};
 use url::{form_urlencoded, Url};
 
 const DEFAULT_VARY_HEADERS: &[&str] = &["accept", "accept-encoding", "accept-language"];
+const ALT_SVC_HEADER: &str = "alt-svc";
 
 #[derive(Clone)]
 pub struct ProxyState {
@@ -53,6 +55,8 @@ pub struct ProxyState {
     pub store: Arc<dyn CacheStore>,
     pub client: Client,
     pub fallback_client: Client,
+    #[cfg(feature = "experimental-http3")]
+    pub http3_origin_client: Option<Http3OriginClient>,
     route_hints: Arc<RouteHintLookup>,
     in_flight: Arc<Semaphore>,
     panic_switch_was_active: Arc<AtomicBool>,
@@ -70,13 +74,16 @@ impl ProxyState {
             .build()
             .context("build fallback origin HTTP client")?;
         let mut client = client_builder;
-        if config.origin_protocol.http2_prior_knowledge
-            || (config.origin_protocol.preferred == OriginProtocolPreference::Http2
-                && config.origin.scheme() == "http")
-        {
+        if origin_uses_http2_prior_knowledge(&config) {
             client = client.http2_prior_knowledge();
         }
         let client = client.build().context("build origin HTTP client")?;
+        #[cfg(feature = "experimental-http3")]
+        let http3_origin_client = if config.origin_protocol.http3_experimental {
+            Some(Http3OriginClient::new(&config).context("build origin HTTP/3 client")?)
+        } else {
+            None
+        };
         let max_in_flight_requests = config.performance.max_in_flight_requests;
         let route_hints = Arc::new(RouteHintLookup::new(&config.routes));
         observer.record_in_flight(0, max_in_flight_requests);
@@ -87,34 +94,13 @@ impl ProxyState {
             store,
             client,
             fallback_client,
+            #[cfg(feature = "experimental-http3")]
+            http3_origin_client,
             route_hints,
             in_flight: Arc::new(Semaphore::new(max_in_flight_requests)),
             panic_switch_was_active: Arc::new(AtomicBool::new(false)),
         })
     }
-}
-
-fn origin_client_builder(config: &EffectiveConfig) -> reqwest::ClientBuilder {
-    let mut builder = Client::builder()
-        .timeout(config.server.origin_timeout)
-        .connect_timeout(config.server.origin_timeout.min(Duration::from_secs(5)))
-        .pool_max_idle_per_host(config.performance.origin_pool_max_idle_per_host)
-        .pool_idle_timeout(config.performance.origin_pool_idle_timeout)
-        .http2_initial_stream_window_size(config.server.http2.initial_stream_window_size)
-        .http2_initial_connection_window_size(config.server.http2.initial_connection_window_size)
-        .http2_max_header_list_size(
-            config
-                .server
-                .http2
-                .max_header_list_size
-                .min(u64::from(u32::MAX)) as u32,
-        )
-        .http2_keep_alive_timeout(config.server.http2.keepalive_timeout)
-        .http2_keep_alive_while_idle(true);
-    if let Some(interval) = config.server.http2.keepalive_interval {
-        builder = builder.http2_keep_alive_interval(interval);
-    }
-    builder
 }
 
 #[derive(Debug)]
@@ -189,167 +175,100 @@ pub async fn run_proxy<F>(state: ProxyState, shutdown: F) -> anyhow::Result<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let listener = TcpListener::bind(state.config.server.listen).await?;
     let config = state.config.clone();
+    #[cfg(feature = "experimental-http3")]
+    let observer = state.observer.clone();
     let app = router(state);
-    if let Some(tls) = config.server.tls.as_ref() {
-        let acceptor = tls_acceptor(tls, &config)?;
-        accept_tls_loop(listener, acceptor, app, config, shutdown).await;
-    } else {
-        accept_plain_loop(listener, app, config, shutdown).await;
+    if config.server.http3.enabled {
+        #[cfg(feature = "experimental-http3")]
+        {
+            return run_proxy_with_http3(config, app, observer, shutdown).await;
+        }
+        #[cfg(not(feature = "experimental-http3"))]
+        anyhow::bail!(
+            "HTTP/3 runtime requires a kubio binary built with --features experimental-http3"
+        );
+    }
+    serve_http12_router(config, app, shutdown).await
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn run_proxy_with_http3<F>(
+    config: Arc<EffectiveConfig>,
+    app: Router,
+    observer: Arc<Observer>,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let (shutdown_tx, _) = broadcast::channel::<()>(2);
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut http12_shutdown = shutdown_tx.subscribe();
+    let http12_config = config.clone();
+    let http12_app = app.clone();
+    tasks.spawn(async move {
+        serve_http12_router(http12_config, http12_app, async move {
+            let _ = http12_shutdown.recv().await;
+        })
+        .await
+    });
+
+    let mut http3_shutdown = shutdown_tx.subscribe();
+    let http3_telemetry = http3_server_telemetry(observer);
+    tasks.spawn(async move {
+        serve_http3_router(config, app, http3_telemetry, async move {
+            let _ = http3_shutdown.recv().await;
+        })
+        .await
+    });
+
+    tokio::select! {
+        result = tasks.join_next() => {
+            let _ = shutdown_tx.send(());
+            if let Some(result) = result {
+                result.context("proxy listener task join failed")??;
+            }
+        }
+        _ = shutdown => {
+            let _ = shutdown_tx.send(());
+            while let Some(result) = tasks.join_next().await {
+                result.context("proxy listener task join failed")??;
+            }
+        }
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.context("proxy listener task join failed")??;
     }
     Ok(())
 }
 
-async fn accept_plain_loop<F>(
-    listener: TcpListener,
-    app: Router,
-    config: Arc<EffectiveConfig>,
-    shutdown: F,
-) where
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, addr)) => spawn_proxy_connection(stream, addr, app.clone(), config.clone()),
-                    Err(err) if is_connection_accept_error(&err) => {}
-                    Err(err) => {
-                        warn!(error = %err, "proxy accept failed");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                }
+#[cfg(feature = "experimental-http3")]
+fn http3_server_telemetry(observer: Arc<Observer>) -> Http3ServerTelemetry {
+    Http3ServerTelemetry::new(move |event| {
+        observer.record_http3_server_event(match event {
+            TransportHttp3ServerEvent::ConnectionAccepted => {
+                ObservedHttp3ServerEvent::ConnectionAccepted
             }
-        }
-    }
-}
-
-async fn accept_tls_loop<F>(
-    listener: TcpListener,
-    acceptor: TlsAcceptor,
-    app: Router,
-    config: Arc<EffectiveConfig>,
-    shutdown: F,
-) where
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, addr)) => {
-                        let acceptor = acceptor.clone();
-                        let app = app.clone();
-                        let config = config.clone();
-                        tokio::spawn(async move {
-                            match acceptor.accept(stream).await {
-                                Ok(tls) => spawn_proxy_connection(tls, addr, app, config),
-                                Err(err) => warn!(error = %err, "TLS handshake failed"),
-                            }
-                        });
-                    }
-                    Err(err) if is_connection_accept_error(&err) => {}
-                    Err(err) => {
-                        warn!(error = %err, "proxy accept failed");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                }
+            TransportHttp3ServerEvent::HandshakeFailed => ObservedHttp3ServerEvent::HandshakeFailed,
+            TransportHttp3ServerEvent::StreamAccepted => ObservedHttp3ServerEvent::StreamAccepted,
+            TransportHttp3ServerEvent::MalformedRequest => {
+                ObservedHttp3ServerEvent::MalformedRequest
             }
-        }
-    }
-}
-
-fn spawn_proxy_connection<I>(io: I, addr: SocketAddr, app: Router, config: Arc<EffectiveConfig>)
-where
-    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        if let Err(err) = serve_proxy_connection(io, app, &config).await {
-            debug!(remote = %addr, error = %err, "proxy connection closed with error");
-        }
-    });
-}
-
-async fn serve_proxy_connection<I>(
-    io: I,
-    app: Router,
-    config: &EffectiveConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let io = TokioIo::new(io);
-    let tower_service = app.map_request(|request: Request<Incoming>| request.map(Body::new));
-    let hyper_service = TowerToHyperService::new(tower_service);
-    let builder = http_server_builder(config);
-    builder
-        .serve_connection_with_upgrades(io, hyper_service)
-        .await
-}
-
-fn http_server_builder(config: &EffectiveConfig) -> HyperServerBuilder<TokioExecutor> {
-    let mut builder = HyperServerBuilder::new(TokioExecutor::new());
-    if config.server.protocols.http1 && !config.server.protocols.http2 {
-        builder = builder.http1_only();
-    } else if config.server.protocols.http2 && !config.server.protocols.http1 {
-        builder = builder.http2_only();
-    }
-
-    builder
-        .http2()
-        .max_concurrent_streams(config.server.http2.max_concurrent_streams)
-        .initial_stream_window_size(config.server.http2.initial_stream_window_size)
-        .initial_connection_window_size(config.server.http2.initial_connection_window_size)
-        .keep_alive_interval(config.server.http2.keepalive_interval)
-        .keep_alive_timeout(config.server.http2.keepalive_timeout)
-        .max_header_list_size(transport_header_list_limit(
-            config.server.http2.max_header_list_size,
-        ))
-        .timer(TokioTimer::new());
-    builder
-}
-
-fn transport_header_list_limit(configured: u64) -> u32 {
-    configured.saturating_add(1024).min(u64::from(u32::MAX)) as u32
-}
-
-fn tls_acceptor(tls: &TlsConfig, config: &EffectiveConfig) -> anyhow::Result<TlsAcceptor> {
-    let certs = CertificateDer::pem_file_iter(&tls.cert)
-        .with_context(|| format!("open TLS cert {}", tls.cert.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .context("read TLS certificates")?;
-    if certs.is_empty() {
-        anyhow::bail!(
-            "TLS cert file {} contained no certificates",
-            tls.cert.display()
-        );
-    }
-
-    let key = PrivateKeyDer::from_pem_file(&tls.key)
-        .with_context(|| format!("read TLS private key {}", tls.key.display()))?;
-
-    let mut server = RustlsServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .context("build TLS server config")?;
-    server.alpn_protocols = alpn_protocols(config);
-    Ok(TlsAcceptor::from(Arc::new(server)))
-}
-
-fn alpn_protocols(config: &EffectiveConfig) -> Vec<Vec<u8>> {
-    let mut protocols = Vec::new();
-    if config.server.protocols.http2 {
-        protocols.push(b"h2".to_vec());
-    }
-    if config.server.protocols.http1 {
-        protocols.push(b"http/1.1".to_vec());
-    }
-    protocols
+            TransportHttp3ServerEvent::RequestBodyRejected => {
+                ObservedHttp3ServerEvent::RequestBodyRejected
+            }
+            TransportHttp3ServerEvent::ResponseWriteHeadersFailed => {
+                ObservedHttp3ServerEvent::ResponseWriteHeadersFailed
+            }
+            TransportHttp3ServerEvent::ResponseWriteBodyFailed => {
+                ObservedHttp3ServerEvent::ResponseWriteBodyFailed
+            }
+            TransportHttp3ServerEvent::ResponseFinishFailed => {
+                ObservedHttp3ServerEvent::ResponseFinishFailed
+            }
+        });
+    })
 }
 
 struct ObservedInFlightPermit {
@@ -386,15 +305,6 @@ impl Drop for ObservedInFlightPermit {
     }
 }
 
-fn is_connection_accept_error(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-    )
-}
-
 async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) -> Response<Body> {
     let started = std::time::Instant::now();
     let downstream_protocol = http_protocol_from_version(request.version());
@@ -404,6 +314,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     let query = uri.query().map(ToOwned::to_owned);
     let route_id = RouteId::from_method_path(&method, &path);
     let headers = request.headers().clone();
+    let request_authority = request_authority(&uri, &headers);
     if downstream_protocol == HttpProtocol::Http2
         && header_list_size(&headers) > state.config.server.http2.max_header_list_size
     {
@@ -535,12 +446,18 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                     Ok(Some(entry)) if entry.is_fresh() => {
                         debug!(route = %route_id, "serving reused response");
                         state.observer.record_reuse(
-                            route_id,
+                            route_id.clone(),
                             key_hash.clone(),
                             entry.status,
                             started.elapsed(),
                         );
-                        return response_from_cache_entry_with_status(&state.config, entry, "hit");
+                        return response_from_cache_entry_with_status(
+                            &state,
+                            &route_id,
+                            entry,
+                            "hit",
+                            request_authority.as_deref(),
+                        );
                     }
                     Ok(Some(entry)) if entry.is_stale_usable() => {
                         if state.config.policy.revalidation.enabled && entry.validators.available()
@@ -555,9 +472,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                             )
                             .await
                             {
-                                Ok(response)
-                                    if response.status() == reqwest::StatusCode::NOT_MODIFIED =>
-                                {
+                                Ok(response) if response.status() == StatusCode::NOT_MODIFIED => {
                                     let not_modified_headers =
                                         clone_response_headers(response.headers());
                                     if revalidation_metadata_is_safe(&state, &not_modified_headers)
@@ -581,15 +496,17 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                                             RevalidationOutcome::NotModified,
                                         );
                                         state.observer.record_reuse(
-                                            route_id,
+                                            route_id.clone(),
                                             key_hash.clone(),
                                             refreshed.status,
                                             started.elapsed(),
                                         );
                                         return response_from_cache_entry_with_status(
-                                            &state.config,
+                                            &state,
+                                            &route_id,
                                             refreshed,
                                             "revalidated",
+                                            request_authority.as_deref(),
                                         );
                                     }
                                     if let Err(err) = state
@@ -641,15 +558,17 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                                             DecisionReason::StaleIfErrorAllowed,
                                         );
                                         state.observer.record_reuse(
-                                            route_id,
+                                            route_id.clone(),
                                             key_hash.clone(),
                                             entry.status,
                                             started.elapsed(),
                                         );
                                         return response_from_cache_entry_with_status(
-                                            &state.config,
+                                            &state,
+                                            &route_id,
                                             entry,
                                             "stale",
+                                            request_authority.as_deref(),
                                         );
                                     }
                                     state.observer.record_stale(
@@ -688,15 +607,17 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                                             DecisionReason::StaleIfErrorAllowed,
                                         );
                                         state.observer.record_reuse(
-                                            route_id,
+                                            route_id.clone(),
                                             key_hash.clone(),
                                             entry.status,
                                             started.elapsed(),
                                         );
                                         return response_from_cache_entry_with_status(
-                                            &state.config,
+                                            &state,
+                                            &route_id,
                                             entry,
                                             "stale",
+                                            request_authority.as_deref(),
                                         );
                                     }
                                     state.observer.record_stale(
@@ -768,15 +689,17 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                             DecisionReason::StaleIfErrorAllowed,
                         );
                         state.observer.record_reuse(
-                            route_id,
+                            route_id.clone(),
                             key_hash,
                             entry.status,
                             started.elapsed(),
                         );
                         return response_from_cache_entry_with_status(
-                            &state.config,
+                            &state,
+                            &route_id,
                             entry,
                             "stale",
+                            request_authority.as_deref(),
                         );
                     }
                     state.observer.record_stale(
@@ -867,7 +790,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
         };
 
         state.observer.record(ObservationRecord {
-            route_id,
+            route_id: route_id.clone(),
             cache_key_hash,
             decision: final_decision,
             reasons,
@@ -884,10 +807,12 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
         });
 
         return response_from_origin_stream(
-            &state.config,
+            &state,
+            &route_id,
             status,
             &origin_headers,
-            Body::from_stream(origin_response.bytes_stream()),
+            origin_response.into_body_stream(),
+            request_authority.as_deref(),
             if panic_active {
                 "bypass"
             } else if protected {
@@ -1048,10 +973,12 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     }
 
     response_from_origin_stream(
-        &state.config,
+        &state,
+        &route_id,
         status,
         &origin_headers,
         Body::from(response_bytes),
+        request_authority.as_deref(),
         if panic_active {
             "bypass"
         } else if protected {
@@ -1062,6 +989,54 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     )
 }
 
+enum OriginResponse {
+    Reqwest(reqwest::Response),
+    #[cfg(feature = "experimental-http3")]
+    Http3(Http3OriginResponse),
+}
+
+impl OriginResponse {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::Reqwest(response) => response.status(),
+            #[cfg(feature = "experimental-http3")]
+            Self::Http3(response) => response.status(),
+        }
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        match self {
+            Self::Reqwest(response) => response.headers(),
+            #[cfg(feature = "experimental-http3")]
+            Self::Http3(response) => response.headers(),
+        }
+    }
+
+    fn protocol(&self) -> HttpProtocol {
+        match self {
+            Self::Reqwest(response) => http_protocol_from_version(response.version()),
+            #[cfg(feature = "experimental-http3")]
+            Self::Http3(_) => HttpProtocol::Http3,
+        }
+    }
+
+    async fn bytes(self) -> Result<bytes::Bytes, OriginError> {
+        match self {
+            Self::Reqwest(response) => response.bytes().await.map_err(OriginError::Request),
+            #[cfg(feature = "experimental-http3")]
+            Self::Http3(response) => Ok(response.into_body()),
+        }
+    }
+
+    fn into_body_stream(self) -> Body {
+        match self {
+            Self::Reqwest(response) => Body::from_stream(response.bytes_stream()),
+            #[cfg(feature = "experimental-http3")]
+            Self::Http3(response) => Body::from(response.into_body()),
+        }
+    }
+}
+
 async fn send_origin(
     state: &ProxyState,
     method: &Method,
@@ -1069,7 +1044,7 @@ async fn send_origin(
     headers: &HeaderMap,
     body: Body,
     route_id: &RouteId,
-) -> Result<reqwest::Response, OriginError> {
+) -> Result<OriginResponse, OriginError> {
     send_origin_with_validators(state, method, uri, headers, body, route_id, None).await
 }
 
@@ -1080,7 +1055,7 @@ async fn send_conditional_origin(
     headers: &HeaderMap,
     route_id: &RouteId,
     validators: &Validators,
-) -> Result<reqwest::Response, OriginError> {
+) -> Result<OriginResponse, OriginError> {
     send_origin_with_validators(
         state,
         method,
@@ -1101,7 +1076,15 @@ async fn send_origin_with_validators(
     body: Body,
     route_id: &RouteId,
     validators: Option<&Validators>,
-) -> Result<reqwest::Response, OriginError> {
+) -> Result<OriginResponse, OriginError> {
+    #[cfg(feature = "experimental-http3")]
+    if origin_http3_attempt_enabled(state) {
+        return send_origin_http3_with_fallback(
+            state, method, uri, headers, body, route_id, validators,
+        )
+        .await;
+    }
+
     if origin_protocol_retry_is_possible(state, method, headers) {
         let body = axum::body::to_bytes(body, state.config.policy.max_request_body_size)
             .await
@@ -1140,6 +1123,161 @@ async fn send_origin_with_validators(
     validate_origin_protocol(state, route_id, response)
 }
 
+#[cfg(feature = "experimental-http3")]
+async fn send_origin_http3_with_fallback(
+    state: &ProxyState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Body,
+    route_id: &RouteId,
+    validators: Option<&Validators>,
+) -> Result<OriginResponse, OriginError> {
+    if state.config.origin.scheme() != "https" {
+        state
+            .observer
+            .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::SkippedNotHttps);
+        return send_origin_after_http3_skip(
+            state, method, uri, headers, body, route_id, validators,
+        )
+        .await;
+    }
+
+    let replayable = request_is_replayable_for_protocol_fallback(method, headers);
+    if state.config.origin_protocol.fallback && !replayable {
+        state.observer.record_upstream_http3_event(
+            route_id.clone(),
+            UpstreamHttp3Event::SkippedNonReplayable,
+        );
+        return Err(OriginError::NonReplayableHttp3FallbackBlocked);
+    }
+
+    let body = axum::body::to_bytes(body, state.config.policy.max_request_body_size)
+        .await
+        .map_err(|err| OriginError::BodyRead(err.to_string()))?;
+    state
+        .observer
+        .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Attempt);
+    match send_origin_http3_bytes(state, method, uri, headers, body.clone(), validators).await {
+        Ok(response) => {
+            state
+                .observer
+                .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Success);
+            validate_origin_protocol(state, route_id, OriginResponse::Http3(response))
+        }
+        Err(err) if state.config.origin_protocol.fallback && replayable => {
+            warn!(error = %err, "upstream HTTP/3 attempt failed; falling back");
+            state
+                .observer
+                .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Failure);
+            state
+                .observer
+                .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Fallback);
+            let response = send_origin_bytes(
+                &state.fallback_client,
+                state,
+                method,
+                uri,
+                headers,
+                body,
+                validators,
+            )
+            .await?;
+            validate_origin_protocol(state, route_id, response)
+        }
+        Err(err) => {
+            warn!(error = %err, "required upstream HTTP/3 attempt failed");
+            state
+                .observer
+                .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Failure);
+            state
+                .observer
+                .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::RequiredFailure);
+            Err(OriginError::Http3RequiredFailed(err.to_string()))
+        }
+    }
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn send_origin_after_http3_skip(
+    state: &ProxyState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Body,
+    route_id: &RouteId,
+    validators: Option<&Validators>,
+) -> Result<OriginResponse, OriginError> {
+    if state.config.origin_protocol.fallback
+        && request_is_replayable_for_protocol_fallback(method, headers)
+    {
+        let body = axum::body::to_bytes(body, state.config.policy.max_request_body_size)
+            .await
+            .map_err(|err| OriginError::BodyRead(err.to_string()))?;
+        let response = send_origin_bytes(
+            &state.fallback_client,
+            state,
+            method,
+            uri,
+            headers,
+            body,
+            validators,
+        )
+        .await?;
+        state
+            .observer
+            .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Fallback);
+        validate_origin_protocol(state, route_id, response)
+    } else {
+        if state.config.origin_protocol.fallback {
+            state.observer.record_upstream_http3_event(
+                route_id.clone(),
+                UpstreamHttp3Event::SkippedNonReplayable,
+            );
+            return Err(OriginError::NonReplayableHttp3FallbackBlocked);
+        }
+        state
+            .observer
+            .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::RequiredFailure);
+        Err(OriginError::Http3RequiredFailed(
+            "origin is not HTTPS".to_string(),
+        ))
+    }
+}
+
+#[cfg(feature = "experimental-http3")]
+async fn send_origin_http3_bytes(
+    state: &ProxyState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: bytes::Bytes,
+    validators: Option<&Validators>,
+) -> anyhow::Result<Http3OriginResponse> {
+    let client = state
+        .http3_origin_client
+        .as_ref()
+        .context("origin HTTP/3 client is not configured")?;
+    let url = origin_url(&state.config.origin, uri);
+    let headers = origin_request_headers(headers, validators);
+    let max_response_body_size = state
+        .config
+        .performance
+        .max_buffered_response_size
+        .max(state.config.storage.max_object_size)
+        .max(state.config.policy.max_fingerprint_body_size)
+        .min(usize::MAX as u64) as usize;
+    client
+        .send(method, &url, &headers, body, max_response_body_size)
+        .await
+}
+
+#[cfg(feature = "experimental-http3")]
+fn origin_http3_attempt_enabled(state: &ProxyState) -> bool {
+    state.config.origin_protocol.http3_experimental
+        && state.config.origin_protocol.preferred == OriginProtocolPreference::Http3
+}
+
 async fn send_origin_stream(
     client: &Client,
     state: &ProxyState,
@@ -1148,33 +1286,21 @@ async fn send_origin_stream(
     headers: &HeaderMap,
     body: Body,
     validators: Option<&Validators>,
-) -> Result<reqwest::Response, OriginError> {
+) -> Result<OriginResponse, OriginError> {
     let url = origin_url(&state.config.origin, uri);
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = client.request(req_method, url);
-    let connection_named_headers = connection_header_names(headers);
-    for (name, value) in headers {
-        if name == header::HOST
-            || is_hop_by_hop_header_named(name.as_str(), &connection_named_headers)
-        {
-            continue;
-        }
+    let origin_headers = origin_request_headers(headers, validators);
+    for (name, value) in &origin_headers {
         request = request.header(name.as_str(), value.as_bytes());
-    }
-    if let Some(validators) = validators {
-        if let Some(etag) = validators.etag.as_deref() {
-            request = request.header(header::IF_NONE_MATCH.as_str(), etag);
-        }
-        if let Some(last_modified) = validators.last_modified.as_deref() {
-            request = request.header(header::IF_MODIFIED_SINCE.as_str(), last_modified);
-        }
     }
     request
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
         .send()
         .await
         .map_err(OriginError::Request)
+        .map(OriginResponse::Reqwest)
 }
 
 async fn send_origin_bytes(
@@ -1185,11 +1311,25 @@ async fn send_origin_bytes(
     headers: &HeaderMap,
     body: bytes::Bytes,
     validators: Option<&Validators>,
-) -> Result<reqwest::Response, OriginError> {
+) -> Result<OriginResponse, OriginError> {
     let url = origin_url(&state.config.origin, uri);
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = client.request(req_method, url);
+    let origin_headers = origin_request_headers(headers, validators);
+    for (name, value) in &origin_headers {
+        request = request.header(name.as_str(), value.as_bytes());
+    }
+    request
+        .body(body)
+        .send()
+        .await
+        .map_err(OriginError::Request)
+        .map(OriginResponse::Reqwest)
+}
+
+fn origin_request_headers(headers: &HeaderMap, validators: Option<&Validators>) -> HeaderMap {
+    let mut origin_headers = HeaderMap::new();
     let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
         if name == header::HOST
@@ -1197,29 +1337,29 @@ async fn send_origin_bytes(
         {
             continue;
         }
-        request = request.header(name.as_str(), value.as_bytes());
+        origin_headers.insert(name.clone(), value.clone());
     }
     if let Some(validators) = validators {
         if let Some(etag) = validators.etag.as_deref() {
-            request = request.header(header::IF_NONE_MATCH.as_str(), etag);
+            if let Ok(value) = HeaderValue::from_str(etag) {
+                origin_headers.insert(header::IF_NONE_MATCH, value);
+            }
         }
         if let Some(last_modified) = validators.last_modified.as_deref() {
-            request = request.header(header::IF_MODIFIED_SINCE.as_str(), last_modified);
+            if let Ok(value) = HeaderValue::from_str(last_modified) {
+                origin_headers.insert(header::IF_MODIFIED_SINCE, value);
+            }
         }
     }
-    request
-        .body(body)
-        .send()
-        .await
-        .map_err(OriginError::Request)
+    origin_headers
 }
 
 fn validate_origin_protocol(
     state: &ProxyState,
     route_id: &RouteId,
-    response: reqwest::Response,
-) -> Result<reqwest::Response, OriginError> {
-    let actual_protocol = http_protocol_from_version(response.version());
+    response: OriginResponse,
+) -> Result<OriginResponse, OriginError> {
+    let actual_protocol = response.protocol();
     state
         .observer
         .record_upstream_protocol(route_id.clone(), actual_protocol);
@@ -1250,16 +1390,14 @@ fn origin_protocol_retry_is_possible(
     headers: &HeaderMap,
 ) -> bool {
     state.config.origin_protocol.fallback
-        && origin_uses_http2_prior_knowledge(state)
-        && matches!(method, &Method::GET | &Method::HEAD)
-        && declared_request_body_len(headers) == 0
-        && !headers.contains_key(header::TRANSFER_ENCODING)
+        && origin_uses_http2_prior_knowledge(&state.config)
+        && request_is_replayable_for_protocol_fallback(method, headers)
 }
 
-fn origin_uses_http2_prior_knowledge(state: &ProxyState) -> bool {
-    state.config.origin_protocol.http2_prior_knowledge
-        || (state.config.origin_protocol.preferred == OriginProtocolPreference::Http2
-            && state.config.origin.scheme() == "http")
+fn request_is_replayable_for_protocol_fallback(method: &Method, headers: &HeaderMap) -> bool {
+    matches!(method, &Method::GET | &Method::HEAD)
+        && declared_request_body_len(headers) == 0
+        && !headers.contains_key(header::TRANSFER_ENCODING)
 }
 
 fn origin_protocol_retry_error(error: &reqwest::Error) -> bool {
@@ -1270,6 +1408,10 @@ fn origin_protocol_retry_error(error: &reqwest::Error) -> bool {
 enum OriginError {
     Request(reqwest::Error),
     BodyRead(String),
+    #[cfg(feature = "experimental-http3")]
+    Http3RequiredFailed(String),
+    #[cfg(feature = "experimental-http3")]
+    NonReplayableHttp3FallbackBlocked,
     RequiredProtocol {
         expected: HttpProtocol,
         actual: HttpProtocol,
@@ -1287,6 +1429,14 @@ impl fmt::Display for OriginError {
         match self {
             Self::Request(err) => err.fmt(f),
             Self::BodyRead(err) => write!(f, "origin request body read failed: {err}"),
+            #[cfg(feature = "experimental-http3")]
+            Self::Http3RequiredFailed(err) => {
+                write!(f, "required upstream HTTP/3 failed: {err}")
+            }
+            #[cfg(feature = "experimental-http3")]
+            Self::NonReplayableHttp3FallbackBlocked => {
+                f.write_str("upstream HTTP/3 fallback blocked for non-replayable request")
+            }
             Self::RequiredProtocol { expected, actual } => {
                 write!(
                     f,
@@ -1384,19 +1534,22 @@ fn sanitized_response_headers(headers: &HeaderMap) -> HeaderMap {
 }
 
 fn response_from_cache_entry_with_status(
-    config: &EffectiveConfig,
+    state: &ProxyState,
+    route_id: &RouteId,
     entry: CacheEntry,
     kubio_status: &'static str,
+    request_authority: Option<&str>,
 ) -> Response<Body> {
     let mut builder = Response::builder().status(entry.status);
     for (name, value) in &entry.headers {
-        if !is_hop_by_hop_header(name.as_str()) {
+        if !is_hop_by_hop_header(name.as_str()) && name.as_str() != ALT_SVC_HEADER {
             builder = builder.header(name, value);
         }
     }
-    if config.debug_headers {
+    if state.config.debug_headers {
         builder = builder.header("x-kubio-status", kubio_status);
     }
+    builder = add_alt_svc_header(builder, state, route_id, request_authority);
     builder
         .body(Body::from(entry.body))
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
@@ -1574,25 +1727,120 @@ fn record_hint_observations(
 }
 
 fn response_from_origin_stream(
-    config: &EffectiveConfig,
+    state: &ProxyState,
+    route_id: &RouteId,
     status: StatusCode,
     headers: &HeaderMap,
     body: Body,
+    request_authority: Option<&str>,
     kubio_status: &'static str,
 ) -> Response<Body> {
     let mut builder = Response::builder().status(status);
     let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
-        if !is_hop_by_hop_header_named(name.as_str(), &connection_named_headers) {
+        if !is_hop_by_hop_header_named(name.as_str(), &connection_named_headers)
+            && name.as_str() != ALT_SVC_HEADER
+        {
             builder = builder.header(name, value);
         }
     }
-    if config.debug_headers {
+    if state.config.debug_headers {
         builder = builder.header("x-kubio-status", kubio_status);
     }
+    builder = add_alt_svc_header(builder, state, route_id, request_authority);
     builder
         .body(body)
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+fn request_authority(uri: &Uri, headers: &HeaderMap) -> Option<String> {
+    uri.authority()
+        .map(|authority| authority.as_str().to_string())
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn add_alt_svc_header(
+    mut builder: http::response::Builder,
+    state: &ProxyState,
+    route_id: &RouteId,
+    request_authority: Option<&str>,
+) -> http::response::Builder {
+    let decision = alt_svc_decision(&state.config, request_authority);
+    state
+        .observer
+        .record_alt_svc(route_id.clone(), decision.outcome, decision.reason);
+    if let Some(value) = decision.value {
+        builder = builder.header(ALT_SVC_HEADER, value);
+    }
+    builder
+}
+
+#[derive(Debug)]
+struct AltSvcDecision {
+    outcome: AltSvcOutcome,
+    reason: AltSvcReason,
+    value: Option<HeaderValue>,
+}
+
+fn alt_svc_decision(config: &EffectiveConfig, request_authority: Option<&str>) -> AltSvcDecision {
+    if !config.server.http3.enabled {
+        return AltSvcDecision {
+            outcome: AltSvcOutcome::Skipped,
+            reason: AltSvcReason::Http3Disabled,
+            value: None,
+        };
+    }
+    if !config.server.http3.advertise {
+        return AltSvcDecision {
+            outcome: AltSvcOutcome::Skipped,
+            reason: AltSvcReason::AdvertiseDisabled,
+            value: None,
+        };
+    }
+    let Some(request_authority) = request_authority else {
+        return AltSvcDecision {
+            outcome: AltSvcOutcome::Skipped,
+            reason: AltSvcReason::MissingAuthority,
+            value: None,
+        };
+    };
+    if !config
+        .server
+        .http3
+        .authorities
+        .iter()
+        .any(|authority| authority.eq_ignore_ascii_case(request_authority))
+    {
+        return AltSvcDecision {
+            outcome: AltSvcOutcome::Skipped,
+            reason: AltSvcReason::AuthorityNotAllowed,
+            value: None,
+        };
+    }
+
+    let listen = config.server.http3.listen.unwrap_or(config.server.listen);
+    let value = format!(
+        "h3=\":{}\"; ma={}",
+        listen.port(),
+        config.server.http3.alt_svc_ma.as_secs()
+    );
+    match HeaderValue::from_str(&value) {
+        Ok(value) => AltSvcDecision {
+            outcome: AltSvcOutcome::Advertised,
+            reason: AltSvcReason::ConfiguredAuthority,
+            value: Some(value),
+        },
+        Err(_) => AltSvcDecision {
+            outcome: AltSvcOutcome::Skipped,
+            reason: AltSvcReason::InvalidValue,
+            value: None,
+        },
+    }
 }
 
 fn should_stream_origin_response(
@@ -1823,22 +2071,6 @@ mod tests {
         assert_eq!(prepared.hint.display_name(), "first");
         assert_eq!(prepared.vary_names, vec!["accept-language"]);
         assert!(lookup.get(&RouteId::new("POST", "/api/products")).is_none());
-    }
-
-    #[test]
-    fn http_server_builder_respects_enabled_protocols() {
-        let mut config = EffectiveConfig::default();
-        config.server.protocols.http1 = true;
-        config.server.protocols.http2 = false;
-        let builder = http_server_builder(&config);
-        assert!(builder.is_http1_available());
-        assert!(!builder.is_http2_available());
-
-        config.server.protocols.http1 = false;
-        config.server.protocols.http2 = true;
-        let builder = http_server_builder(&config);
-        assert!(!builder.is_http1_available());
-        assert!(builder.is_http2_available());
     }
 
     fn route_hint(method: &str, path: &str, name: Option<&str>, vary: &[&str]) -> RouteHintConfig {

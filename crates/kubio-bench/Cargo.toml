@@ -1,5 +1,5 @@
 [package]
-name = "kubio-cli"
+name = "kubio-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,27 +7,25 @@ repository.workspace = true
 
 [features]
 default = []
-experimental-http3 = ["kubio-proxy/experimental-http3"]
-
-[[bin]]
-name = "kubio"
-path = "src/main.rs"
+experimental-http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn", "dep:rustls-pemfile", "kubio-proxy/experimental-http3"]
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
+bytes.workspace = true
 clap.workspace = true
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
 http.workspace = true
 kubio-core.workspace = true
-kubio-dashboard.workspace = true
 kubio-observe.workspace = true
 kubio-policy.workspace = true
 kubio-proxy.workspace = true
 kubio-store.workspace = true
-kubio-telemetry.workspace = true
+quinn = { workspace = true, optional = true }
 reqwest.workspace = true
+rustls-pemfile = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 url.workspace = true

@@ -10,6 +10,7 @@ ORIGIN_IMAGE="${ORIGIN_IMAGE:-python:3-alpine}"
 origin_dir="$(mktemp -d)"
 cache_dir="$(mktemp -d)"
 config_file="$(mktemp)"
+http3_config_file="$(mktemp)"
 network_name="kubio-smoke-$RANDOM-$$"
 origin_name="kubio-smoke-origin-$RANDOM-$$"
 origin_container_id=""
@@ -23,7 +24,7 @@ cleanup() {
     docker rm -f "${origin_container_id}" >/dev/null 2>&1 || true
   fi
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  rm -rf "${origin_dir}" "${cache_dir}" "${config_file}"
+  rm -rf "${origin_dir}" "${cache_dir}" "${config_file}" "${http3_config_file}"
 }
 trap cleanup EXIT
 
@@ -108,5 +109,29 @@ curl -fsS "http://127.0.0.1:${PROXY_PORT}/api/products?utm_source=one" >/dev/nul
 curl -fsS "http://127.0.0.1:${PROXY_PORT}/api/products?utm_source=two" >/dev/null
 curl -fsS "http://127.0.0.1:${DASHBOARD_PORT}/api/store" | grep -E '"kind":"disk"'
 curl -fsS "http://127.0.0.1:${DASHBOARD_PORT}/metrics" | grep -E 'kubio_cache_entries|kubio_query_hints_applied_total'
+
+cat > "${http3_config_file}" <<EOF
+server:
+  listen: "0.0.0.0:${PROXY_PORT}"
+  tls:
+    cert: "/missing/localhost.pem"
+    key: "/missing/localhost-key.pem"
+  http3:
+    enabled: true
+    advertise: true
+    authorities:
+      - "localhost:${PROXY_PORT}"
+origin: "http://${origin_name}:8000"
+EOF
+
+if docker run --rm \
+  --network "${network_name}" \
+  -v "${http3_config_file}:/http3.yml:ro" \
+  "${KUBIO_IMAGE}" serve --config /http3.yml >/tmp/kubio-http3-docker-smoke.out 2>&1; then
+  echo "HTTP/3 guarded config unexpectedly started in the default docker image" >&2
+  cat /tmp/kubio-http3-docker-smoke.out >&2
+  exit 1
+fi
+grep -E 'HTTP/3 runtime requires|TLS cert|localhost.pem' /tmp/kubio-http3-docker-smoke.out >/dev/null
 
 echo "docker smoke ok"
