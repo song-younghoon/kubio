@@ -68,7 +68,7 @@ Preflight:
 
 ```bash
 rustup target add aarch64-unknown-linux-gnu
-sudo apt-get install gcc-aarch64-linux-gnu qemu-user file
+sudo apt-get install gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user file
 ```
 
 Preferred implementation path:

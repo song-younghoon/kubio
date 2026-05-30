@@ -87,7 +87,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu qemu-user file
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user file
       - run: mkdir -p dist
       - run: cargo build --release -p kubio-cli --target aarch64-unknown-linux-gnu
       - run: cp target/aarch64-unknown-linux-gnu/release/kubio dist/kubio-aarch64-unknown-linux-gnu
