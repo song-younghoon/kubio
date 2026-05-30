@@ -212,13 +212,13 @@ Acceptance:
 
 Goal: ship the refactor with clear source-layout documentation and full compatibility checks.
 
-- [ ] M5.1 Update `docs/development.md` with final module layout.
-- [ ] M5.2 Add `docs/release-notes-v0.3.2.md`.
-- [ ] M5.3 Run full default release gate.
-- [ ] M5.4 Run HTTP/3 feature release gate.
-- [ ] M5.5 Run local smoke benchmark.
-- [ ] M5.6 Confirm no new dependencies were added.
-- [ ] M5.7 Confirm no public behavior changes are called out as part of v0.3.2.
+- [x] M5.1 Update `docs/development.md` with final module layout.
+- [x] M5.2 Add `docs/release-notes-v0.3.2.md`.
+- [x] M5.3 Run full default release gate.
+- [x] M5.4 Run HTTP/3 feature release gate.
+- [x] M5.5 Run local smoke benchmark.
+- [x] M5.6 Confirm no new dependencies were added.
+- [x] M5.7 Confirm no public behavior changes are called out as part of v0.3.2.
 
 Acceptance:
 
