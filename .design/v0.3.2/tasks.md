@@ -66,12 +66,12 @@ Acceptance:
 
 ### M1.2 `kubio-policy`
 
-- [ ] M1.2.1 Move `PolicyEngine` into `engine.rs`.
-- [ ] M1.2.2 Move signal structs into `signals.rs`.
-- [ ] M1.2.3 Move classification enums into `classes.rs`.
-- [ ] M1.2.4 Move `PolicyDecision` into `decision.rs`.
-- [ ] M1.2.5 Move private header/cache-control parsing helpers into `headers.rs`.
-- [ ] M1.2.6 Re-export existing public names.
+- [x] M1.2.1 Move `PolicyEngine` into `engine.rs`.
+- [x] M1.2.2 Move signal structs into `signals.rs`.
+- [x] M1.2.3 Move classification enums into `classes.rs`.
+- [x] M1.2.4 Move `PolicyDecision` into `decision.rs`.
+- [x] M1.2.5 Move private header/cache-control parsing helpers into `headers.rs`.
+- [x] M1.2.6 Re-export existing public names.
 
 Acceptance:
 
