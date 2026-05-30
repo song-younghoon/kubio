@@ -1,0 +1,1079 @@
+use kubio_core::{
+    CacheKeyHash, Decision, DecisionReason, HttpProtocol, Mode, ResponseFingerprint, RouteId,
+    RouteState, StatusClass,
+};
+use parking_lot::RwLock;
+use std::time::{Duration, SystemTime};
+
+use crate::events::{Event, EventType};
+use crate::protocol::{AltSvcOutcome, AltSvcReason, Http3ServerEvent, UpstreamHttp3Event};
+use crate::query::{response_fingerprint_hash, QueryParamStats};
+use crate::records::{
+    KeyObservation, ObservationOutcome, ObservationRecord, QueryParamRecord, RevalidationOutcome,
+};
+use crate::snapshot::{state_sort_key, ObserverSnapshot, OverviewSnapshot, RouteSnapshot};
+use crate::state::{ObserverInner, RouteStats};
+
+#[derive(Debug)]
+pub struct Observer {
+    inner: RwLock<ObserverInner>,
+    max_routes: usize,
+    max_keys: usize,
+    max_events: usize,
+    min_route_samples: u64,
+    min_key_repeats: u64,
+    min_shadow_validations: u64,
+}
+
+impl Observer {
+    pub fn new(
+        max_routes: usize,
+        max_keys: usize,
+        max_events: usize,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+    ) -> Self {
+        Self {
+            inner: RwLock::new(ObserverInner::default()),
+            max_routes,
+            max_keys,
+            max_events,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+        }
+    }
+
+    pub fn record(&self, record: ObservationRecord) -> ObservationOutcome {
+        let mut inner = self.inner.write();
+        if inner.routes.len() >= self.max_routes && !inner.routes.contains_key(&record.route_id) {
+            self.push_event_locked(
+                &mut inner,
+                EventType::RouteLimitReached,
+                None,
+                None,
+                vec![DecisionReason::LowEstimatedBenefit],
+                "route observation limit reached",
+            );
+            return ObservationOutcome::default();
+        }
+
+        {
+            let route = inner
+                .routes
+                .entry(record.route_id.clone())
+                .or_insert_with(|| RouteStats::new(record.route_id.clone()));
+
+            route.request_count += 1;
+            if record.origin {
+                route.origin_count += 1;
+            }
+            if record.reused {
+                route.reuse_count += 1;
+            }
+            if record.protected {
+                route.protected_count += 1;
+            }
+            if record.bypass {
+                route.bypass_count += 1;
+            }
+            route.score = record.score;
+            route.reasons = record.reasons.clone();
+            route
+                .status_classes
+                .increment(StatusClass::from_status(record.status));
+            route.latencies.push_back(record.latency);
+            while route.latencies.len() > 1024 {
+                route.latencies.pop_front();
+            }
+
+            if record.protected && route.state != RouteState::Auto {
+                route.state = RouteState::Protected;
+            }
+        }
+
+        let mut outcome = ObservationOutcome::default();
+        if let (Some(key_hash), Some(fingerprint)) =
+            (record.cache_key_hash.clone(), record.fingerprint.clone())
+        {
+            if inner.keys.len() >= self.max_keys && !inner.keys.contains_key(&key_hash) {
+                self.evict_oldest_key_locked(&mut inner);
+            }
+
+            let now = SystemTime::now();
+            {
+                let key = inner
+                    .keys
+                    .entry(key_hash.clone())
+                    .or_insert_with(|| KeyObservation {
+                        cache_key_hash: key_hash.clone(),
+                        route_id: record.route_id.clone(),
+                        seen_count: 0,
+                        first_seen_at: now,
+                        last_fingerprint: None,
+                        recent_shadow_matches: 0,
+                        recent_shadow_mismatches: 0,
+                        last_seen_at: now,
+                    });
+                key.seen_count += 1;
+                key.last_seen_at = now;
+
+                if record.shadow_eligible {
+                    if let Some(previous) = &key.last_fingerprint {
+                        if previous == &fingerprint {
+                            key.recent_shadow_matches += 1;
+                            outcome.shadow_match = true;
+                        } else {
+                            key.recent_shadow_mismatches += 1;
+                            outcome.shadow_mismatch = true;
+                        }
+                    }
+                }
+                key.last_fingerprint = Some(fingerprint);
+            }
+
+            if outcome.shadow_match || outcome.shadow_mismatch {
+                if let Some(route) = inner.routes.get_mut(&record.route_id) {
+                    if outcome.shadow_match {
+                        route.shadow_matches += 1;
+                    }
+                    if outcome.shadow_mismatch {
+                        route.shadow_mismatches += 1;
+                        route.state = RouteState::Protected;
+                        route.reasons = vec![DecisionReason::ShadowMismatch];
+                    }
+                }
+            }
+
+            if outcome.shadow_mismatch {
+                self.push_event_locked(
+                    &mut inner,
+                    EventType::RouteDemotedDueToShadowMismatch,
+                    Some(record.route_id.clone()),
+                    Some(key_hash.clone()),
+                    vec![DecisionReason::ShadowMismatch],
+                    "route demoted because shadow validation found a different response pattern",
+                );
+            }
+        }
+
+        self.update_route_state_locked(&mut inner, &record, &mut outcome);
+        self.record_policy_event_locked(&mut inner, &record);
+        outcome
+    }
+
+    pub fn record_reuse(
+        &self,
+        route_id: RouteId,
+        cache_key_hash: CacheKeyHash,
+        status: u16,
+        latency: Duration,
+    ) {
+        let record = ObservationRecord {
+            route_id,
+            cache_key_hash: Some(cache_key_hash),
+            decision: Decision::Reuse,
+            reasons: vec![DecisionReason::ReusableAndFresh],
+            status,
+            latency,
+            origin: false,
+            reused: true,
+            protected: false,
+            bypass: false,
+            fingerprint: None,
+            shadow_eligible: false,
+            score: 100,
+            mode: Mode::Auto,
+        };
+        self.record(record);
+    }
+
+    pub fn record_revalidation(
+        &self,
+        route_id: RouteId,
+        cache_key_hash: Option<CacheKeyHash>,
+        outcome: RevalidationOutcome,
+    ) {
+        let mut inner = self.inner.write();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.revalidation_attempts += 1;
+        let (event_type, reason, message) = match outcome {
+            RevalidationOutcome::NotModified => {
+                route.revalidation_not_modified += 1;
+                (
+                    EventType::ResponseRevalidatedNotModified,
+                    DecisionReason::RevalidationNotModified,
+                    "origin confirmed the stored response is still current",
+                )
+            }
+            RevalidationOutcome::Modified => {
+                route.revalidation_modified += 1;
+                (
+                    EventType::ResponseRevalidatedModified,
+                    DecisionReason::RevalidationModified,
+                    "origin returned new content during revalidation",
+                )
+            }
+            RevalidationOutcome::Failed => {
+                route.revalidation_failed += 1;
+                (
+                    EventType::ResponseRevalidationFailed,
+                    DecisionReason::RevalidationFailed,
+                    "origin revalidation failed",
+                )
+            }
+            RevalidationOutcome::Skipped => (
+                EventType::ResponseRevalidationFailed,
+                DecisionReason::NoValidatorAvailable,
+                "revalidation skipped because no validator was available",
+            ),
+        };
+        self.push_event_locked(
+            &mut inner,
+            event_type,
+            Some(route_id),
+            cache_key_hash,
+            vec![reason],
+            message,
+        );
+    }
+
+    pub fn record_stale(
+        &self,
+        route_id: RouteId,
+        cache_key_hash: Option<CacheKeyHash>,
+        served: bool,
+        reason: DecisionReason,
+    ) {
+        let mut inner = self.inner.write();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        if served {
+            route.stale_served += 1;
+        } else {
+            route.stale_denied += 1;
+        }
+        self.push_event_locked(
+            &mut inner,
+            if served {
+                EventType::StaleResponseServed
+            } else {
+                EventType::StaleResponseDenied
+            },
+            Some(route_id),
+            cache_key_hash,
+            vec![reason],
+            if served {
+                "served a verified stale response during an origin error"
+            } else {
+                "stale response was not allowed"
+            },
+        );
+    }
+
+    pub fn record_query_params(&self, route_id: RouteId, params: Vec<QueryParamRecord>) {
+        if params.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.write();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id));
+        for param in params {
+            let stats = route
+                .query_params
+                .entry(param.name.clone())
+                .or_insert_with(|| QueryParamStats::new(param.name.clone()));
+            stats.record_seen(&param);
+        }
+    }
+
+    pub fn record_query_fingerprint(
+        &self,
+        route_id: RouteId,
+        params: &[QueryParamRecord],
+        fingerprint: &ResponseFingerprint,
+    ) {
+        if params.is_empty() {
+            return;
+        }
+
+        let mut inner = self.inner.write();
+        let mut suggestions = Vec::new();
+        {
+            let route = inner
+                .routes
+                .entry(route_id.clone())
+                .or_insert_with(|| RouteStats::new(route_id.clone()));
+            let fingerprint_hash = response_fingerprint_hash(fingerprint);
+            for param in params {
+                let stats = route
+                    .query_params
+                    .entry(param.name.clone())
+                    .or_insert_with(|| QueryParamStats::new(param.name.clone()));
+                let had_suggestion = stats.suggestion().is_some();
+                stats.record_fingerprint(param, &fingerprint_hash);
+                if !had_suggestion
+                    && stats.suggestion().is_some()
+                    && !stats.suggestion_event_emitted
+                {
+                    stats.suggestion_event_emitted = true;
+                    suggestions.push(stats.name.clone());
+                    route.query_param_suggestions += 1;
+                }
+            }
+        }
+
+        for name in suggestions {
+            self.push_event_locked(
+                &mut inner,
+                EventType::QueryParamSuggestionCreated,
+                Some(route_id.clone()),
+                None,
+                vec![DecisionReason::QueryHintApplied],
+                format!("query parameter `{name}` is a candidate for explicit ignore"),
+            );
+        }
+    }
+
+    pub fn record_route_hint(
+        &self,
+        route_id: RouteId,
+        hint_name: String,
+        applied: bool,
+        reason: DecisionReason,
+    ) {
+        let mut inner = self.inner.write();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.route_hint = Some(hint_name);
+        if applied {
+            route.route_hint_applied += 1;
+        } else {
+            route.route_hint_rejected += 1;
+        }
+        self.push_event_locked(
+            &mut inner,
+            if applied {
+                EventType::RouteHintApplied
+            } else {
+                EventType::RouteHintRejected
+            },
+            Some(route_id),
+            None,
+            vec![reason],
+            if applied {
+                "route hint applied"
+            } else {
+                "route hint rejected by safety policy"
+            },
+        );
+    }
+
+    pub fn record_query_hint(&self, route_id: RouteId, applied: bool, reason: DecisionReason) {
+        let mut inner = self.inner.write();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        if applied {
+            route.query_hint_applied += 1;
+        } else {
+            route.query_hint_rejected += 1;
+        }
+        self.push_event_locked(
+            &mut inner,
+            if applied {
+                EventType::QueryHintApplied
+            } else {
+                EventType::QueryHintRejected
+            },
+            Some(route_id),
+            None,
+            vec![reason],
+            if applied {
+                "query hint applied to cache key construction"
+            } else {
+                "query hint was not used for this request"
+            },
+        );
+    }
+
+    pub fn record_downstream_protocol(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.write();
+        inner.downstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id));
+        route.downstream_protocols.increment(protocol);
+    }
+
+    pub fn record_upstream_protocol(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.write();
+        inner.upstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id));
+        route.upstream_protocols.increment(protocol);
+    }
+
+    pub fn record_backpressure_rejection(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.write();
+        inner.backpressure_rejections += 1;
+        inner.downstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.downstream_protocols.increment(protocol);
+        self.push_event_locked(
+            &mut inner,
+            EventType::BackpressureRejected,
+            Some(route_id),
+            None,
+            vec![DecisionReason::LowEstimatedBenefit],
+            "request rejected because the in-flight request limit was reached",
+        );
+    }
+
+    pub fn record_in_flight(&self, current: usize, max: usize) {
+        let mut inner = self.inner.write();
+        inner.in_flight_requests = current as u64;
+        inner.max_in_flight_requests = max as u64;
+    }
+
+    pub fn record_protocol_fallback(
+        &self,
+        route_id: RouteId,
+        preferred: HttpProtocol,
+        actual: HttpProtocol,
+    ) {
+        let mut inner = self.inner.write();
+        inner.protocol_fallbacks += 1;
+        self.push_event_locked(
+            &mut inner,
+            EventType::ProtocolFallback,
+            Some(route_id),
+            None,
+            vec![DecisionReason::PolicyError],
+            format!("origin protocol fallback from {preferred} to {actual}"),
+        );
+    }
+
+    pub fn record_alt_svc(&self, route_id: RouteId, outcome: AltSvcOutcome, reason: AltSvcReason) {
+        let mut inner = self.inner.write();
+        inner.alt_svc.increment(outcome, reason);
+        self.push_event_locked(
+            &mut inner,
+            if outcome == AltSvcOutcome::Advertised {
+                EventType::AltSvcAdvertised
+            } else {
+                EventType::AltSvcSkipped
+            },
+            Some(route_id),
+            None,
+            vec![DecisionReason::PolicyError],
+            if outcome == AltSvcOutcome::Advertised {
+                "Alt-Svc advertised for a configured HTTP/3 authority"
+            } else {
+                reason.message()
+            },
+        );
+    }
+
+    pub fn record_http3_server_event(&self, event: Http3ServerEvent) {
+        let mut inner = self.inner.write();
+        inner.http3_server.increment(event);
+        if matches!(
+            event,
+            Http3ServerEvent::HandshakeFailed
+                | Http3ServerEvent::ResponseWriteHeadersFailed
+                | Http3ServerEvent::ResponseWriteBodyFailed
+                | Http3ServerEvent::ResponseFinishFailed
+        ) {
+            self.push_event_locked(
+                &mut inner,
+                EventType::Http3RuntimeError,
+                None,
+                None,
+                vec![DecisionReason::PolicyError],
+                event.message(),
+            );
+        }
+    }
+
+    pub fn record_upstream_http3_event(&self, route_id: RouteId, event: UpstreamHttp3Event) {
+        let mut inner = self.inner.write();
+        inner.upstream_http3.increment(event);
+        if matches!(
+            event,
+            UpstreamHttp3Event::Fallback
+                | UpstreamHttp3Event::Failure
+                | UpstreamHttp3Event::RequiredFailure
+                | UpstreamHttp3Event::SkippedNotHttps
+                | UpstreamHttp3Event::SkippedNonReplayable
+        ) {
+            self.push_event_locked(
+                &mut inner,
+                if event == UpstreamHttp3Event::Fallback {
+                    EventType::UpstreamHttp3Fallback
+                } else {
+                    EventType::UpstreamHttp3Failed
+                },
+                Some(route_id),
+                None,
+                vec![DecisionReason::PolicyError],
+                event.message(),
+            );
+        }
+    }
+
+    pub fn record_header_limit_rejection(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.write();
+        inner.downstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.downstream_protocols.increment(protocol);
+        self.push_event_locked(
+            &mut inner,
+            EventType::RequestHeaderLimitExceeded,
+            Some(route_id),
+            None,
+            vec![DecisionReason::HeaderListTooLarge],
+            "request rejected because HTTP/2 headers exceeded the configured limit",
+        );
+    }
+
+    pub fn route_state(&self, route_id: &RouteId) -> RouteState {
+        self.inner
+            .read()
+            .routes
+            .get(route_id)
+            .map(|route| route.state)
+            .unwrap_or(RouteState::Watching)
+    }
+
+    pub fn is_auto_eligible(&self, route_id: &RouteId, key_hash: &CacheKeyHash) -> bool {
+        let inner = self.inner.read();
+        let route_ok = inner
+            .routes
+            .get(route_id)
+            .map(|route| route.state == RouteState::Auto)
+            .unwrap_or(false);
+        let key_ok = inner
+            .keys
+            .get(key_hash)
+            .map(|key| {
+                key.seen_count >= self.min_key_repeats
+                    && key.recent_shadow_matches as u64 >= self.min_shadow_validations
+                    && key.recent_shadow_mismatches == 0
+            })
+            .unwrap_or(false);
+        route_ok && key_ok
+    }
+
+    pub fn snapshot(&self) -> ObserverSnapshot {
+        let inner = self.inner.read().clone();
+        let mut routes = inner
+            .routes
+            .values()
+            .map(RouteStats::snapshot)
+            .collect::<Vec<_>>();
+        routes.sort_by(|left, right| {
+            state_sort_key(right.state)
+                .cmp(&state_sort_key(left.state))
+                .then_with(|| right.estimated_savings.total_cmp(&left.estimated_savings))
+                .then_with(|| right.request_count.cmp(&left.request_count))
+        });
+
+        let mut overview = OverviewSnapshot::from_routes(&routes);
+        overview.store_errors = inner.store_errors;
+        overview.dropped_events = inner.dropped_events;
+        overview.backpressure_rejections = inner.backpressure_rejections;
+        overview.protocol_fallbacks = inner.protocol_fallbacks;
+        overview.in_flight_requests = inner.in_flight_requests;
+        overview.max_in_flight_requests = inner.max_in_flight_requests;
+        overview.downstream_http1_requests = inner.downstream_protocols.http1;
+        overview.downstream_http2_requests = inner.downstream_protocols.http2;
+        overview.downstream_http3_requests = inner.downstream_protocols.http3;
+        overview.upstream_http1_requests = inner.upstream_protocols.http1;
+        overview.upstream_http2_requests = inner.upstream_protocols.http2;
+        overview.upstream_http3_requests = inner.upstream_protocols.http3;
+        overview.alt_svc = inner.alt_svc.clone();
+        overview.http3_server = inner.http3_server.clone();
+        overview.upstream_http3 = inner.upstream_http3.clone();
+        ObserverSnapshot {
+            overview,
+            routes,
+            events: inner.events.into_iter().collect(),
+        }
+    }
+
+    pub fn route_by_hash(&self, route_hash: &str) -> Option<RouteSnapshot> {
+        self.inner
+            .read()
+            .routes
+            .values()
+            .find(|route| route.route_id.hash() == route_hash)
+            .map(RouteStats::snapshot)
+    }
+
+    fn update_route_state_locked(
+        &self,
+        inner: &mut ObserverInner,
+        record: &ObservationRecord,
+        outcome: &mut ObservationOutcome,
+    ) {
+        let mut event = None;
+        {
+            let Some(route) = inner.routes.get_mut(&record.route_id) else {
+                return;
+            };
+
+            if route.shadow_mismatches > 0 {
+                route.state = RouteState::Protected;
+                return;
+            }
+            if record.protected {
+                return;
+            }
+
+            let high_repeat = route.repeat_rate() >= 0.2;
+            if route.request_count >= self.min_route_samples
+                && high_repeat
+                && route.score >= 50
+                && route.state == RouteState::Watching
+            {
+                route.state = RouteState::Candidate;
+                outcome.candidate_detected = true;
+                event = Some((
+                    EventType::RouteCandidateDetected,
+                    route.reasons.clone(),
+                    "route has repeated safe traffic and is a reuse candidate",
+                ));
+            }
+
+            if route.shadow_matches >= self.min_shadow_validations
+                && route.shadow_mismatches == 0
+                && route.request_count >= self.min_route_samples
+            {
+                if record.mode == Mode::Auto {
+                    if route.state != RouteState::Auto {
+                        route.state = RouteState::Auto;
+                        outcome.promoted_to_auto = true;
+                        event = Some((
+                            EventType::RoutePromotedToAuto,
+                            vec![DecisionReason::ReusableAndFresh],
+                            "route promoted to automatic reuse",
+                        ));
+                    }
+                } else if route.state != RouteState::ShadowValidated {
+                    route.state = RouteState::ShadowValidated;
+                    event = Some((
+                        EventType::RoutePromotedToShadow,
+                        vec![DecisionReason::InsufficientShadowValidations],
+                        "route passed shadow validation",
+                    ));
+                }
+            }
+        }
+
+        if let Some((event_type, reasons, message)) = event {
+            self.push_event_locked(
+                inner,
+                event_type,
+                Some(record.route_id.clone()),
+                record.cache_key_hash.clone(),
+                reasons,
+                message,
+            );
+        }
+    }
+
+    fn record_policy_event_locked(&self, inner: &mut ObserverInner, record: &ObservationRecord) {
+        if record.reasons.contains(&DecisionReason::HasAuthorization) {
+            self.push_event_locked(
+                inner,
+                EventType::RequestProtectedDueToAuthorization,
+                Some(record.route_id.clone()),
+                record.cache_key_hash.clone(),
+                record.reasons.clone(),
+                "request protected because Authorization was observed",
+            );
+        } else if record.reasons.contains(&DecisionReason::HasCookie) {
+            self.push_event_locked(
+                inner,
+                EventType::RequestProtectedDueToCookie,
+                Some(record.route_id.clone()),
+                record.cache_key_hash.clone(),
+                record.reasons.clone(),
+                "request protected because Cookie was observed",
+            );
+        } else if record
+            .reasons
+            .contains(&DecisionReason::CacheControlNoStore)
+        {
+            self.push_event_locked(
+                inner,
+                EventType::ResponseNotStoredDueToNoStore,
+                Some(record.route_id.clone()),
+                record.cache_key_hash.clone(),
+                record.reasons.clone(),
+                "response not stored because Cache-Control: no-store was observed",
+            );
+        } else if record
+            .reasons
+            .contains(&DecisionReason::CacheControlPrivate)
+        {
+            self.push_event_locked(
+                inner,
+                EventType::ResponseNotStoredDueToPrivate,
+                Some(record.route_id.clone()),
+                record.cache_key_hash.clone(),
+                record.reasons.clone(),
+                "response not stored because Cache-Control: private was observed",
+            );
+        }
+    }
+
+    fn push_event_locked(
+        &self,
+        inner: &mut ObserverInner,
+        event_type: EventType,
+        route_id: Option<RouteId>,
+        cache_key_hash: Option<CacheKeyHash>,
+        reasons: Vec<DecisionReason>,
+        message: impl Into<String>,
+    ) {
+        if matches!(
+            event_type,
+            EventType::StoreErrorFailOpen
+                | EventType::DiskStoreErrorFailOpen
+                | EventType::DiskStoreCorruptEntrySkipped
+        ) {
+            inner.store_errors += 1;
+        }
+        inner.events.push_back(Event {
+            timestamp: SystemTime::now(),
+            event_type,
+            route_id,
+            cache_key_hash,
+            reasons,
+            message: message.into(),
+        });
+        while inner.events.len() > self.max_events {
+            inner.events.pop_front();
+            inner.dropped_events += 1;
+        }
+    }
+
+    fn evict_oldest_key_locked(&self, inner: &mut ObserverInner) {
+        if let Some(oldest) = inner
+            .keys
+            .iter()
+            .min_by_key(|(_, key)| key.last_seen_at)
+            .map(|(hash, _)| hash.clone())
+        {
+            inner.keys.remove(&oldest);
+        }
+    }
+
+    pub fn push_event(
+        &self,
+        event_type: EventType,
+        route_id: Option<RouteId>,
+        cache_key_hash: Option<CacheKeyHash>,
+        reasons: Vec<DecisionReason>,
+        message: impl Into<String>,
+    ) {
+        let mut inner = self.inner.write();
+        self.push_event_locked(
+            &mut inner,
+            event_type,
+            route_id,
+            cache_key_hash,
+            reasons,
+            message,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::QUERY_VALUE_SAMPLE_LIMIT;
+
+    fn observer() -> Observer {
+        Observer::new(100, 100, 100, 2, 2, 1)
+    }
+
+    #[test]
+    fn records_shadow_match() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let key = CacheKeyHash("key".to_string());
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("b".to_string()));
+
+        for _ in 0..2 {
+            observer.record(ObservationRecord {
+                route_id: route.clone(),
+                cache_key_hash: Some(key.clone()),
+                decision: Decision::ObserveOnly,
+                reasons: vec![DecisionReason::InsufficientShadowValidations],
+                status: 200,
+                latency: Duration::from_millis(1),
+                origin: true,
+                reused: false,
+                protected: false,
+                bypass: false,
+                fingerprint: Some(fp.clone()),
+                shadow_eligible: true,
+                score: 90,
+                mode: Mode::Shadow,
+            });
+        }
+
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.overview.shadow_matches, 1);
+    }
+
+    #[test]
+    fn records_shadow_mismatch_as_protected() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let key = CacheKeyHash("key".to_string());
+
+        for body_hash in ["a", "b"] {
+            observer.record(ObservationRecord {
+                route_id: route.clone(),
+                cache_key_hash: Some(key.clone()),
+                decision: Decision::ObserveOnly,
+                reasons: vec![DecisionReason::InsufficientShadowValidations],
+                status: 200,
+                latency: Duration::from_millis(1),
+                origin: true,
+                reused: false,
+                protected: false,
+                bypass: false,
+                fingerprint: Some(ResponseFingerprint::new(
+                    200,
+                    "h".to_string(),
+                    Some(body_hash.to_string()),
+                )),
+                shadow_eligible: true,
+                score: 90,
+                mode: Mode::Shadow,
+            });
+        }
+
+        assert_eq!(observer.route_state(&route), RouteState::Protected);
+    }
+
+    #[test]
+    fn event_ring_buffer_is_bounded() {
+        let observer = Observer::new(100, 100, 2, 2, 2, 1);
+
+        for index in 0..4 {
+            observer.push_event(
+                EventType::StoreErrorFailOpen,
+                None,
+                None,
+                vec![DecisionReason::StoreError],
+                format!("event-{index}"),
+            );
+        }
+
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.events.len(), 2);
+        assert_eq!(snapshot.events[0].message, "event-2");
+        assert_eq!(snapshot.events[1].message, "event-3");
+        assert_eq!(snapshot.overview.store_errors, 4);
+        assert_eq!(snapshot.overview.dropped_events, 2);
+    }
+
+    #[test]
+    fn protocol_and_backpressure_counts_are_bounded() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+
+        observer.record_downstream_protocol(route.clone(), HttpProtocol::Http2);
+        observer.record_upstream_protocol(route.clone(), HttpProtocol::Http1);
+        observer.record_backpressure_rejection(route.clone(), HttpProtocol::Http2);
+        observer.record_in_flight(1, 2);
+        observer.record_protocol_fallback(route.clone(), HttpProtocol::Http2, HttpProtocol::Http1);
+        observer.record_header_limit_rejection(route.clone(), HttpProtocol::Http2);
+
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.overview.downstream_http2_requests, 3);
+        assert_eq!(snapshot.overview.upstream_http1_requests, 1);
+        assert_eq!(snapshot.overview.backpressure_rejections, 1);
+        assert_eq!(snapshot.overview.in_flight_requests, 1);
+        assert_eq!(snapshot.overview.max_in_flight_requests, 2);
+        assert_eq!(snapshot.overview.protocol_fallbacks, 1);
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::BackpressureRejected));
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::ProtocolFallback));
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::RequestHeaderLimitExceeded));
+        let route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.route_id.as_label() == "GET /api/products")
+            .unwrap();
+        assert_eq!(route.downstream_protocols.http2, 3);
+        assert_eq!(route.upstream_protocols.http1, 1);
+    }
+
+    #[test]
+    fn query_stats_track_cardinality_and_suggestion_without_values() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let params = ["a", "b", "c"]
+            .into_iter()
+            .map(|value| QueryParamRecord {
+                name: "utm_source".to_string(),
+                configured_action: "observe".to_string(),
+                value_hash: Some(value.to_string()),
+                sensitive: false,
+            })
+            .collect::<Vec<_>>();
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("stable".to_string()));
+
+        for param in &params {
+            observer.record_query_params(route.clone(), vec![param.clone()]);
+            observer.record_query_fingerprint(route.clone(), std::slice::from_ref(param), &fp);
+        }
+
+        let snapshot = observer.snapshot();
+        let route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.route_id.template == "/api/products")
+            .unwrap();
+        let param = route
+            .query_params
+            .iter()
+            .find(|param| param.name == "utm_source")
+            .unwrap();
+        assert_eq!(param.cardinality, "low");
+        assert!(!param.fingerprint_sensitive);
+        assert_eq!(param.suggestion.as_deref(), Some("candidate_ignore"));
+        assert_eq!(snapshot.overview.query_param_suggestions, 1);
+    }
+
+    #[test]
+    fn query_stats_mark_fingerprint_sensitive_params() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+
+        for (value_hash, body_hash) in [("a", "body-a"), ("b", "body-b")] {
+            let param = QueryParamRecord {
+                name: "variant".to_string(),
+                configured_action: "observe".to_string(),
+                value_hash: Some(value_hash.to_string()),
+                sensitive: false,
+            };
+            observer.record_query_params(route.clone(), vec![param.clone()]);
+            observer.record_query_fingerprint(
+                route.clone(),
+                &[param],
+                &ResponseFingerprint::new(200, "h".to_string(), Some(body_hash.to_string())),
+            );
+        }
+
+        let snapshot = observer.snapshot();
+        let route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.route_id.template == "/api/products")
+            .unwrap();
+        let param = route
+            .query_params
+            .iter()
+            .find(|param| param.name == "variant")
+            .unwrap();
+        assert!(param.fingerprint_sensitive);
+        assert_eq!(param.suggestion, None);
+    }
+
+    #[test]
+    fn query_stats_keep_value_and_fingerprint_samples_bounded() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("stable".to_string()));
+
+        for index in 0..(QUERY_VALUE_SAMPLE_LIMIT + 8) {
+            let param = QueryParamRecord {
+                name: "utm_source".to_string(),
+                configured_action: "observe".to_string(),
+                value_hash: Some(format!("value-{index}")),
+                sensitive: false,
+            };
+            observer.record_query_params(route.clone(), vec![param.clone()]);
+            observer.record_query_fingerprint(route.clone(), &[param], &fp);
+        }
+
+        let inner = observer.inner.read();
+        let param = inner
+            .routes
+            .get(&route)
+            .unwrap()
+            .query_params
+            .get("utm_source")
+            .unwrap();
+        assert_eq!(param.value_hashes.len(), QUERY_VALUE_SAMPLE_LIMIT);
+        assert_eq!(param.fingerprints_by_value.len(), QUERY_VALUE_SAMPLE_LIMIT);
+        assert_eq!(param.fingerprint_hashes.len(), 1);
+        assert!(param.value_hash_overflow);
+    }
+
+    #[test]
+    fn route_promotes_to_auto_after_shadow_validation_threshold() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let key = CacheKeyHash("key".to_string());
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("b".to_string()));
+
+        for _ in 0..3 {
+            observer.record(ObservationRecord {
+                route_id: route.clone(),
+                cache_key_hash: Some(key.clone()),
+                decision: Decision::ObserveOnly,
+                reasons: vec![DecisionReason::InsufficientShadowValidations],
+                status: 200,
+                latency: Duration::from_millis(1),
+                origin: true,
+                reused: false,
+                protected: false,
+                bypass: false,
+                fingerprint: Some(fp.clone()),
+                shadow_eligible: true,
+                score: 90,
+                mode: Mode::Auto,
+            });
+        }
+
+        assert_eq!(observer.route_state(&route), RouteState::Auto);
+        assert!(observer.is_auto_eligible(&route, &key));
+    }
+}

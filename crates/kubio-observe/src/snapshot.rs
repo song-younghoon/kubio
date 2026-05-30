@@ -1,0 +1,162 @@
+use kubio_core::{DecisionReason, LatencySnapshot, RouteId, RouteState, StatusClassCounts};
+use serde::{Deserialize, Serialize};
+
+use crate::events::Event;
+use crate::latency::percentile;
+use crate::protocol::{AltSvcCounts, Http3ServerCounts, ProtocolCounts, UpstreamHttp3Counts};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserverSnapshot {
+    pub overview: OverviewSnapshot,
+    pub routes: Vec<RouteSnapshot>,
+    pub events: Vec<Event>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OverviewSnapshot {
+    pub observed_requests: u64,
+    pub origin_requests: u64,
+    pub reused_responses: u64,
+    pub protected_requests: u64,
+    pub bypassed_requests: u64,
+    pub candidate_routes: u64,
+    pub auto_routes: u64,
+    pub estimated_savings: f64,
+    pub actual_reuse_rate: f64,
+    pub shadow_matches: u64,
+    pub shadow_mismatches: u64,
+    pub revalidation_attempts: u64,
+    pub revalidation_not_modified: u64,
+    pub revalidation_modified: u64,
+    pub revalidation_failed: u64,
+    pub stale_responses_served: u64,
+    pub stale_responses_denied: u64,
+    pub route_hints_applied: u64,
+    pub route_hints_rejected: u64,
+    pub query_hints_applied: u64,
+    pub query_hints_rejected: u64,
+    pub query_param_suggestions: u64,
+    pub store_errors: u64,
+    pub dropped_events: u64,
+    pub backpressure_rejections: u64,
+    pub protocol_fallbacks: u64,
+    pub in_flight_requests: u64,
+    pub max_in_flight_requests: u64,
+    pub downstream_http1_requests: u64,
+    pub downstream_http2_requests: u64,
+    pub downstream_http3_requests: u64,
+    pub upstream_http1_requests: u64,
+    pub upstream_http2_requests: u64,
+    pub upstream_http3_requests: u64,
+    pub alt_svc: AltSvcCounts,
+    pub http3_server: Http3ServerCounts,
+    pub upstream_http3: UpstreamHttp3Counts,
+    pub p50_latency_ms: f64,
+    pub p95_latency_ms: f64,
+}
+
+impl OverviewSnapshot {
+    pub(crate) fn from_routes(routes: &[RouteSnapshot]) -> Self {
+        let mut overview = Self::default();
+        let mut latencies = Vec::new();
+        for route in routes {
+            overview.observed_requests += route.request_count;
+            overview.origin_requests += route.origin_count;
+            overview.reused_responses += route.reuse_count;
+            overview.protected_requests += route.protected_count;
+            overview.bypassed_requests += route.bypass_count;
+            overview.shadow_matches += route.shadow_matches;
+            overview.shadow_mismatches += route.shadow_mismatches;
+            overview.revalidation_attempts += route.revalidation_attempts;
+            overview.revalidation_not_modified += route.revalidation_not_modified;
+            overview.revalidation_modified += route.revalidation_modified;
+            overview.revalidation_failed += route.revalidation_failed;
+            overview.stale_responses_served += route.stale_served;
+            overview.stale_responses_denied += route.stale_denied;
+            overview.route_hints_applied += route.route_hint_applied;
+            overview.route_hints_rejected += route.route_hint_rejected;
+            overview.query_hints_applied += route.query_hint_applied;
+            overview.query_hints_rejected += route.query_hint_rejected;
+            overview.query_param_suggestions += route.query_param_suggestions;
+            if route.state == RouteState::Candidate || route.state == RouteState::ShadowValidated {
+                overview.candidate_routes += 1;
+            }
+            if route.state == RouteState::Auto {
+                overview.auto_routes += 1;
+            }
+            latencies.push(route.latency.p50_ms);
+            latencies.push(route.latency.p95_ms);
+        }
+        if overview.observed_requests > 0 {
+            overview.estimated_savings = routes
+                .iter()
+                .map(|route| route.estimated_savings * route.request_count as f64)
+                .sum::<f64>()
+                / overview.observed_requests as f64;
+            overview.actual_reuse_rate =
+                overview.reused_responses as f64 / overview.observed_requests as f64;
+        }
+        if !latencies.is_empty() {
+            latencies.sort_by(|left, right| left.total_cmp(right));
+            overview.p50_latency_ms = percentile(&latencies, 0.50);
+            overview.p95_latency_ms = percentile(&latencies, 0.95);
+        }
+        overview
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteSnapshot {
+    pub route_id: RouteId,
+    pub route_hash: String,
+    pub state: RouteState,
+    pub request_count: u64,
+    pub origin_count: u64,
+    pub reuse_count: u64,
+    pub protected_count: u64,
+    pub bypass_count: u64,
+    pub shadow_matches: u64,
+    pub shadow_mismatches: u64,
+    pub revalidation_attempts: u64,
+    pub revalidation_not_modified: u64,
+    pub revalidation_modified: u64,
+    pub revalidation_failed: u64,
+    pub stale_served: u64,
+    pub stale_denied: u64,
+    pub route_hint_applied: u64,
+    pub route_hint_rejected: u64,
+    pub query_hint_applied: u64,
+    pub query_hint_rejected: u64,
+    pub query_param_suggestions: u64,
+    pub downstream_protocols: ProtocolCounts,
+    pub upstream_protocols: ProtocolCounts,
+    pub status_classes: StatusClassCounts,
+    pub latency: LatencySnapshot,
+    pub repeat_rate: f64,
+    pub estimated_savings: f64,
+    pub actual_reuse_rate: f64,
+    pub score: i16,
+    pub reasons: Vec<DecisionReason>,
+    pub explanation: Vec<String>,
+    pub route_hint: Option<String>,
+    pub query_params: Vec<QueryParamSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryParamSnapshot {
+    pub name: String,
+    pub seen_count: u64,
+    pub cardinality: String,
+    pub fingerprint_sensitive: bool,
+    pub configured_action: String,
+    pub suggestion: Option<String>,
+}
+
+pub(crate) fn state_sort_key(state: RouteState) -> u8 {
+    match state {
+        RouteState::Auto => 4,
+        RouteState::Candidate | RouteState::ShadowValidated => 3,
+        RouteState::Protected => 2,
+        RouteState::Watching => 1,
+    }
+}

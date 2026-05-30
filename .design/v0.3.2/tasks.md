@@ -98,13 +98,13 @@ Acceptance:
 
 ### M2.2 `kubio-observe`
 
-- [ ] M2.2.1 Move `Observer` methods into `observer.rs`.
-- [ ] M2.2.2 Move private mutable state and route/query stats into `state.rs` and `query.rs`.
-- [ ] M2.2.3 Move record DTOs into `records.rs`.
-- [ ] M2.2.4 Move event enums and protocol counters into `events.rs` and `protocol.rs`.
-- [ ] M2.2.5 Move snapshot DTOs into `snapshot.rs`.
-- [ ] M2.2.6 Move latency helpers into `latency.rs`.
-- [ ] M2.2.7 Re-export existing public observer API.
+- [x] M2.2.1 Move `Observer` methods into `observer.rs`.
+- [x] M2.2.2 Move private mutable state and route/query stats into `state.rs` and `query.rs`.
+- [x] M2.2.3 Move record DTOs into `records.rs`.
+- [x] M2.2.4 Move event enums and protocol counters into `events.rs` and `protocol.rs`.
+- [x] M2.2.5 Move snapshot DTOs into `snapshot.rs`.
+- [x] M2.2.6 Move latency helpers into `latency.rs`.
+- [x] M2.2.7 Re-export existing public observer API.
 
 Acceptance:
 

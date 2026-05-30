@@ -1,0 +1,54 @@
+use kubio_core::{CacheKeyHash, DecisionReason, RouteId};
+use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub timestamp: SystemTime,
+    pub event_type: EventType,
+    pub route_id: Option<RouteId>,
+    pub cache_key_hash: Option<CacheKeyHash>,
+    pub reasons: Vec<DecisionReason>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventType {
+    RouteCandidateDetected,
+    RoutePromotedToShadow,
+    RoutePromotedToAuto,
+    RouteDemotedDueToShadowMismatch,
+    RequestProtectedDueToAuthorization,
+    RequestProtectedDueToCookie,
+    ResponseNotStoredDueToNoStore,
+    ResponseNotStoredDueToPrivate,
+    CacheEntryEvicted,
+    OriginRequestFailed,
+    StoreErrorFailOpen,
+    PanicSwitchEnabled,
+    PanicSwitchDisabled,
+    RouteLimitReached,
+    ResponseRevalidatedNotModified,
+    ResponseRevalidatedModified,
+    ResponseRevalidationFailed,
+    StaleResponseServed,
+    StaleResponseDenied,
+    RouteHintApplied,
+    RouteHintRejected,
+    QueryHintApplied,
+    QueryHintRejected,
+    QueryParamSuggestionCreated,
+    BackpressureRejected,
+    ProtocolFallback,
+    RequestHeaderLimitExceeded,
+    StoreSaturated,
+    DiskStoreOpened,
+    DiskStoreCorruptEntrySkipped,
+    DiskStoreErrorFailOpen,
+    AltSvcAdvertised,
+    AltSvcSkipped,
+    Http3RuntimeError,
+    UpstreamHttp3Fallback,
+    UpstreamHttp3Failed,
+}
