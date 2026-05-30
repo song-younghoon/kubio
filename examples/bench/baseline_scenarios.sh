@@ -6,6 +6,7 @@ PROXY_PORT="${PROXY_PORT:-18084}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-19904}"
 DISK_PROXY_PORT="${DISK_PROXY_PORT:-18085}"
 DISK_DASHBOARD_PORT="${DISK_DASHBOARD_PORT:-19905}"
+KUBIO_READY_ATTEMPTS="${KUBIO_READY_ATTEMPTS:-1200}"
 
 work_dir="$(mktemp -d)"
 origin_app="${work_dir}/origin.py"
@@ -136,7 +137,7 @@ start_kubio() {
   local dashboard_port="$2"
   cargo run -p kubio-cli -- serve --config "${config}" >/tmp/kubio-baseline-smoke.log 2>&1 &
   local pid="$!"
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 "${KUBIO_READY_ATTEMPTS}"); do
     if curl -fsS "http://127.0.0.1:${dashboard_port}/api/overview" >/dev/null 2>&1; then
       echo "${pid}"
       return
