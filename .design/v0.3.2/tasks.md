@@ -181,13 +181,13 @@ Goal: make command and benchmark code navigable while preserving outputs.
 
 ### M4.1 `kubio-cli`
 
-- [ ] M4.1.1 Move Clap args into `args.rs`.
-- [ ] M4.1.2 Move command handlers into `commands/`.
-- [ ] M4.1.3 Move config file DTOs into `config/file.rs`.
-- [ ] M4.1.4 Move config application into `config/apply.rs`.
-- [ ] M4.1.5 Move config validation into `config/validate.rs`.
-- [ ] M4.1.6 Move admin HTTP helpers, output helpers, and shutdown handling into focused modules.
-- [ ] M4.1.7 Leave `main.rs` as init, parse, and dispatch only.
+- [x] M4.1.1 Move Clap args into `args.rs`.
+- [x] M4.1.2 Move command handlers into `commands/`.
+- [x] M4.1.3 Move config file DTOs into `config/file.rs`.
+- [x] M4.1.4 Move config application into `config/apply.rs`.
+- [x] M4.1.5 Move config validation into `config/validate.rs`.
+- [x] M4.1.6 Move admin HTTP helpers, output helpers, and shutdown handling into focused modules.
+- [x] M4.1.7 Leave `main.rs` as init, parse, and dispatch only.
 
 Acceptance:
 
