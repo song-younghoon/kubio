@@ -74,7 +74,7 @@ jobs:
 
   linux-arm64-container:
     runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - run: |
@@ -104,20 +104,28 @@ jobs:
           esac
         timeout-minutes: 5
       - run: mkdir -p dist
+      - run: docker pull --platform linux/arm64 rust:1-slim-bookworm
+        timeout-minutes: 20
       - run: |
+          cache_root="${HOME}/.cache/kubio/linux-arm64"
+          mkdir -p "$cache_root/cargo" "$cache_root/target"
           docker run --rm --platform linux/arm64 \
             -v "${PWD}:/work" \
+            -v "${cache_root}/cargo:/cargo-home" \
+            -v "${cache_root}/target:/cargo-target" \
             -w /work \
-            -e CARGO_TARGET_DIR=/work/target/linux-arm64 \
-            rust:1-bookworm \
+            -e CARGO_HOME=/cargo-home \
+            -e CARGO_TARGET_DIR=/cargo-target \
+            rust:1-slim-bookworm \
             bash -lc '
               set -euo pipefail
               apt-get update
-              apt-get install -y --no-install-recommends curl file python3
+              apt-get install -y --no-install-recommends ca-certificates curl file
+              rm -rf /var/lib/apt/lists/*
               cargo build --release -p kubio-cli
-              cp target/linux-arm64/release/kubio dist/kubio-aarch64-unknown-linux-gnu
+              cp /cargo-target/release/kubio dist/kubio-aarch64-unknown-linux-gnu
               cargo build --release -p kubio-cli --features experimental-http3
-              cp target/linux-arm64/release/kubio dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
+              cp /cargo-target/release/kubio dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
               dist/kubio-aarch64-unknown-linux-gnu --help
               dist/kubio-aarch64-unknown-linux-gnu --version
               dist/kubio-aarch64-unknown-linux-gnu-http3-experimental --help

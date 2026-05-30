@@ -68,14 +68,14 @@ Preflight:
 ```bash
 test "$(uname -s)" = "Darwin"
 test "$(uname -m)" = "arm64"
-docker version
-docker run --rm --platform linux/arm64 alpine uname -m
+docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
 ```
 
 Preferred implementation path:
 
-1. start a pinned `linux/arm64` build image;
-2. install/use stable Rust in the container;
+1. pull a small stable Rust `linux/arm64` build image;
+2. mount persistent runner-local Cargo registry and target caches into the
+   container;
 3. run `cargo build --release -p kubio-cli`;
 4. copy the output as `kubio-aarch64-unknown-linux-gnu`;
 5. run `cargo build --release -p kubio-cli --features experimental-http3`;
@@ -86,7 +86,7 @@ Preferred implementation path:
 Suggested base image:
 
 ```text
-ubuntu:22.04 or a project-owned pinned Rust linux/arm64 image
+rust:1-slim-bookworm or a project-owned pinned Rust linux/arm64 image
 ```
 
 Using a pinned project-owned image is preferable once the workflow stabilizes,
