@@ -84,7 +84,7 @@ Acceptance:
 Goal: publish all platform artifacts from one final release job.
 
 - [x] M3.1 Split Linux x86_64 build from release publishing.
-- [x] M3.2 Add Linux arm64 Docker-on-Apple-Silicon build job.
+- [x] M3.2 Add Linux arm64 GNU cross-build job.
 - [x] M3.3 Add macOS arm64 self-hosted runner job.
 - [x] M3.4 Add macOS runner preflight for `Darwin arm64`.
 - [x] M3.5 Upload platform binaries as workflow artifacts.
@@ -108,9 +108,9 @@ Goal: prove every supported release target is usable enough to advertise.
 - [x] M4.1 Keep existing Linux x86_64 full release gate.
 - [x] M4.2 Run `--help` and `--version` for Linux x86_64 standard and HTTP/3
   artifacts.
-- [~] M4.3 Validate Linux arm64 artifacts are ELF aarch64 binaries.
-- [~] M4.4 Run Linux arm64 `--help` and `--version` inside Docker
-  `linux/arm64`.
+- [x] M4.3 Validate Linux arm64 artifacts are ELF aarch64 binaries.
+- [x] M4.4 Run Linux arm64 `--help` and `--version` through short
+  `qemu-aarch64` smoke.
 - [x] M4.5 Run native macOS arm64 `--help` and `--version` for both flavors.
 - [x] M4.6 Run native macOS arm64 staged install smoke.
 - [x] M4.7 Run native macOS arm64 staged self-update smoke.
@@ -121,8 +121,9 @@ Acceptance:
 - Release workflow fails if any supported target artifact is missing or has no
   checksum.
 - macOS arm64 support is backed by native execution on the self-hosted runner.
-- Linux arm64 support is backed by Docker `linux/arm64` execution on Apple
-  Silicon.
+- Linux arm64 support is backed by GNU cross-builds plus short QEMU startup
+  smoke. Full native install/update smoke is deferred until a native Linux
+  arm64 runner is available.
 
 ## M5: README, Documentation, and Release Notes
 
@@ -151,7 +152,7 @@ Goal: ship v0.4.1 as a platform-coverage patch release.
 - [x] M6.1 Bump workspace version to `0.4.1`.
 - [x] M6.2 Confirm `kubio --version` reports `0.4.1`.
 - [x] M6.3 Run full Linux x86_64 release gate.
-- [~] M6.4 Run Linux arm64 Docker build and smoke gate.
+- [x] M6.4 Run Linux arm64 cross-build and startup smoke gate.
 - [x] M6.5 Run macOS arm64 native build and smoke gate.
 - [ ] M6.6 Confirm release assets and `SHA256SUMS` after publish.
 - [x] M6.7 Confirm a v0.4.0 Linux x86_64 install can update to v0.4.1.

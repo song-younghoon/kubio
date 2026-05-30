@@ -70,11 +70,10 @@ Linux x86_64:
 
 Linux arm64:
 
-- standard build inside Docker `linux/arm64` on Apple Silicon;
-- HTTP/3 experimental build inside Docker `linux/arm64` on Apple Silicon;
+- standard cross-build with `aarch64-unknown-linux-gnu`;
+- HTTP/3 experimental cross-build with `aarch64-unknown-linux-gnu`;
 - Linux aarch64 ELF validation;
-- container-native `--help` and `--version`;
-- staged install and self-update smoke inside the container when practical;
+- short `qemu-aarch64` `--help` and `--version` smoke;
 - checksum inclusion.
 
 macOS arm64:
@@ -130,9 +129,9 @@ curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/mai
 "$tmpdir/bin/kubio" update --check
 ```
 
-For Linux arm64, run the equivalent checks inside Docker `linux/arm64` on the
-self-hosted Apple Silicon runner. A native Linux arm64 host can replace this
-later if one is added.
+For Linux arm64, release workflow validation should cover the artifact contract,
+ELF architecture, and short `qemu-aarch64` startup checks. A native Linux arm64
+host can replace this later if one is added.
 
 ## 7. Release Notes
 

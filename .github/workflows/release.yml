@@ -72,76 +72,33 @@ jobs:
             dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
             dist/bench/*.json
 
-  linux-arm64-container:
-    runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 75
+  linux-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
       - run: |
-          test "$(uname -s)" = "Darwin"
-          test "$(uname -m)" = "arm64"
-          run_with_timeout() {
-            timeout_secs="$1"
-            shift
-            "$@" &
-            pid="$!"
-            for _ in $(seq 1 "$timeout_secs"); do
-              if ! kill -0 "$pid" 2>/dev/null; then
-                wait "$pid"
-                return "$?"
-              fi
-              sleep 1
-            done
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-            echo "timed out after ${timeout_secs}s: $*" >&2
-            return 124
-          }
-          server_platform="$(run_with_timeout 60 docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
-          case "$server_platform" in
-            linux/arm64|linux/aarch64) ;;
-            *) echo "unexpected Docker server platform: $server_platform" >&2; exit 1 ;;
-          esac
-        timeout-minutes: 5
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu qemu-user file
       - run: mkdir -p dist
-      - run: docker pull --platform linux/arm64 rust:1-slim-bookworm
-        timeout-minutes: 20
-      - run: |
-          cache_root="${HOME}/.cache/kubio/linux-arm64"
-          mkdir -p "$cache_root/cargo" "$cache_root/target"
-          docker run --rm --platform linux/arm64 \
-            -v "${PWD}:/work" \
-            -v "${cache_root}/cargo:/cargo-home" \
-            -v "${cache_root}/target:/cargo-target" \
-            -w /work \
-            -e CARGO_HOME=/cargo-home \
-            -e CARGO_TARGET_DIR=/cargo-target \
-            rust:1-slim-bookworm \
-            bash -lc '
-              set -euo pipefail
-              apt-get update
-              apt-get install -y --no-install-recommends ca-certificates curl file
-              rm -rf /var/lib/apt/lists/*
-              cargo build --release -p kubio-cli
-              cp /cargo-target/release/kubio dist/kubio-aarch64-unknown-linux-gnu
-              cargo build --release -p kubio-cli --features experimental-http3
-              cp /cargo-target/release/kubio dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
-              dist/kubio-aarch64-unknown-linux-gnu --help
-              dist/kubio-aarch64-unknown-linux-gnu --version
-              dist/kubio-aarch64-unknown-linux-gnu-http3-experimental --help
-              dist/kubio-aarch64-unknown-linux-gnu-http3-experimental --version
-              file dist/kubio-aarch64-unknown-linux-gnu | grep -E "ELF 64-bit.*aarch64|ELF 64-bit.*ARM aarch64"
-              cd dist
-              sha256sum kubio-aarch64-unknown-linux-gnu kubio-aarch64-unknown-linux-gnu-http3-experimental > SHA256SUMS
-              install_dir="$(mktemp -d)/bin"
-              KUBIO_DOWNLOAD_BASE_URL="file:///work/dist" KUBIO_INSTALL_DIR="$install_dir" bash /work/install.sh
-              "$install_dir/kubio" --help
-              "$install_dir/kubio" --version
-              version="$("$install_dir/kubio" --version)"
-              set -- $version
-              "$install_dir/kubio" update --version "v$2" --force --download-base-url "file:///work/dist" --install-dir "$install_dir"
-            '
-        timeout-minutes: 40
+      - run: cargo build --release -p kubio-cli --target aarch64-unknown-linux-gnu
+      - run: cp target/aarch64-unknown-linux-gnu/release/kubio dist/kubio-aarch64-unknown-linux-gnu
+      - run: cargo build --release -p kubio-cli --features experimental-http3 --target aarch64-unknown-linux-gnu
+      - run: cp target/aarch64-unknown-linux-gnu/release/kubio dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
+      - run: file dist/kubio-aarch64-unknown-linux-gnu | grep -E "ELF 64-bit.*aarch64|ELF 64-bit.*ARM aarch64"
+      - run: qemu-aarch64 -L /usr/aarch64-linux-gnu dist/kubio-aarch64-unknown-linux-gnu --help
+      - run: qemu-aarch64 -L /usr/aarch64-linux-gnu dist/kubio-aarch64-unknown-linux-gnu --version
+      - run: qemu-aarch64 -L /usr/aarch64-linux-gnu dist/kubio-aarch64-unknown-linux-gnu-http3-experimental --help
+      - run: qemu-aarch64 -L /usr/aarch64-linux-gnu dist/kubio-aarch64-unknown-linux-gnu-http3-experimental --version
+      - run: cd dist && sha256sum kubio-aarch64-unknown-linux-gnu kubio-aarch64-unknown-linux-gnu-http3-experimental > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: kubio-linux-arm64
@@ -195,7 +152,7 @@ jobs:
 
   publish-release:
     runs-on: ubuntu-latest
-    needs: [linux-x86_64, linux-arm64-container, macos-arm64, docker-image]
+    needs: [linux-x86_64, linux-arm64, macos-arm64, docker-image]
     permissions:
       contents: write
     steps:

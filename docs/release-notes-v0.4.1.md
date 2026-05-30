@@ -14,8 +14,7 @@ Status: implemented locally; release workflow validation pending.
   target instead of a Linux x86_64 constant.
 - Refactored release publishing into platform build jobs plus a final
   aggregated publish job.
-- Added Linux arm64 build and smoke checks inside Docker `linux/arm64` on the
-  Apple Silicon self-hosted runner.
+- Added Linux arm64 cross-build checks plus short QEMU startup smoke.
 
 ## Compatibility Notes
 
@@ -76,6 +75,6 @@ cargo test --workspace
 cargo test --workspace --features experimental-http3
 ```
 
-Release workflow checks add Linux x86_64 release smoke, Linux arm64 Docker
-smoke, native macOS arm64 smoke, installer smoke, self-update smoke, checksum
-verification, and release asset verification.
+Release workflow checks add Linux x86_64 release smoke, Linux arm64 ELF and
+startup smoke, native macOS arm64 smoke, installer smoke, self-update smoke,
+checksum verification, and release asset verification.

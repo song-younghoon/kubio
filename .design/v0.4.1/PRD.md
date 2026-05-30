@@ -22,9 +22,10 @@ one platform, deterministic artifacts, checksum verification, and a working
 self-update path.
 
 The repository now has access to an arm64 macOS self-hosted runner. That makes
-native Apple Silicon build and smoke testing practical. The same runner can also
-build Linux arm64 artifacts inside a Docker `linux/arm64` container. That avoids
-slow x86-to-arm QEMU execution while still producing Linux arm64 binaries.
+native Apple Silicon build and smoke testing practical. Linux arm64 artifacts
+can be built with a GNU aarch64 cross toolchain on GitHub-hosted Linux, with
+QEMU limited to short binary execution smoke checks instead of a slow emulated
+Rust build.
 
 ## 3. Goals
 
@@ -42,8 +43,7 @@ v0.4.1 should:
 9. Keep install and update checksum verification mandatory.
 10. Refactor the release workflow into platform build jobs plus a final publish
     job.
-11. Use the self-hosted arm64 macOS runner for native macOS builds and Docker
-    Linux arm64 builds.
+11. Use the self-hosted arm64 macOS runner for native macOS builds.
 12. Add release gates that prove each supported target has both flavor artifacts
     and checksum entries.
 13. Update docs so the support matrix is easy to find and does not overpromise
@@ -159,6 +159,6 @@ The release is successful when:
 - `SHA256SUMS` contains every published binary exactly once.
 - The macOS arm64 self-hosted runner performs native macOS `--version`,
   `--help`, and staged install/update smoke checks.
-- Linux arm64 artifacts are built and smoke-checked inside a Docker `linux/arm64`
-  container on the Apple Silicon runner.
+- Linux arm64 artifacts are cross-built with the GNU aarch64 toolchain and
+  smoke-checked with short QEMU `--version` and `--help` runs.
 - Existing Linux x86_64 tests, benchmark gates, and release smoke remain green.

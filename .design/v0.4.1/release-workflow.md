@@ -11,7 +11,7 @@ platform build jobs plus a final publish job:
 ```text
 linux-x86_64
 macos-arm64
-linux-arm64-container
+linux-arm64
 docker-image
 publish-release
 ```
@@ -49,49 +49,48 @@ This job remains the canonical deep validation gate.
 Runner:
 
 ```yaml
-runs-on: [self-hosted, macOS, ARM64]
+runs-on: ubuntu-latest
 ```
 
 Build environment:
 
 ```text
-Docker container with platform linux/arm64
+Rust aarch64-unknown-linux-gnu target plus GNU aarch64 cross linker
 ```
 
-The job builds Linux arm64 artifacts inside Docker on the Apple Silicon runner.
-This uses arm64 Linux userspace on arm64 hardware through Docker's Linux VM,
-which should be much faster and more faithful than running arm64 binaries under
-QEMU on an x86 Linux runner.
+The job cross-compiles Linux arm64 artifacts on a GitHub-hosted Linux runner.
+This avoids the self-hosted macOS runner's Docker Hub cold-pull bottleneck while
+also avoiding a full Rust build under QEMU. QEMU is used only for short
+`--help` and `--version` execution smoke tests after the artifact has already
+been built.
 
 Preflight:
 
 ```bash
-test "$(uname -s)" = "Darwin"
-test "$(uname -m)" = "arm64"
-docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
+rustup target add aarch64-unknown-linux-gnu
+sudo apt-get install gcc-aarch64-linux-gnu qemu-user file
 ```
 
 Preferred implementation path:
 
-1. pull a small stable Rust `linux/arm64` build image;
-2. mount persistent runner-local Cargo registry and target caches into the
-   container;
-3. run `cargo build --release -p kubio-cli`;
-4. copy the output as `kubio-aarch64-unknown-linux-gnu`;
-5. run `cargo build --release -p kubio-cli --features experimental-http3`;
-6. copy the output as `kubio-aarch64-unknown-linux-gnu-http3-experimental`;
-7. run `kubio --version` and `kubio --help` inside the same container;
-8. run staged installer/update smoke inside the same container when practical.
+1. install the Rust `aarch64-unknown-linux-gnu` target;
+2. install `gcc-aarch64-linux-gnu`, `qemu-user`, and `file`;
+3. set `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER` to
+   `aarch64-linux-gnu-gcc`;
+4. run `cargo build --release -p kubio-cli --target
+   aarch64-unknown-linux-gnu`;
+5. copy the output as `kubio-aarch64-unknown-linux-gnu`;
+6. run `cargo build --release -p kubio-cli --features experimental-http3
+   --target aarch64-unknown-linux-gnu`;
+7. copy the output as `kubio-aarch64-unknown-linux-gnu-http3-experimental`;
+8. verify the binaries are ELF aarch64 files;
+9. run `kubio --version` and `kubio --help` through `qemu-aarch64 -L
+   /usr/aarch64-linux-gnu`.
 
-Suggested base image:
-
-```text
-rust:1-slim-bookworm or a project-owned pinned Rust linux/arm64 image
-```
-
-Using a pinned project-owned image is preferable once the workflow stabilizes,
-because it avoids reinstalling Rust and system packages on every release run and
-keeps the glibc baseline explicit.
+The Docker-on-Apple-Silicon approach remains a reasonable future optimization
+once the runner has a pre-warmed or project-owned Linux arm64 build image. It is
+not used for v0.4.1 publishing because repeated Docker Hub cold pulls timed out
+before reaching the Rust build.
 
 ## 4. macOS arm64 Job
 
@@ -161,7 +160,7 @@ Runner:
 
 ```yaml
 runs-on: ubuntu-latest
-needs: [linux-x86_64, linux-arm64-container, macos-arm64, docker-image]
+needs: [linux-x86_64, linux-arm64, macos-arm64, docker-image]
 ```
 
 Responsibilities:
@@ -203,7 +202,8 @@ Run staged installer smoke in platform jobs where the binary can execute:
 
 - Linux x86_64: native standard and HTTP/3 install smoke.
 - macOS arm64: native standard install and self-update smoke.
-- Linux arm64: Docker `linux/arm64` standard install and self-update smoke on
-  the Apple Silicon runner.
+- Linux arm64: ELF validation plus short `qemu-aarch64` startup smoke. Full
+  staged install/self-update smoke can move to this job when a native Linux
+  arm64 runner is available.
 
 The final publish job should not need to execute every platform binary.

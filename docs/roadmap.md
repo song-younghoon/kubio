@@ -85,7 +85,7 @@ v0.4.1:
 - Publish standard and HTTP/3 experimental binaries for every supported release target.
 - Refactor installer and updater target resolution so platform selection is deterministic and shared by the artifact contract.
 - Use the self-hosted arm64 macOS runner for native macOS build checks and
-  Docker-based Linux arm64 build checks.
+  GitHub-hosted Linux cross-build checks for Linux arm64 artifacts.
 - Refactor release publishing into platform build jobs plus a final aggregated publish job.
 - Keep checksums mandatory and keep unsupported hosts failing before download.
 - Design status: `.design/v0.4.1` records the multi-platform release, installer, updater, workflow, test, and documentation plan.

@@ -88,12 +88,12 @@ custom label can narrow scheduling. The macOS runner should build and smoke test
 only; release publishing should happen from a final GitHub-hosted publish job
 with `contents: write`.
 
-Linux arm64 should be built on the Apple Silicon self-hosted runner inside a
-Docker `linux/arm64` container. On Apple Silicon, that container runs arm64 Linux
-userspace on an arm64 CPU through Docker's Linux VM, avoiding the slow
-x86-to-arm QEMU path for normal release builds. If a native Linux arm64 runner is
-added later, it can replace the Docker-on-mac path without changing the artifact
-contract.
+macOS arm64 should be built natively on the Apple Silicon self-hosted runner.
+Linux arm64 should be cross-compiled on GitHub-hosted Linux with the GNU
+aarch64 toolchain; QEMU is used only for short `--help` and `--version` smoke
+checks, not for the Rust build. Docker-on-Apple-Silicon remains a possible
+future optimization after the runner has a pre-warmed or project-owned Linux
+arm64 build image, but v0.4.1 should not block on Docker Hub cold pulls.
 
 ## Scope
 
@@ -109,8 +109,8 @@ In scope:
 - Refactor the release workflow so platform jobs build and upload workflow
   artifacts, then a final publish job creates the GitHub Release.
 - Run native smoke checks on macOS arm64 through the self-hosted runner.
-- Run Linux arm64 build and smoke checks inside Docker on the Apple Silicon
-  self-hosted runner.
+- Run Linux arm64 cross-build checks and minimal QEMU execution smoke checks on
+  GitHub-hosted Linux.
 - Update README, install/update docs, deployment docs, roadmap, and release
   notes to describe the new support matrix.
 
