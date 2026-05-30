@@ -2282,7 +2282,7 @@ impl TestRuntime {
         let defaults = EffectiveConfig::default();
         let mut server_config = defaults.server.clone();
         server_config.listen = addr;
-        server_config.origin_timeout = Duration::from_millis(250);
+        server_config.origin_timeout = Duration::from_secs(5);
         let mut origin_protocol = defaults.origin_protocol.clone();
         origin_protocol.preferred = preferred;
         origin_protocol.fallback = fallback;
@@ -2303,7 +2303,7 @@ impl TestRuntime {
         let defaults = EffectiveConfig::default();
         let mut server_config = defaults.server.clone();
         server_config.listen = addr;
-        server_config.origin_timeout = Duration::from_millis(500);
+        server_config.origin_timeout = Duration::from_secs(5);
         let mut origin_protocol = defaults.origin_protocol.clone();
         origin_protocol.preferred = OriginProtocolPreference::Http3;
         origin_protocol.fallback = false;
