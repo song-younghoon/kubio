@@ -76,17 +76,17 @@ kubio update
 ## Runner Assumption
 
 The repository has a self-hosted Apple Silicon macOS runner available. The
-workflow should address it through explicit labels, preferably including a
-repository-specific custom label:
+workflow should address it through the labels currently registered on the
+runner:
 
 ```yaml
-runs-on: [self-hosted, macOS, ARM64, kubio-macos-arm64]
+runs-on: [self-hosted, macOS, ARM64]
 ```
 
-The custom label avoids accidentally scheduling on a different self-hosted macOS
-runner with a mismatched environment. The macOS runner should build and smoke
-test only; release publishing should happen from a final GitHub-hosted publish
-job with `contents: write`.
+If more self-hosted Apple Silicon runners are added later, a repository-specific
+custom label can narrow scheduling. The macOS runner should build and smoke test
+only; release publishing should happen from a final GitHub-hosted publish job
+with `contents: write`.
 
 Linux arm64 should be built on the Apple Silicon self-hosted runner inside a
 Docker `linux/arm64` container. On Apple Silicon, that container runs arm64 Linux

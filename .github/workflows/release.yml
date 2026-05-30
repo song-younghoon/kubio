@@ -73,7 +73,7 @@ jobs:
             dist/bench/*.json
 
   linux-arm64-container:
-    runs-on: [self-hosted, macOS, ARM64, kubio-macos-arm64]
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
       - run: |
@@ -123,7 +123,7 @@ jobs:
             dist/kubio-aarch64-unknown-linux-gnu-http3-experimental
 
   macos-arm64:
-    runs-on: [self-hosted, macOS, ARM64, kubio-macos-arm64]
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
       - run: |

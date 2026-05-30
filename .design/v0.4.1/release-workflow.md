@@ -49,7 +49,7 @@ This job remains the canonical deep validation gate.
 Runner:
 
 ```yaml
-runs-on: [self-hosted, macOS, ARM64, kubio-macos-arm64]
+runs-on: [self-hosted, macOS, ARM64]
 ```
 
 Build environment:
@@ -98,7 +98,7 @@ keeps the glibc baseline explicit.
 Runner:
 
 ```yaml
-runs-on: [self-hosted, macOS, ARM64, kubio-macos-arm64]
+runs-on: [self-hosted, macOS, ARM64]
 ```
 
 Preflight:
@@ -189,7 +189,9 @@ concurrency:
 
 Self-hosted macOS hygiene:
 
-- use a dedicated runner label;
+- use `[self-hosted, macOS, ARM64]` for the current registered runner and add a
+  repository-specific custom label later if multiple Apple Silicon runners are
+  available;
 - avoid repository secrets in the macOS job;
 - rely on ephemeral checkout state from `actions/checkout`;
 - run preflight commands that fail fast if the runner is not Apple Silicon;
