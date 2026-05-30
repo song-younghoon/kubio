@@ -2383,12 +2383,15 @@ impl TestRuntime {
         let defaults = EffectiveConfig::default();
         let mut server_config = defaults.server.clone();
         server_config.listen = addr;
+        let mut policy_config = defaults.policy.clone();
+        disable_test_canary(&mut policy_config);
         let mut performance = defaults.performance.clone();
         performance.max_in_flight_requests = max_in_flight_requests;
         let config = Arc::new(EffectiveConfig {
             origin,
             mode,
             server: server_config,
+            policy: policy_config,
             performance,
             ..defaults
         });
@@ -2458,6 +2461,7 @@ impl TestRuntime {
         policy_config.min_route_samples = min_route_samples;
         policy_config.min_key_repeats = min_key_repeats;
         policy_config.min_shadow_validations = min_shadow_validations;
+        disable_test_canary(&mut policy_config);
         let mut server_config = defaults.server.clone();
         server_config.listen = addr;
         server_config.protocols.http2 = true;
@@ -2552,6 +2556,7 @@ impl TestRuntime {
         policy_config.min_route_samples = min_route_samples;
         policy_config.min_key_repeats = min_key_repeats;
         policy_config.min_shadow_validations = min_shadow_validations;
+        disable_test_canary(&mut policy_config);
         let mut server_config = defaults.server.clone();
         server_config.listen = addr;
         server_config.tls = Some(TlsConfig {
@@ -2759,6 +2764,7 @@ impl TestRuntime {
         policy_config.min_route_samples = min_route_samples;
         policy_config.min_key_repeats = min_key_repeats;
         policy_config.min_shadow_validations = min_shadow_validations;
+        disable_test_canary(&mut policy_config);
         let mut server_config = defaults.server.clone();
         server_config.listen = addr;
         if let Some(origin_timeout) = origin_timeout {
@@ -2807,7 +2813,8 @@ impl TestRuntime {
         runtime
     }
 
-    async fn start_from_config(config: EffectiveConfig) -> Self {
+    async fn start_from_config(mut config: EffectiveConfig) -> Self {
+        disable_test_canary(&mut config.policy);
         let addr = config.server.listen;
         let config = Arc::new(config);
         let observer = Arc::new(Observer::with_adaptive_config(
@@ -2919,6 +2926,10 @@ fn temp_panic_file() -> PathBuf {
         std::fs::remove_file(&path).unwrap();
     }
     path
+}
+
+fn disable_test_canary(policy: &mut kubio_core::PolicyConfig) {
+    policy.adaptive_reuse.precision.canary.enabled = false;
 }
 
 fn route_hint_defaults(method: &str, path: &str) -> RouteHintConfig {
