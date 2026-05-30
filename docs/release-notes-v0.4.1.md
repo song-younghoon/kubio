@@ -1,6 +1,6 @@
 # Release Notes v0.4.1
 
-Status: implemented locally; release workflow validation pending.
+Status: implemented; release workflow validated.
 
 ## Highlights
 

@@ -1,6 +1,6 @@
 # Testing and Release Plan
 
-Status: implemented locally; release workflow validation pending
+Status: implemented; release workflow validated.
 Target release: `v0.4.1`
 
 v0.4.1 changes the supported release matrix, so tests must prove that platform

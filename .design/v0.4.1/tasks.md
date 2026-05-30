@@ -1,6 +1,6 @@
 # v0.4.1 Implementation Tasks
 
-Status: implemented locally; release workflow validation pending
+Status: implemented; release workflow validated.
 Target release: `v0.4.1`
 
 Task states:

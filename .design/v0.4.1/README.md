@@ -1,6 +1,6 @@
 # kubio v0.4.1 Design Index
 
-Status: implemented locally; release workflow validation pending
+Status: implemented; release workflow validated.
 Source: v0.4.0 distribution follow-up
 Target release: `v0.4.1`
 

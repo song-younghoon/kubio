@@ -1,6 +1,6 @@
 # Platform and Artifact Contract
 
-Status: implemented locally; release workflow validation pending
+Status: implemented; release workflow validated.
 Target release: `v0.4.1`
 
 ## 1. Supported Release Targets
