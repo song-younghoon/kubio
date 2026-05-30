@@ -9,8 +9,9 @@ use bytes::{Buf, Bytes, BytesMut};
 #[cfg(feature = "experimental-http3")]
 use kubio_core::TlsConfig;
 use kubio_core::{
-    DecisionReason, EffectiveConfig, Mode, OriginProtocolPreference, RouteHintConfig,
-    RouteMatchConfig, RouteQueryConfig, RouteSafetyConfig, RouteState,
+    AdaptiveReuseConfig, DecisionReason, EffectiveConfig, KeyValidationReuseConfig, Mode,
+    OriginProtocolPreference, PublicObjectReuseConfig, RouteHintConfig, RouteMatchConfig,
+    RouteQueryConfig, RouteSafetyConfig, RouteState,
 };
 use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
@@ -659,6 +660,160 @@ async fn auto_mode_reuses_after_shadow_confidence() {
     assert_eq!(snapshot.overview.origin_requests, 2);
     assert_eq!(snapshot.overview.reused_responses, 1);
     assert_eq!(runtime.store.stats().entries, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn origin_public_fast_path_reuses_notice_id_after_first_safe_response() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 100, 5, 20).await;
+
+    for _ in 0..2 {
+        let body = reqwest::get(format!("{}/notice/1", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "notice-1");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    assert_eq!(runtime.store.stats().entries, 1);
+    let route = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /notice/{id}")
+        .unwrap();
+    assert_eq!(route.origin_public_responses, 1);
+    assert_eq!(route.reuse_class.to_string(), "origin_public");
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn debug_headers_expose_bounded_adaptive_reuse_state() {
+    let origin = TestOrigin::start().await;
+    let defaults = EffectiveConfig::default();
+    let mut server = defaults.server.clone();
+    server.listen = unused_addr().await;
+    let runtime = TestRuntime::start_from_config(EffectiveConfig {
+        origin: origin.url(),
+        mode: Mode::Auto,
+        server,
+        debug_headers: true,
+        ..defaults
+    })
+    .await;
+
+    let first = reqwest::get(format!("{}/notice/1", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert_eq!(first.headers()["x-kubio-status"], "miss");
+    assert_eq!(first.headers()["x-kubio-reuse-class"], "origin_public");
+
+    let second = reqwest::get(format!("{}/notice/1", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert_eq!(second.headers()["x-kubio-status"], "hit");
+    assert_eq!(second.headers()["x-kubio-reuse-source"], "origin_public");
+    assert_eq!(second.text().await.unwrap(), "notice-1");
+
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn sensitive_user_id_stays_protected_even_with_public_origin_headers() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+
+    for _ in 0..2 {
+        let body = reqwest::get(format!("{}/user/1", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "user-1");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 2);
+    assert_eq!(snapshot.overview.protected_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn public_object_cardinality_allows_new_id_to_store_without_origin_public_header() {
+    let origin = TestOrigin::start().await;
+    let defaults = EffectiveConfig::default();
+    let mut server = defaults.server.clone();
+    server.listen = unused_addr().await;
+    let mut policy = defaults.policy.clone();
+    policy.adaptive_reuse = AdaptiveReuseConfig {
+        key_validation: KeyValidationReuseConfig {
+            min_observations: 100,
+            min_shadow_matches: 100,
+            max_shadow_mismatches: 0,
+        },
+        public_object: PublicObjectReuseConfig {
+            enabled: true,
+            min_route_samples: 6,
+            min_distinct_keys: 3,
+            min_store_safe_rate: 1.0,
+            min_shadow_matches: 3,
+            max_shadow_mismatches: 0,
+        },
+        ..AdaptiveReuseConfig::default()
+    };
+    let runtime = TestRuntime::start_from_config(EffectiveConfig {
+        origin: origin.url(),
+        mode: Mode::Auto,
+        server,
+        policy,
+        ..defaults
+    })
+    .await;
+
+    for path in ["/catalog/1", "/catalog/2", "/catalog/3"] {
+        for _ in 0..2 {
+            let body = reqwest::get(format!("{}{}", runtime.proxy_url(), path))
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(body.starts_with("catalog-"));
+        }
+    }
+
+    for _ in 0..2 {
+        let body = reqwest::get(format!("{}/catalog/4", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "catalog-4");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    let route = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /catalog/{id}")
+        .unwrap();
+    assert_eq!(route.distinct_key_count, 4);
+    assert_eq!(route.dynamic_value_count, 4);
+    assert_eq!(route.reuse_class.to_string(), "public_object");
     runtime.shutdown().await;
     origin.shutdown().await;
 }
@@ -1612,6 +1767,13 @@ impl TestOrigin {
         let hits = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route("/stable", get(|| async { "stable" }))
+            .route("/notice/1", get(notice_one))
+            .route("/notice/2", get(notice_two))
+            .route("/user/1", get(user_one))
+            .route("/catalog/1", get(|| async { "catalog-1" }))
+            .route("/catalog/2", get(|| async { "catalog-2" }))
+            .route("/catalog/3", get(|| async { "catalog-3" }))
+            .route("/catalog/4", get(|| async { "catalog-4" }))
             .route("/auth", get(origin_counted))
             .route("/cookie", get(origin_counted))
             .route("/set-cookie", get(set_cookie))
@@ -1782,6 +1944,18 @@ impl TestHttp3Origin {
 async fn origin_counted(State(hits): State<Arc<AtomicUsize>>) -> String {
     hits.fetch_add(1, Ordering::SeqCst);
     "auth".to_string()
+}
+
+async fn notice_one() -> impl IntoResponse {
+    ([("cache-control", "public, max-age=60")], "notice-1")
+}
+
+async fn notice_two() -> impl IntoResponse {
+    ([("cache-control", "public, max-age=60")], "notice-2")
+}
+
+async fn user_one() -> impl IntoResponse {
+    ([("cache-control", "public, max-age=60")], "user-1")
 }
 
 async fn no_store() -> impl IntoResponse {
@@ -2006,13 +2180,14 @@ impl TestRuntime {
             performance,
             ..defaults
         });
-        let observer = Arc::new(Observer::new(
+        let observer = Arc::new(Observer::with_adaptive_config(
             100,
             100,
             100,
             config.policy.min_route_samples,
             config.policy.min_key_repeats,
             config.policy.min_shadow_validations,
+            config.policy.adaptive_reuse.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2082,13 +2257,14 @@ impl TestRuntime {
             policy: policy_config,
             ..defaults
         });
-        let observer = Arc::new(Observer::new(
+        let observer = Arc::new(Observer::with_adaptive_config(
             100,
             100,
             100,
             min_route_samples,
             min_key_repeats,
             min_shadow_validations,
+            config.policy.adaptive_reuse.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2185,13 +2361,14 @@ impl TestRuntime {
             policy: policy_config,
             ..defaults
         });
-        let observer = Arc::new(Observer::new(
+        let observer = Arc::new(Observer::with_adaptive_config(
             100,
             100,
             100,
             min_route_samples,
             min_key_repeats,
             min_shadow_validations,
+            config.policy.adaptive_reuse.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2386,13 +2563,14 @@ impl TestRuntime {
         };
 
         let config = Arc::new(config);
-        let observer = Arc::new(Observer::new(
+        let observer = Arc::new(Observer::with_adaptive_config(
             100,
             100,
             100,
             min_route_samples,
             min_key_repeats,
             min_shadow_validations,
+            config.policy.adaptive_reuse.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2420,13 +2598,14 @@ impl TestRuntime {
     async fn start_from_config(config: EffectiveConfig) -> Self {
         let addr = config.server.listen;
         let config = Arc::new(config);
-        let observer = Arc::new(Observer::new(
+        let observer = Arc::new(Observer::with_adaptive_config(
             100,
             100,
             100,
             config.policy.min_route_samples,
             config.policy.min_key_repeats,
             config.policy.min_shadow_validations,
+            config.policy.adaptive_reuse.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));

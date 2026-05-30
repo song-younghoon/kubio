@@ -91,7 +91,22 @@ v0.4.1:
 - Design status: `.design/v0.4.1` records the multi-platform release, installer, updater, workflow, test, and documentation plan.
 - Release notes: `docs/release-notes-v0.4.1.md`.
 
-v0.4+ candidates:
+v0.5.0:
+
+- Adaptive reuse for effective cache hit-rate improvement.
+- Exact-key validation with lower default evidence thresholds.
+- Origin-public fast path for safe `Cache-Control: public` responses.
+- Public object route detection using bounded path/key cardinality, store-safe
+  rate, and shadow matches.
+- `/notice/{id}` can reuse effectively while `/user/{id}` stays protected by
+  default.
+- Snapshot, dashboard, CLI, debug-header, metrics, and benchmark visibility for
+  adaptive reuse classes and blockers.
+- Design status: `.design/v0.5.0` records the adaptive reuse plan and completed
+  task checklist.
+- Release notes: `docs/release-notes-v0.5.0.md`.
+
+v0.5+ candidates:
 
 - Redis-compatible shared store.
 - Kubernetes deployment guide or operator.

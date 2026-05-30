@@ -21,6 +21,10 @@ pub(crate) struct Args {
 pub(crate) enum Scenario {
     Smoke,
     FreshHit,
+    ExactKeyAdaptive,
+    PublicObjectSweep,
+    ProtectedUserSweep,
+    OriginPublicFastPath,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, PartialEq, Eq)]

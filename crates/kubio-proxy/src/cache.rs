@@ -22,6 +22,12 @@ pub(crate) fn response_from_cache_entry_with_status(
     }
     if state.config.debug_headers {
         builder = builder.header("x-kubio-status", kubio_status);
+        let eligibility =
+            state
+                .observer
+                .reuse_eligibility(route_id, &entry.cache_key_hash, true, false);
+        builder = builder.header("x-kubio-reuse-source", eligibility.reuse_class.to_string());
+        builder = builder.header("x-kubio-reuse-class", eligibility.reuse_class.to_string());
     }
     builder = add_alt_svc_header(builder, state, route_id, request_authority);
     builder

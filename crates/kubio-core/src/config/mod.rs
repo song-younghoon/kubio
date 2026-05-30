@@ -239,6 +239,7 @@ pub struct PolicyConfig {
     pub revalidation: RevalidationConfig,
     pub stale_if_error: StaleIfErrorConfig,
     pub query_intelligence: QueryIntelligenceConfig,
+    pub adaptive_reuse: AdaptiveReuseConfig,
 }
 
 impl Default for PolicyConfig {
@@ -258,7 +259,100 @@ impl Default for PolicyConfig {
             revalidation: RevalidationConfig::default(),
             stale_if_error: StaleIfErrorConfig::default(),
             query_intelligence: QueryIntelligenceConfig::default(),
+            adaptive_reuse: AdaptiveReuseConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdaptiveReuseConfig {
+    pub enabled: bool,
+    pub key_validation: KeyValidationReuseConfig,
+    pub public_object: PublicObjectReuseConfig,
+    pub origin_public_fast_path: OriginPublicFastPathConfig,
+}
+
+impl Default for AdaptiveReuseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            key_validation: KeyValidationReuseConfig::default(),
+            public_object: PublicObjectReuseConfig::default(),
+            origin_public_fast_path: OriginPublicFastPathConfig::default(),
+        }
+    }
+}
+
+impl AdaptiveReuseConfig {
+    pub fn from_legacy_thresholds(
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+    ) -> Self {
+        Self {
+            key_validation: KeyValidationReuseConfig {
+                min_observations: min_key_repeats,
+                min_shadow_matches: min_shadow_validations,
+                ..KeyValidationReuseConfig::default()
+            },
+            public_object: PublicObjectReuseConfig {
+                min_route_samples,
+                min_shadow_matches: min_shadow_validations,
+                ..PublicObjectReuseConfig::default()
+            },
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyValidationReuseConfig {
+    pub min_observations: u64,
+    pub min_shadow_matches: u64,
+    pub max_shadow_mismatches: u64,
+}
+
+impl Default for KeyValidationReuseConfig {
+    fn default() -> Self {
+        Self {
+            min_observations: 2,
+            min_shadow_matches: 1,
+            max_shadow_mismatches: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicObjectReuseConfig {
+    pub enabled: bool,
+    pub min_route_samples: u64,
+    pub min_distinct_keys: u64,
+    pub min_store_safe_rate: f64,
+    pub min_shadow_matches: u64,
+    pub max_shadow_mismatches: u64,
+}
+
+impl Default for PublicObjectReuseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_route_samples: 20,
+            min_distinct_keys: 3,
+            min_store_safe_rate: 0.98,
+            min_shadow_matches: 3,
+            max_shadow_mismatches: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginPublicFastPathConfig {
+    pub enabled: bool,
+}
+
+impl Default for OriginPublicFastPathConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -464,6 +558,8 @@ pub struct RouteSafetyConfig {
     pub acknowledge_sensitive_path: bool,
     #[serde(default)]
     pub force_protect: bool,
+    #[serde(default)]
+    pub public_object: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

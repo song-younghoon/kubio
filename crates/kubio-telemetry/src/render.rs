@@ -1,6 +1,6 @@
 //! Prometheus text rendering helpers.
 
-use kubio_core::{Decision, StatusClass};
+use kubio_core::{Decision, ReuseClass, StatusClass};
 use kubio_observe::ObserverSnapshot;
 use kubio_store::StoreStats;
 
@@ -249,6 +249,48 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
         "kubio_query_param_suggestions_total",
         &[],
         snapshot.overview.query_param_suggestions,
+    );
+    line(
+        &mut out,
+        "kubio_routes_by_reuse_class",
+        "Observed routes by adaptive reuse class.",
+        "gauge",
+    );
+    for class in [
+        ReuseClass::Watching,
+        ReuseClass::HardProtected,
+        ReuseClass::KeyValidated,
+        ReuseClass::PublicObjectCandidate,
+        ReuseClass::PublicObject,
+        ReuseClass::OriginPublic,
+    ] {
+        let count = snapshot
+            .routes
+            .iter()
+            .filter(|route| route.reuse_class == class)
+            .count() as u64;
+        metric(
+            &mut out,
+            "kubio_routes_by_reuse_class",
+            &[("class", class.to_string().as_str())],
+            count,
+        );
+    }
+    line(
+        &mut out,
+        "kubio_origin_public_fast_path_total",
+        "Origin responses that advertised public cacheability for adaptive reuse.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_origin_public_fast_path_total",
+        &[("outcome", "observed")],
+        snapshot
+            .routes
+            .iter()
+            .map(|route| route.origin_public_responses)
+            .sum::<u64>(),
     );
     line(
         &mut out,
@@ -706,7 +748,7 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
 mod tests {
     use super::*;
     use kubio_core::{
-        LatencyBucketSnapshot, LatencySnapshot, RouteId, RouteState, StatusClassCounts,
+        LatencyBucketSnapshot, LatencySnapshot, ReuseClass, RouteId, RouteState, StatusClassCounts,
     };
     use kubio_observe::{ObserverSnapshot, OverviewSnapshot, ProtocolCounts, RouteSnapshot};
     use kubio_store::{StoreKind, StoreOperationMetrics, StoreStats};
@@ -724,11 +766,18 @@ mod tests {
                 route_id: RouteId::new("GET", "/api/products"),
                 route_hash: "hash".to_string(),
                 state: RouteState::Watching,
+                reuse_class: ReuseClass::Watching,
                 request_count: 2,
                 origin_count: 2,
                 reuse_count: 0,
                 protected_count: 0,
                 bypass_count: 0,
+                store_safe_count: 0,
+                origin_public_responses: 0,
+                distinct_key_count: 0,
+                dynamic_value_count: 0,
+                store_safe_rate: 0.0,
+                adaptive_blockers: vec![],
                 shadow_matches: 0,
                 shadow_mismatches: 0,
                 revalidation_attempts: 0,
@@ -788,6 +837,8 @@ mod tests {
         assert!(metrics.contains("kubio_request_duration_seconds_count"));
         assert!(metrics.contains("kubio_route_hints_applied_total"));
         assert!(metrics.contains("kubio_query_hints_applied_total"));
+        assert!(metrics.contains("kubio_routes_by_reuse_class"));
+        assert!(metrics.contains("kubio_origin_public_fast_path_total"));
         assert!(metrics.contains("kubio_store_errors_total"));
         assert!(metrics.contains("kubio_store_operations_total"));
         assert!(metrics.contains("kubio_store_operation_duration_seconds_sum"));

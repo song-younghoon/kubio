@@ -2,15 +2,15 @@
 
 kubio is a local-first reverse proxy that learns which API responses are safe to
 reuse. It starts in watch mode, protects risky traffic by default, validates
-repeated responses through shadow checks, and only reuses conservative GET/HEAD
-responses after you opt in.
+repeated responses through shadow checks, and uses adaptive evidence to make
+safe public-object routes useful after you opt in.
 
 Use kubio when you want a cautious API response reuse layer in front of an
 origin service without a hosted control plane or required telemetry.
 
 ## Install
 
-v0.4.1 supports released binaries for Linux x86_64, Linux arm64, and Apple
+v0.5.0 supports released binaries for Linux x86_64, Linux arm64, and Apple
 Silicon macOS.
 
 | Host | Release target |
@@ -30,7 +30,7 @@ build from source.
 Common install variants:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.1 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.5.0 bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_INSTALL_DIR=/usr/local/bin bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_FLAVOR=http3-experimental bash
 ```
@@ -124,6 +124,11 @@ kubio protects:
 
 When kubio is unsure, it passes through to origin.
 
+Adaptive reuse keeps those hard denies, but lets exact keys, origin-public
+responses, and high-cardinality public object routes such as `/notice/{id}`
+become reusable with bounded evidence. Sensitive routes such as `/user/{id}`
+remain protected by default.
+
 Configure `--panic-file /path/to/file` to immediately disable reuse while
 keeping origin pass-through active.
 
@@ -162,6 +167,8 @@ kubio remains local-first and process-local:
 - Bounded stale-if-error when origin headers or route policy explicitly allow
   it.
 - Route policy hints and query key hints.
+- Adaptive reuse for exact keys, origin-public responses, and public object
+  routes.
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
@@ -175,5 +182,5 @@ kubio remains local-first and process-local:
 - [Metrics](docs/metrics.md)
 - [Safety Model](docs/safety-model.md)
 - [Roadmap](docs/roadmap.md)
-- [v0.4.1 Release Notes](docs/release-notes-v0.4.1.md)
-- [v0.4.1 Design](.design/v0.4.1)
+- [v0.5.0 Release Notes](docs/release-notes-v0.5.0.md)
+- [v0.5.0 Design](.design/v0.5.0)

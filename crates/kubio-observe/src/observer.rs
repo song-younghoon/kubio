@@ -1,6 +1,7 @@
 use kubio_core::{
-    CacheKeyHash, Decision, DecisionReason, HttpProtocol, Mode, ResponseFingerprint, RouteId,
-    RouteState, StatusClass,
+    AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash, Decision, DecisionReason,
+    HttpProtocol, Mode, PathObservation, ResponseFingerprint, ReuseClass, RouteId, RouteState,
+    StatusClass,
 };
 use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
@@ -23,6 +24,32 @@ pub struct Observer {
     min_route_samples: u64,
     min_key_repeats: u64,
     min_shadow_validations: u64,
+    adaptive_reuse: AdaptiveReuseConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReuseEligibility {
+    pub eligible: bool,
+    pub reuse_class: ReuseClass,
+    pub blockers: Vec<AdaptiveReuseBlocker>,
+}
+
+impl ReuseEligibility {
+    fn eligible(reuse_class: ReuseClass) -> Self {
+        Self {
+            eligible: true,
+            reuse_class,
+            blockers: Vec::new(),
+        }
+    }
+
+    fn blocked(reuse_class: ReuseClass, blockers: Vec<AdaptiveReuseBlocker>) -> Self {
+        Self {
+            eligible: false,
+            reuse_class,
+            blockers,
+        }
+    }
 }
 
 impl Observer {
@@ -34,6 +61,31 @@ impl Observer {
         min_key_repeats: u64,
         min_shadow_validations: u64,
     ) -> Self {
+        Self::with_adaptive_config(
+            max_routes,
+            max_keys,
+            max_events,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            AdaptiveReuseConfig::from_legacy_thresholds(
+                min_route_samples,
+                min_key_repeats,
+                min_shadow_validations,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_adaptive_config(
+        max_routes: usize,
+        max_keys: usize,
+        max_events: usize,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        adaptive_reuse: AdaptiveReuseConfig,
+    ) -> Self {
         Self {
             inner: RwLock::new(ObserverInner::default()),
             max_routes,
@@ -42,6 +94,7 @@ impl Observer {
             min_route_samples,
             min_key_repeats,
             min_shadow_validations,
+            adaptive_reuse,
         }
     }
 
@@ -77,6 +130,9 @@ impl Observer {
             }
             if record.bypass {
                 route.bypass_count += 1;
+            }
+            if record.origin && record.shadow_eligible {
+                route.store_safe_count += 1;
             }
             route.score = record.score;
             route.reasons = record.reasons.clone();
@@ -133,6 +189,10 @@ impl Observer {
                 key.last_fingerprint = Some(fingerprint);
             }
 
+            if let Some(route) = inner.routes.get_mut(&record.route_id) {
+                route.distinct_key_hashes.insert(key_hash.clone());
+            }
+
             if outcome.shadow_match || outcome.shadow_mismatch {
                 if let Some(route) = inner.routes.get_mut(&record.route_id) {
                     if outcome.shadow_match {
@@ -161,6 +221,66 @@ impl Observer {
         self.update_route_state_locked(&mut inner, &record, &mut outcome);
         self.record_policy_event_locked(&mut inner, &record);
         outcome
+    }
+
+    pub fn record_path_observation(&self, route_id: RouteId, observation: PathObservation) {
+        let mut inner = self.inner.write();
+        let route = inner
+            .routes
+            .entry(route_id)
+            .or_insert_with_key(|route_id| RouteStats::new(route_id.clone()));
+        if observation.sensitive_path_score > 0 {
+            route.path_sensitive_samples += 1;
+        }
+        if observation.id_like_segment_count > 0 {
+            route.id_like_path_samples += 1;
+        }
+        for hash in observation.dynamic_segment_hashes {
+            if route.dynamic_segment_hashes.len() < 1024 {
+                route.dynamic_segment_hashes.insert(hash);
+            }
+        }
+    }
+
+    pub fn record_origin_public_response(
+        &self,
+        route_id: RouteId,
+        cache_key_hash: Option<CacheKeyHash>,
+        mode: Mode,
+    ) {
+        let mut inner = self.inner.write();
+        let mut event = None;
+        {
+            let route = inner
+                .routes
+                .entry(route_id.clone())
+                .or_insert_with(|| RouteStats::new(route_id.clone()));
+            route.origin_public_responses += 1;
+            if self.adaptive_reuse.enabled
+                && self.adaptive_reuse.origin_public_fast_path.enabled
+                && route.state != RouteState::Protected
+                && route.shadow_mismatches == 0
+                && mode == Mode::Auto
+                && route.state != RouteState::Auto
+            {
+                route.state = RouteState::Auto;
+                event = Some((
+                    EventType::RoutePromotedToAuto,
+                    vec![DecisionReason::OriginPublicCacheControl],
+                    "route promoted because origin responses are explicitly public",
+                ));
+            }
+        }
+        if let Some((event_type, reasons, message)) = event {
+            self.push_event_locked(
+                &mut inner,
+                event_type,
+                Some(route_id),
+                cache_key_hash,
+                reasons,
+                message,
+            );
+        }
     }
 
     pub fn record_reuse(
@@ -567,22 +687,41 @@ impl Observer {
     }
 
     pub fn is_auto_eligible(&self, route_id: &RouteId, key_hash: &CacheKeyHash) -> bool {
-        let inner = self.inner.read();
-        let route_ok = inner
-            .routes
-            .get(route_id)
-            .map(|route| route.state == RouteState::Auto)
-            .unwrap_or(false);
-        let key_ok = inner
-            .keys
-            .get(key_hash)
-            .map(|key| {
-                key.seen_count >= self.min_key_repeats
-                    && key.recent_shadow_matches as u64 >= self.min_shadow_validations
-                    && key.recent_shadow_mismatches == 0
-            })
-            .unwrap_or(false);
-        route_ok && key_ok
+        self.reuse_eligibility(route_id, key_hash, true, false)
+            .eligible
+    }
+
+    pub fn reuse_eligibility(
+        &self,
+        route_id: &RouteId,
+        key_hash: &CacheKeyHash,
+        request_reuse_safe: bool,
+        route_hint_public_object: bool,
+    ) -> ReuseEligibility {
+        self.adaptive_eligibility(
+            route_id,
+            key_hash,
+            request_reuse_safe,
+            route_hint_public_object,
+            false,
+        )
+    }
+
+    pub fn store_eligibility(
+        &self,
+        route_id: &RouteId,
+        key_hash: &CacheKeyHash,
+        request_reuse_safe: bool,
+        route_hint_public_object: bool,
+        origin_public_response: bool,
+    ) -> ReuseEligibility {
+        self.adaptive_eligibility(
+            route_id,
+            key_hash,
+            request_reuse_safe,
+            route_hint_public_object,
+            origin_public_response,
+        )
     }
 
     pub fn snapshot(&self) -> ObserverSnapshot {
@@ -590,7 +729,7 @@ impl Observer {
         let mut routes = inner
             .routes
             .values()
-            .map(RouteStats::snapshot)
+            .map(|route| route.snapshot(&self.adaptive_reuse))
             .collect::<Vec<_>>();
         routes.sort_by(|left, right| {
             state_sort_key(right.state)
@@ -628,7 +767,139 @@ impl Observer {
             .routes
             .values()
             .find(|route| route.route_id.hash() == route_hash)
-            .map(RouteStats::snapshot)
+            .map(|route| route.snapshot(&self.adaptive_reuse))
+    }
+
+    fn adaptive_eligibility(
+        &self,
+        route_id: &RouteId,
+        key_hash: &CacheKeyHash,
+        request_reuse_safe: bool,
+        route_hint_public_object: bool,
+        origin_public_response: bool,
+    ) -> ReuseEligibility {
+        let inner = self.inner.read();
+        if !self.adaptive_reuse.enabled {
+            return self.legacy_eligibility_locked(&inner, route_id, key_hash);
+        }
+        if !request_reuse_safe {
+            return ReuseEligibility::blocked(
+                ReuseClass::HardProtected,
+                vec![AdaptiveReuseBlocker::UnsafeRequest],
+            );
+        }
+
+        let Some(route) = inner.routes.get(route_id) else {
+            return ReuseEligibility::blocked(
+                ReuseClass::Watching,
+                vec![AdaptiveReuseBlocker::InsufficientRouteSamples],
+            );
+        };
+
+        if route.state == RouteState::Protected {
+            return ReuseEligibility::blocked(
+                ReuseClass::HardProtected,
+                vec![AdaptiveReuseBlocker::ProtectedRoute],
+            );
+        }
+        if route.shadow_mismatches as u64 > self.adaptive_reuse.public_object.max_shadow_mismatches
+        {
+            return ReuseEligibility::blocked(
+                ReuseClass::HardProtected,
+                vec![AdaptiveReuseBlocker::ShadowMismatch],
+            );
+        }
+
+        if self.key_validated_locked(&inner, key_hash) {
+            return ReuseEligibility::eligible(ReuseClass::KeyValidated);
+        }
+
+        if self.adaptive_reuse.origin_public_fast_path.enabled
+            && (origin_public_response || route.origin_public_responses > 0)
+        {
+            return ReuseEligibility::eligible(ReuseClass::OriginPublic);
+        }
+
+        if route_hint_public_object {
+            return ReuseEligibility::eligible(ReuseClass::PublicObject);
+        }
+
+        if route.public_object_ready(&self.adaptive_reuse) {
+            return ReuseEligibility::eligible(ReuseClass::PublicObject);
+        }
+
+        let key_blockers = self.key_blockers_locked(&inner, key_hash);
+        let mut blockers = if key_blockers.is_empty() {
+            route.eligibility_blockers(&self.adaptive_reuse)
+        } else {
+            key_blockers
+        };
+        if blockers.is_empty() {
+            blockers.push(AdaptiveReuseBlocker::InsufficientShadowMatches);
+        }
+        ReuseEligibility::blocked(route.reuse_class(&self.adaptive_reuse), blockers)
+    }
+
+    fn legacy_eligibility_locked(
+        &self,
+        inner: &ObserverInner,
+        route_id: &RouteId,
+        key_hash: &CacheKeyHash,
+    ) -> ReuseEligibility {
+        let route_ok = inner
+            .routes
+            .get(route_id)
+            .map(|route| route.state == RouteState::Auto)
+            .unwrap_or(false);
+        let key_ok = inner
+            .keys
+            .get(key_hash)
+            .map(|key| {
+                key.seen_count >= self.min_key_repeats
+                    && (key.recent_shadow_matches as u64) >= self.min_shadow_validations
+                    && key.recent_shadow_mismatches == 0
+            })
+            .unwrap_or(false);
+        if route_ok && key_ok {
+            ReuseEligibility::eligible(ReuseClass::KeyValidated)
+        } else {
+            ReuseEligibility::blocked(ReuseClass::Watching, vec![AdaptiveReuseBlocker::Disabled])
+        }
+    }
+
+    fn key_validated_locked(&self, inner: &ObserverInner, key_hash: &CacheKeyHash) -> bool {
+        let key_validation = &self.adaptive_reuse.key_validation;
+        inner
+            .keys
+            .get(key_hash)
+            .map(|key| {
+                key.seen_count >= key_validation.min_observations
+                    && (key.recent_shadow_matches as u64) >= key_validation.min_shadow_matches
+                    && (key.recent_shadow_mismatches as u64) <= key_validation.max_shadow_mismatches
+            })
+            .unwrap_or(false)
+    }
+
+    fn key_blockers_locked(
+        &self,
+        inner: &ObserverInner,
+        key_hash: &CacheKeyHash,
+    ) -> Vec<AdaptiveReuseBlocker> {
+        let key_validation = &self.adaptive_reuse.key_validation;
+        let Some(key) = inner.keys.get(key_hash) else {
+            return vec![AdaptiveReuseBlocker::InsufficientKeyObservations];
+        };
+        let mut blockers = Vec::new();
+        if (key.recent_shadow_mismatches as u64) > key_validation.max_shadow_mismatches {
+            blockers.push(AdaptiveReuseBlocker::ShadowMismatch);
+        }
+        if key.seen_count < key_validation.min_observations {
+            blockers.push(AdaptiveReuseBlocker::InsufficientKeyObservations);
+        }
+        if (key.recent_shadow_matches as u64) < key_validation.min_shadow_matches {
+            blockers.push(AdaptiveReuseBlocker::InsufficientShadowMatches);
+        }
+        blockers
     }
 
     fn update_route_state_locked(
@@ -638,6 +909,7 @@ impl Observer {
         outcome: &mut ObservationOutcome,
     ) {
         let mut event = None;
+        let mut skip_legacy_promotion = false;
         {
             let Some(route) = inner.routes.get_mut(&record.route_id) else {
                 return;
@@ -651,42 +923,66 @@ impl Observer {
                 return;
             }
 
-            let high_repeat = route.repeat_rate() >= 0.2;
-            if route.request_count >= self.min_route_samples
-                && high_repeat
-                && route.score >= 50
-                && route.state == RouteState::Watching
-            {
-                route.state = RouteState::Candidate;
-                outcome.candidate_detected = true;
-                event = Some((
-                    EventType::RouteCandidateDetected,
-                    route.reasons.clone(),
-                    "route has repeated safe traffic and is a reuse candidate",
-                ));
-            }
-
-            if route.shadow_matches >= self.min_shadow_validations
-                && route.shadow_mismatches == 0
-                && route.request_count >= self.min_route_samples
-            {
+            if self.adaptive_reuse.enabled && route.public_object_ready(&self.adaptive_reuse) {
                 if record.mode == Mode::Auto {
                     if route.state != RouteState::Auto {
                         route.state = RouteState::Auto;
                         outcome.promoted_to_auto = true;
                         event = Some((
                             EventType::RoutePromotedToAuto,
-                            vec![DecisionReason::ReusableAndFresh],
-                            "route promoted to automatic reuse",
+                            vec![DecisionReason::PublicObjectValidated],
+                            "route promoted because path cardinality and stable responses indicate public objects",
                         ));
                     }
                 } else if route.state != RouteState::ShadowValidated {
                     route.state = RouteState::ShadowValidated;
                     event = Some((
                         EventType::RoutePromotedToShadow,
-                        vec![DecisionReason::InsufficientShadowValidations],
-                        "route passed shadow validation",
+                        vec![DecisionReason::PublicObjectValidated],
+                        "route has enough evidence to be treated as public objects after auto mode is enabled",
                     ));
+                }
+                skip_legacy_promotion = true;
+            }
+
+            if !skip_legacy_promotion {
+                let high_repeat = route.repeat_rate() >= 0.2;
+                if route.request_count >= self.min_route_samples
+                    && high_repeat
+                    && route.score >= 50
+                    && route.state == RouteState::Watching
+                {
+                    route.state = RouteState::Candidate;
+                    outcome.candidate_detected = true;
+                    event = Some((
+                        EventType::RouteCandidateDetected,
+                        route.reasons.clone(),
+                        "route has repeated safe traffic and is a reuse candidate",
+                    ));
+                }
+
+                if route.shadow_matches >= self.min_shadow_validations
+                    && route.shadow_mismatches == 0
+                    && route.request_count >= self.min_route_samples
+                {
+                    if record.mode == Mode::Auto {
+                        if route.state != RouteState::Auto {
+                            route.state = RouteState::Auto;
+                            outcome.promoted_to_auto = true;
+                            event = Some((
+                                EventType::RoutePromotedToAuto,
+                                vec![DecisionReason::ReusableAndFresh],
+                                "route promoted to automatic reuse",
+                            ));
+                        }
+                    } else if route.state != RouteState::ShadowValidated {
+                        route.state = RouteState::ShadowValidated;
+                        event = Some((
+                            EventType::RoutePromotedToShadow,
+                            vec![DecisionReason::InsufficientShadowValidations],
+                            "route passed shadow validation",
+                        ));
+                    }
                 }
             }
         }

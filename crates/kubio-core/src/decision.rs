@@ -81,6 +81,10 @@ pub enum DecisionReason {
     RouteHintRejected,
     QueryHintApplied,
     QueryHintRejected,
+    AdaptiveReuseDisabled,
+    KeyValidated,
+    PublicObjectValidated,
+    OriginPublicCacheControl,
     DiskStoreUnavailable,
     DiskStoreCorruptEntry,
 }
@@ -139,8 +143,73 @@ impl DecisionReason {
             Self::RouteHintRejected => "A route policy hint was rejected by a safety rule.",
             Self::QueryHintApplied => "A configured query key hint was applied.",
             Self::QueryHintRejected => "A configured query key hint was rejected.",
+            Self::AdaptiveReuseDisabled => "Adaptive reuse is disabled by configuration.",
+            Self::KeyValidated => "This cache key passed repeat-response validation.",
+            Self::PublicObjectValidated => "The route looks like a public object collection.",
+            Self::OriginPublicCacheControl => {
+                "The origin explicitly marked this response reusable by shared caches."
+            }
             Self::DiskStoreUnavailable => "The disk store was unavailable.",
             Self::DiskStoreCorruptEntry => "A corrupt disk cache entry was skipped.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReuseClass {
+    #[default]
+    Watching,
+    HardProtected,
+    KeyValidated,
+    PublicObjectCandidate,
+    PublicObject,
+    OriginPublic,
+}
+
+impl Display for ReuseClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Watching => f.write_str("watching"),
+            Self::HardProtected => f.write_str("hard_protected"),
+            Self::KeyValidated => f.write_str("key_validated"),
+            Self::PublicObjectCandidate => f.write_str("public_object_candidate"),
+            Self::PublicObject => f.write_str("public_object"),
+            Self::OriginPublic => f.write_str("origin_public"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptiveReuseBlocker {
+    Disabled,
+    UnsafeRequest,
+    ProtectedRoute,
+    InsufficientKeyObservations,
+    InsufficientShadowMatches,
+    ShadowMismatch,
+    InsufficientRouteSamples,
+    InsufficientDistinctKeys,
+    LowStoreSafeRate,
+    LowPathCardinality,
+    NoOriginPublicSignal,
+}
+
+impl Display for AdaptiveReuseBlocker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("disabled"),
+            Self::UnsafeRequest => f.write_str("unsafe_request"),
+            Self::ProtectedRoute => f.write_str("protected_route"),
+            Self::InsufficientKeyObservations => f.write_str("insufficient_key_observations"),
+            Self::InsufficientShadowMatches => f.write_str("insufficient_shadow_matches"),
+            Self::ShadowMismatch => f.write_str("shadow_mismatch"),
+            Self::InsufficientRouteSamples => f.write_str("insufficient_route_samples"),
+            Self::InsufficientDistinctKeys => f.write_str("insufficient_distinct_keys"),
+            Self::LowStoreSafeRate => f.write_str("low_store_safe_rate"),
+            Self::LowPathCardinality => f.write_str("low_path_cardinality"),
+            Self::NoOriginPublicSignal => f.write_str("no_origin_public_signal"),
         }
     }
 }

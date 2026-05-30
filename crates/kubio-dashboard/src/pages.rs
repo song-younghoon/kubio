@@ -79,14 +79,16 @@ pub(crate) async fn routes_page(State(state): State<DashboardState>) -> Html<Str
         .iter()
         .map(|route| {
             format!(
-                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td><td>{downstream}</td><td>{upstream}</td></tr>",
+                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{class}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td><td>{keys}</td><td>{downstream}</td><td>{upstream}</td></tr>",
                 hash = route.route_hash,
                 label = escape_html(&route.route_id.as_label()),
                 state = route.state,
+                class = route.reuse_class,
                 requests = route.request_count,
                 origin = route.origin_count,
                 reuse = route.reuse_count,
                 protected = route.protected_count,
+                keys = route.distinct_key_count,
                 downstream = protocol_counts_html(&route.downstream_protocols),
                 upstream = protocol_counts_html(&route.upstream_protocols),
             )
@@ -95,7 +97,7 @@ pub(crate) async fn routes_page(State(state): State<DashboardState>) -> Html<Str
     Html(layout(
         "Routes",
         &format!(
-            "<table><thead><tr><th>Route</th><th>Status</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th><th>Downstream</th><th>Upstream</th></tr></thead><tbody>{rows}</tbody></table>"
+            "<table><thead><tr><th>Route</th><th>Status</th><th>Reuse class</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th><th>Keys</th><th>Downstream</th><th>Upstream</th></tr></thead><tbody>{rows}</tbody></table>"
         ),
     ))
 }
@@ -127,6 +129,12 @@ pub(crate) async fn route_page(
             )
         })
         .collect::<String>();
+    let blockers = route
+        .adaptive_blockers
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     Html(layout(
         &route.route_id.as_label(),
         &format!(
@@ -134,12 +142,18 @@ pub(crate) async fn route_page(
 <section>
   <h2>{}</h2>
   <p>Status: {}</p>
+  <p>Reuse class: {}</p>
   <h3>kubio's reasoning</h3>
   <ul>{}</ul>
   <dl>
     <dt>Requests</dt><dd>{}</dd>
     <dt>Origin requests</dt><dd>{}</dd>
     <dt>Reused responses</dt><dd>{}</dd>
+    <dt>Distinct keys</dt><dd>{}</dd>
+    <dt>Dynamic path values</dt><dd>{}</dd>
+    <dt>Store-safe rate</dt><dd>{:.2}%</dd>
+    <dt>Origin public responses</dt><dd>{}</dd>
+    <dt>Adaptive blockers</dt><dd>{}</dd>
     <dt>Shadow matches</dt><dd>{}</dd>
     <dt>Shadow mismatches</dt><dd>{}</dd>
     <dt>Revalidated</dt><dd>{}</dd>
@@ -154,10 +168,20 @@ pub(crate) async fn route_page(
 "#,
             escape_html(&route.route_id.as_label()),
             route.state,
+            route.reuse_class,
             reasons,
             route.request_count,
             route.origin_count,
             route.reuse_count,
+            route.distinct_key_count,
+            route.dynamic_value_count,
+            route.store_safe_rate * 100.0,
+            route.origin_public_responses,
+            escape_html(if blockers.is_empty() {
+                "none"
+            } else {
+                &blockers
+            }),
             route.shadow_matches,
             route.shadow_mismatches,
             route.revalidation_attempts,

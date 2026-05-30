@@ -53,6 +53,9 @@ impl ManagedProxy {
         policy.min_route_samples = 2;
         policy.min_key_repeats = 2;
         policy.min_shadow_validations = 1;
+        policy.adaptive_reuse.public_object.min_route_samples = 6;
+        policy.adaptive_reuse.public_object.min_distinct_keys = 3;
+        policy.adaptive_reuse.public_object.min_shadow_matches = 3;
         let config = Arc::new(EffectiveConfig {
             origin,
             mode: Mode::Auto,
@@ -60,7 +63,15 @@ impl ManagedProxy {
             policy,
             ..defaults
         });
-        let observer = Arc::new(Observer::new(100, 100, 100, 2, 2, 1));
+        let observer = Arc::new(Observer::with_adaptive_config(
+            100,
+            100,
+            100,
+            2,
+            2,
+            1,
+            config.policy.adaptive_reuse.clone(),
+        ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
         let state = ProxyState::new(config.clone(), policy, observer.clone(), store.clone())?;

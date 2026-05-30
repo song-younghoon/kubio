@@ -363,5 +363,19 @@ fn apply_policy_config(config: &mut PolicyConfig, policy: FilePolicyConfig) -> R
             config.query_intelligence.auto_ignore = auto_ignore;
         }
     }
+    if let Some(adaptive_reuse) = policy.adaptive_reuse {
+        if let Some(enabled) = adaptive_reuse.enabled {
+            config.adaptive_reuse.enabled = enabled;
+        }
+        if let Some(key_validation) = adaptive_reuse.key_validation {
+            config.adaptive_reuse.key_validation = key_validation;
+        }
+        if let Some(public_object) = adaptive_reuse.public_object {
+            config.adaptive_reuse.public_object = public_object;
+        }
+        if let Some(origin_public_fast_path) = adaptive_reuse.origin_public_fast_path {
+            config.adaptive_reuse.origin_public_fast_path = origin_public_fast_path;
+        }
+    }
     Ok(())
 }

@@ -22,9 +22,10 @@ pub(crate) async fn run(
     let mut latencies = Vec::with_capacity(requests);
     let mut successes = 0usize;
 
-    for _ in 0..requests {
+    for index in 0..requests {
         let started = Instant::now();
-        let ok = client.get_stable(&proxy).await;
+        let (path, expected_prefix) = scenario_request(scenario, index);
+        let ok = client.get_path(&proxy, &path, expected_prefix).await;
         latencies.push(started.elapsed());
         if ok {
             successes += 1;
@@ -72,4 +73,21 @@ pub(crate) async fn run(
         cache_entries: stats.entries,
         budget,
     })
+}
+
+fn scenario_request(scenario: Scenario, index: usize) -> (String, &'static str) {
+    match scenario {
+        Scenario::Smoke | Scenario::FreshHit => ("/stable".to_string(), "stable"),
+        Scenario::ExactKeyAdaptive => ("/catalog/1".to_string(), "catalog-1"),
+        Scenario::OriginPublicFastPath => ("/notice/1".to_string(), "notice-1"),
+        Scenario::ProtectedUserSweep => (format!("/user/{}", index % 20), "user-"),
+        Scenario::PublicObjectSweep => {
+            let id = if index < 6 {
+                1 + index / 2
+            } else {
+                4 + (index - 6) / 2
+            };
+            (format!("/catalog/{id}"), "catalog-")
+        }
+    }
 }

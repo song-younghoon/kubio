@@ -39,19 +39,31 @@ impl BenchClient {
         }
     }
 
-    pub(crate) async fn get_stable(&mut self, proxy: &ManagedProxy) -> bool {
+    pub(crate) async fn get_path(
+        &mut self,
+        proxy: &ManagedProxy,
+        path: &str,
+        expected_prefix: &str,
+    ) -> bool {
         match self {
-            Self::Http(client) => client
-                .get(format!("{}/stable", proxy.http_url()))
+            Self::Http(client) => match client
+                .get(format!("{}{}", proxy.http_url(), path))
                 .send()
                 .await
                 .and_then(|response| response.error_for_status())
-                .is_ok(),
+            {
+                Ok(response) => response
+                    .text()
+                    .await
+                    .map(|body| body.starts_with(expected_prefix))
+                    .unwrap_or(false),
+                Err(_) => false,
+            },
             #[cfg(feature = "experimental-http3")]
             Self::H3(client) => client
-                .get(proxy.http3_addr().expect("h3 addr"), "/stable")
+                .get(proxy.http3_addr().expect("h3 addr"), path)
                 .await
-                .map(|body| body == "stable")
+                .map(|body| body.starts_with(expected_prefix))
                 .unwrap_or(false),
         }
     }

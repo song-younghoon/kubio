@@ -25,8 +25,8 @@ use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
 use kubio_core::{
-    build_cache_key_with_query_names, CacheKeyHash, Decision, DecisionReason, HttpProtocol, Mode,
-    RouteHintConfig, RouteId,
+    build_cache_key_with_query_names, observe_path, CacheKeyHash, Decision, DecisionReason,
+    HttpProtocol, Mode, RouteHintConfig, RouteId,
 };
 use kubio_observe::{EventType, ObservationRecord, RevalidationOutcome};
 use kubio_store::{CacheEntry, PurgeSelector};
@@ -74,8 +74,14 @@ pub(crate) async fn proxy_handler(
     state
         .observer
         .record_downstream_protocol(route_id.clone(), downstream_protocol);
+    state
+        .observer
+        .record_path_observation(route_id.clone(), observe_path(&path));
     let route_hint_entry = state.route_hints.get(&route_id);
     let route_hint = route_hint_entry.map(|entry| &entry.hint);
+    let route_hint_public_object = route_hint
+        .map(|hint| hint.safety.public_object)
+        .unwrap_or(false);
     let panic_active = panic_switch_active(state.config.panic_file.as_deref());
     record_panic_switch_transition(&state, panic_active, &route_id, None);
 
@@ -174,7 +180,17 @@ pub(crate) async fn proxy_handler(
         && !panic_active
     {
         if let Some(key_hash) = cache_key_hash.as_ref() {
-            if state.observer.is_auto_eligible(&route_id, key_hash) {
+            let request_reuse_safe = state.policy.request_is_reuse_safe(&request_signals);
+            if state
+                .observer
+                .reuse_eligibility(
+                    &route_id,
+                    key_hash,
+                    request_reuse_safe,
+                    route_hint_public_object,
+                )
+                .eligible
+            {
                 match state.store.get(key_hash).await {
                     Ok(Some(entry)) if entry.is_fresh() => {
                         debug!(route = %route_id, "serving reused response");
@@ -612,6 +628,9 @@ pub(crate) async fn proxy_handler(
 
     let protected = request_decision.decision == Decision::Protect
         || response_decision.decision == Decision::Protect;
+    let origin_public_response = state
+        .policy
+        .response_has_origin_public_signal(&response_signals);
     let final_decision = if matches!(
         request_decision.decision,
         Decision::Protect | Decision::Bypass
@@ -635,7 +654,7 @@ pub(crate) async fn proxy_handler(
         && fingerprint.is_some()
         && response_bytes.len() as u64 <= state.config.policy.max_fingerprint_body_size;
 
-    state.observer.record(ObservationRecord {
+    let observation_outcome = state.observer.record(ObservationRecord {
         route_id: route_id.clone(),
         cache_key_hash: cache_key_hash.clone(),
         decision: final_decision,
@@ -651,6 +670,41 @@ pub(crate) async fn proxy_handler(
         score: response_decision.score,
         mode: state.config.mode,
     });
+    if observation_outcome.shadow_mismatch {
+        if let Err(err) = state
+            .store
+            .purge(PurgeSelector::Route(route_id.clone()))
+            .await
+        {
+            warn!(error = %err, "failed to purge route after shadow mismatch");
+            state.observer.push_event(
+                EventType::StoreErrorFailOpen,
+                Some(route_id.clone()),
+                cache_key_hash.clone(),
+                vec![DecisionReason::StoreError],
+                "failed to purge route after shadow mismatch",
+            );
+        } else {
+            state.observer.push_event(
+                EventType::CacheEntryEvicted,
+                Some(route_id.clone()),
+                cache_key_hash.clone(),
+                vec![DecisionReason::ShadowMismatch],
+                "purged route entries after shadow mismatch",
+            );
+        }
+    }
+    if origin_public_response
+        && !panic_active
+        && !protected
+        && state.policy.response_is_store_safe(&response_signals)
+    {
+        state.observer.record_origin_public_response(
+            route_id.clone(),
+            cache_key_hash.clone(),
+            state.config.mode,
+        );
+    }
 
     if state.config.mode == Mode::Auto
         && !panic_active
@@ -668,7 +722,18 @@ pub(crate) async fn proxy_handler(
                 RevalidationOutcome::Skipped,
             );
         } else if let (Some(key_hash), Some(fingerprint)) = (cache_key_hash.clone(), fingerprint) {
-            if state.observer.is_auto_eligible(&route_id, &key_hash) {
+            let request_reuse_safe = state.policy.request_is_reuse_safe(&request_signals);
+            if state
+                .observer
+                .store_eligibility(
+                    &route_id,
+                    &key_hash,
+                    request_reuse_safe,
+                    route_hint_public_object,
+                    origin_public_response,
+                )
+                .eligible
+            {
                 let freshness = entry_freshness(
                     &state,
                     route_hint,

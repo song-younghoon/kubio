@@ -1,5 +1,6 @@
-use crate::RouteQueryConfig;
+use crate::{short_hash, RouteQueryConfig};
 use percent_encoding::percent_decode_str;
+use serde::{Deserialize, Serialize};
 use url::form_urlencoded;
 
 pub fn normalize_path_template(path: &str) -> String {
@@ -154,6 +155,40 @@ pub fn sensitive_path_score(path: &str) -> u8 {
         .min(u8::MAX as usize) as u8
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathObservation {
+    pub segment_count: u16,
+    pub id_like_segment_count: u16,
+    pub sensitive_path_score: u8,
+    pub dynamic_segment_hashes: Vec<String>,
+}
+
+pub fn observe_path(path: &str) -> PathObservation {
+    let mut observation = PathObservation {
+        sensitive_path_score: sensitive_path_score(path),
+        ..PathObservation::default()
+    };
+
+    for segment in path.trim_matches('/').split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        observation.segment_count = observation.segment_count.saturating_add(1);
+        let decoded = percent_decode_str(segment)
+            .decode_utf8()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| segment.to_string());
+        if is_id_like_segment(&decoded) {
+            observation.id_like_segment_count = observation.id_like_segment_count.saturating_add(1);
+            observation
+                .dynamic_segment_hashes
+                .push(short_hash(&decoded));
+        }
+    }
+
+    observation
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +208,17 @@ mod tests {
             normalize_path_template("/api/search?q=phone"),
             "/api/search"
         );
+    }
+
+    #[test]
+    fn path_observation_hashes_dynamic_values_without_raw_segments() {
+        let observation = observe_path("/notice/123");
+
+        assert_eq!(observation.segment_count, 2);
+        assert_eq!(observation.id_like_segment_count, 1);
+        assert_eq!(observation.sensitive_path_score, 0);
+        assert_eq!(observation.dynamic_segment_hashes.len(), 1);
+        assert!(!observation.dynamic_segment_hashes[0].contains("123"));
     }
 
     #[test]

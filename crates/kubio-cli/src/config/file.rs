@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
 use kubio_core::{
-    parse_duration, RouteFreshnessConfig, RouteHintConfig, RouteMatchConfig, RouteQueryConfig,
-    RouteSafetyConfig, RouteStaleIfErrorConfig, RouteVaryConfig,
+    parse_duration, KeyValidationReuseConfig, OriginPublicFastPathConfig, PublicObjectReuseConfig,
+    RouteFreshnessConfig, RouteHintConfig, RouteMatchConfig, RouteQueryConfig, RouteSafetyConfig,
+    RouteStaleIfErrorConfig, RouteVaryConfig,
 };
 use serde::Deserialize;
 
@@ -106,6 +107,15 @@ pub(crate) struct FilePolicyConfig {
     pub(crate) revalidation: Option<FileRevalidationConfig>,
     pub(crate) stale_if_error: Option<FileStaleIfErrorConfig>,
     pub(crate) query_intelligence: Option<FileQueryIntelligenceConfig>,
+    pub(crate) adaptive_reuse: Option<FileAdaptiveReuseConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FileAdaptiveReuseConfig {
+    pub(crate) enabled: Option<bool>,
+    pub(crate) key_validation: Option<KeyValidationReuseConfig>,
+    pub(crate) public_object: Option<PublicObjectReuseConfig>,
+    pub(crate) origin_public_fast_path: Option<OriginPublicFastPathConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

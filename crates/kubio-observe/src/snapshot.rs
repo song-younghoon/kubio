@@ -1,4 +1,7 @@
-use kubio_core::{DecisionReason, LatencySnapshot, RouteId, RouteState, StatusClassCounts};
+use kubio_core::{
+    AdaptiveReuseBlocker, DecisionReason, LatencySnapshot, ReuseClass, RouteId, RouteState,
+    StatusClassCounts,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::events::Event;
@@ -110,11 +113,18 @@ pub struct RouteSnapshot {
     pub route_id: RouteId,
     pub route_hash: String,
     pub state: RouteState,
+    pub reuse_class: ReuseClass,
     pub request_count: u64,
     pub origin_count: u64,
     pub reuse_count: u64,
     pub protected_count: u64,
     pub bypass_count: u64,
+    pub store_safe_count: u64,
+    pub origin_public_responses: u64,
+    pub distinct_key_count: u64,
+    pub dynamic_value_count: u64,
+    pub store_safe_rate: f64,
+    pub adaptive_blockers: Vec<AdaptiveReuseBlocker>,
     pub shadow_matches: u64,
     pub shadow_mismatches: u64,
     pub revalidation_attempts: u64,

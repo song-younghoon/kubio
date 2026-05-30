@@ -243,6 +243,10 @@ impl PolicyEngine {
         response.status_cacheable && self.response_hard_deny_reasons(response).is_empty()
     }
 
+    pub fn response_has_origin_public_signal(&self, response: &ResponseSignals) -> bool {
+        response.status_cacheable && response.cache_control == CacheControlClass::Public
+    }
+
     pub fn validators(&self, headers: &HeaderMap) -> Validators {
         Validators {
             etag: bounded_header_value(

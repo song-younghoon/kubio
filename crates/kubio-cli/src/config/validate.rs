@@ -70,6 +70,7 @@ pub(crate) fn validate_config(config: &EffectiveConfig) -> Result<()> {
     {
         bail!("policy.max_shadow_mismatch_rate must be between 0 and 1");
     }
+    validate_adaptive_reuse_config(config)?;
     if config.policy.revalidation.max_validator_length == 0 {
         bail!("policy.revalidation.max_validator_length must be greater than zero");
     }
@@ -103,6 +104,28 @@ pub(crate) fn validate_config(config: &EffectiveConfig) -> Result<()> {
     }
     if public_dashboard && config.dashboard.admin_api && config.admin_token.is_none() {
         bail!("public dashboard admin API requires admin_token");
+    }
+    Ok(())
+}
+
+fn validate_adaptive_reuse_config(config: &EffectiveConfig) -> Result<()> {
+    let adaptive = &config.policy.adaptive_reuse;
+    if adaptive.key_validation.min_observations == 0
+        || adaptive.key_validation.min_shadow_matches == 0
+    {
+        bail!("policy.adaptive_reuse.key_validation thresholds must be greater than zero");
+    }
+    let public_object = &adaptive.public_object;
+    if public_object.min_route_samples == 0
+        || public_object.min_distinct_keys == 0
+        || public_object.min_shadow_matches == 0
+    {
+        bail!("policy.adaptive_reuse.public_object thresholds must be greater than zero");
+    }
+    if !public_object.min_store_safe_rate.is_finite()
+        || !(0.0..=1.0).contains(&public_object.min_store_safe_rate)
+    {
+        bail!("policy.adaptive_reuse.public_object.min_store_safe_rate must be between 0 and 1");
     }
     Ok(())
 }
@@ -528,6 +551,51 @@ routes:
             .to_string();
 
         assert!(err.contains("routes[].query"));
+    }
+
+    #[test]
+    fn adaptive_reuse_file_config_applies_v050_fields() {
+        let file: FileConfig = serde_yaml::from_str(
+            r#"
+origin: "http://localhost:3000"
+policy:
+  adaptive_reuse:
+    enabled: true
+    key_validation:
+      min_observations: 2
+      min_shadow_matches: 1
+      max_shadow_mismatches: 0
+    public_object:
+      enabled: true
+      min_route_samples: 12
+      min_distinct_keys: 4
+      min_store_safe_rate: 0.95
+      min_shadow_matches: 3
+      max_shadow_mismatches: 0
+    origin_public_fast_path:
+      enabled: true
+routes:
+  - match:
+      method: GET
+      path: "/notice/{id}"
+    safety:
+      public_object: true
+"#,
+        )
+        .unwrap();
+        let mut config = EffectiveConfig::default();
+
+        apply_file_config(&mut config, file).unwrap();
+
+        assert_eq!(
+            config.policy.adaptive_reuse.key_validation.min_observations,
+            2
+        );
+        assert_eq!(
+            config.policy.adaptive_reuse.public_object.min_route_samples,
+            12
+        );
+        assert!(config.routes[0].safety.public_object);
     }
 
     fn test_route_hint(method: &str, path: &str) -> RouteHintConfig {

@@ -27,6 +27,7 @@ Important defaults:
 - Max object size: `1MiB`
 - Revalidation: enabled
 - Stale-if-error: origin-controlled
+- Adaptive reuse: enabled
 - Downstream HTTP/2: disabled unless TLS or explicit h2c config enables it
 - Downstream HTTP/3: disabled by default; available only in binaries built with
   `--features experimental-http3`
@@ -136,10 +137,25 @@ observability:
 
 v0.3.1 observability includes downstream/upstream protocol counts, protocol fallback counts, HTTP/3 connection/stream/write-error counters, QUIC handshake failure counters, Alt-Svc advertised/skipped counters, upstream HTTP/3 attempt/fallback counters, live in-flight gauges, backpressure rejections, store operation counters/latency totals, store saturation events, and observer event-drop counts.
 
-v0.2.0 policy settings:
+Policy settings:
 
 ```yaml
 policy:
+  adaptive_reuse:
+    enabled: true
+    key_validation:
+      min_observations: 2
+      min_shadow_matches: 1
+      max_shadow_mismatches: 0
+    public_object:
+      enabled: true
+      min_route_samples: 20
+      min_distinct_keys: 3
+      min_store_safe_rate: 0.98
+      min_shadow_matches: 3
+      max_shadow_mismatches: 0
+    origin_public_fast_path:
+      enabled: true
   revalidation:
     enabled: true
     prefer_etag: true
@@ -174,4 +190,14 @@ routes:
     stale_if_error:
       enabled: true
       max_stale: "5m"
+  - match:
+      method: GET
+      path: "/notice/{id}"
+    safety:
+      public_object: true
 ```
+
+`safety.public_object: true` lowers the evidence path for known public object
+routes but does not bypass hard denies such as Authorization, Cookie,
+Set-Cookie, private/no-store, unsupported Vary, sensitive paths, or shadow
+mismatches.

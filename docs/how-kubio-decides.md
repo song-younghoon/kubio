@@ -16,11 +16,31 @@ Every origin response is checked before storage or reuse. kubio does not store r
 - Auto: kubio may reuse fresh verified responses.
 - Protected: kubio found a risk signal or mismatch.
 
+## Adaptive Reuse
+
+v0.5.0 separates hard protection from evidence-gated reuse.
+
+- `key_validated`: one exact cache key has repeated with matching fingerprints.
+- `origin_public`: the origin explicitly sent a safe `Cache-Control: public`
+  response, so the first safe response may be stored and the second identical
+  fresh request may hit.
+- `public_object_candidate`: a route has bounded high-cardinality object
+  evidence, such as `/notice/{id}`.
+- `public_object`: the route has enough samples, distinct keys, store-safe
+  responses, and shadow matches to store safe first responses for new keys.
+- `hard_protected`: a non-negotiable safety signal was observed.
+
+Route evidence uses normalized route IDs, but cache entries remain exact-key
+entries. `/notice/1` and `/notice/2` can share route confidence while staying
+separate cache objects. `/user/1` remains protected by default because `user` is
+a sensitive path segment.
+
 ## Shadow Validation
 
 When the same cache key appears again, kubio compares the latest origin response fingerprint with the previous one. Matching fingerprints increase confidence. Any mismatch blocks automatic reuse.
 
-kubio requires recent shadow validations with zero mismatches before auto reuse.
+kubio requires recent shadow validations with zero mismatches before adaptive
+route promotion. A mismatch protects the route and prevents future hits.
 
 ## Revalidation and Stale Recovery
 

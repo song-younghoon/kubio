@@ -30,6 +30,21 @@ policy:
   query_intelligence:
     enabled: true
     auto_ignore: false
+  adaptive_reuse:
+    enabled: true
+    key_validation:
+      min_observations: 2
+      min_shadow_matches: 1
+      max_shadow_mismatches: 0
+    public_object:
+      enabled: true
+      min_route_samples: 20
+      min_distinct_keys: 3
+      min_store_safe_rate: 0.98
+      min_shadow_matches: 3
+      max_shadow_mismatches: 0
+    origin_public_fast_path:
+      enabled: true
   max_object_size: "1MiB"
   max_fingerprint_body_size: "2MiB"
   min_route_samples: 100
@@ -48,6 +63,13 @@ observability:
   metrics: true
   metrics_path: "/metrics"
   tracing: true
+
+routes:
+  - match:
+      method: GET
+      path: "/notice/{id}"
+    safety:
+      public_object: true
 
 # Required when exposing admin APIs on a public dashboard address.
 # admin_token: "change-me"

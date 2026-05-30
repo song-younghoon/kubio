@@ -47,6 +47,18 @@ pub(crate) fn response_from_origin_stream(
     }
     if state.config.debug_headers {
         builder = builder.header("x-kubio-status", kubio_status);
+        if let Some(route) = state.observer.route_by_hash(&route_id.hash()) {
+            builder = builder.header("x-kubio-reuse-class", route.reuse_class.to_string());
+            if !route.adaptive_blockers.is_empty() {
+                let blockers = route
+                    .adaptive_blockers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                builder = builder.header("x-kubio-adaptive-blockers", blockers);
+            }
+        }
     }
     builder = add_alt_svc_header(builder, state, route_id, request_authority);
     builder

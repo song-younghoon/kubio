@@ -17,13 +17,16 @@ pub(crate) async fn routes(args: AdminArgs) -> Result<()> {
     }
     for route in snapshot.routes {
         println!(
-            "{}\t{}\trequests={}\torigin={}\treused={}\tprotected={}\trevalidated={}\tstale={}\tdownstream={}\tupstream={}",
+            "{}\t{}\tclass={}\trequests={}\torigin={}\treused={}\tprotected={}\tkeys={}\tpublic={}\trevalidated={}\tstale={}\tdownstream={}\tupstream={}",
             route.route_id.as_label(),
             route.state,
+            route.reuse_class,
             route.request_count,
             route.origin_count,
             route.reuse_count,
             route.protected_count,
+            route.distinct_key_count,
+            route.origin_public_responses,
             route.revalidation_attempts,
             route.stale_served,
             protocol_counts_label(&route.downstream_protocols),
@@ -45,20 +48,30 @@ pub(crate) async fn explain(args: ExplainArgs) -> Result<()> {
         bail!("route has not been observed: {}", route_id.as_label());
     }
     let route: RouteSnapshot = response.json().await?;
-    println!("{}\nStatus: {}\n", route.route_id.as_label(), route.state);
+    println!(
+        "{}\nStatus: {}\nReuse class: {}\n",
+        route.route_id.as_label(),
+        route.state,
+        route.reuse_class
+    );
     println!("kubio's reasoning:");
     if route.explanation.is_empty() {
         println!("- kubio has not recorded enough information yet.");
     } else {
-        for line in route.explanation {
+        for line in &route.explanation {
             println!("- {line}");
         }
     }
     println!(
-        "\nRequests: {}\nOrigin: {}\nReused: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}\nDownstream protocols: {}\nUpstream protocols: {}",
+        "\nRequests: {}\nOrigin: {}\nReused: {}\nDistinct keys: {}\nDynamic path values: {}\nStore-safe rate: {:.2}%\nOrigin public responses: {}\nAdaptive blockers: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}\nDownstream protocols: {}\nUpstream protocols: {}",
         route.request_count,
         route.origin_count,
         route.reuse_count,
+        route.distinct_key_count,
+        route.dynamic_value_count,
+        route.store_safe_rate * 100.0,
+        route.origin_public_responses,
+        adaptive_blockers_label(&route),
         route.shadow_matches,
         route.shadow_mismatches,
         route.revalidation_attempts,
@@ -222,6 +235,19 @@ fn protocol_counts_label(counts: &ProtocolCounts) -> String {
         "http1:{},http2:{},http3:{}",
         counts.http1, counts.http2, counts.http3
     )
+}
+
+fn adaptive_blockers_label(route: &RouteSnapshot) -> String {
+    if route.adaptive_blockers.is_empty() {
+        "none".to_string()
+    } else {
+        route
+            .adaptive_blockers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 fn parse_route_id(value: &str) -> Option<RouteId> {
