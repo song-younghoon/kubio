@@ -126,12 +126,12 @@ Acceptance:
 
 ### M2.4 `kubio-dashboard`
 
-- [ ] M2.4.1 Move dashboard state and router wiring into `state.rs` and `router.rs`.
-- [ ] M2.4.2 Move HTML pages into `pages.rs`.
-- [ ] M2.4.3 Move JSON APIs into `api.rs`.
-- [ ] M2.4.4 Move authorization helpers into `auth.rs`.
-- [ ] M2.4.5 Move HTML/model helpers into `html.rs` and `models.rs`.
-- [ ] M2.4.6 Re-export existing public dashboard API.
+- [x] M2.4.1 Move dashboard state and router wiring into `state.rs` and `router.rs`.
+- [x] M2.4.2 Move HTML pages into `pages.rs`.
+- [x] M2.4.3 Move JSON APIs into `api.rs`.
+- [x] M2.4.4 Move authorization helpers into `auth.rs`.
+- [x] M2.4.5 Move HTML/model helpers into `html.rs` and `models.rs`.
+- [x] M2.4.6 Re-export existing public dashboard API.
 
 Acceptance:
 
