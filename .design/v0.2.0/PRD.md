@@ -1,6 +1,6 @@
 # PRD: kubio v0.2.0
 
-Document version: v0.2 implemented baseline
+Document version: v0.2 implemented
 Product type: Open-source software
 Primary implementation language: Rust
 Release target: Safer real-world API response reuse

@@ -1,6 +1,6 @@
 # v0.2.0 Implementation Tasks
 
-Status: implementation baseline complete and safety-hardened; release packaging follow-up remains
+Status: v0.2.0 implementation tasks complete; pre-tag supply-chain gates remain
 Target release: `v0.2.0`
 
 Task states:
@@ -30,7 +30,7 @@ Additional hardening completed after the baseline:
 - Route hint validation rejects duplicate routes, empty query sections, and overlapping include/ignore glob patterns.
 - Query parameter observation respects `policy.query_intelligence.enabled`.
 
-Remaining follow-ups are release packaging smoke automation, richer query intelligence, and nonblocking disk I/O optimization.
+The previously open v0.2.0 follow-ups are now covered: hint observations and counters, bounded query intelligence, nonblocking disk-store hot path work, and local/release/Docker smoke automation. Pre-tag release still needs the standard external supply-chain gates when available.
 
 ## M0: Design and Schema Preparation
 
@@ -92,7 +92,7 @@ Acceptance:
 
 Acceptance:
 
-- ETag revalidation integration and validator extraction tests pass; Last-Modified-only integration coverage remains a follow-up.
+- ETag and Last-Modified revalidation integration and validator extraction tests pass.
 - Unsafe 304 metadata purges the stored entry and refetches instead of leaving the previous body reusable.
 
 ### M1.3 `no-cache`
@@ -152,15 +152,15 @@ Goal: let operators safely tune known public routes and understand query-key fra
 Acceptance:
 
 - Hint matching is deterministic for exact normalized route templates; duplicate route hints fail config validation.
-- Hard-deny overrides remain enforced by request/response prechecks; dedicated route-hint override tests remain follow-up.
+- Hard-deny overrides remain enforced by request/response prechecks and route/query hint rejection tests.
 
 ### M3.2 Query Hints
 
 - [x] M3.2.1 Apply `query.ignore`.
 - [x] M3.2.2 Apply `query.include`.
 - [x] M3.2.3 Preserve repeated parameter order.
-- [~] M3.2.4 Record hint applied/rejected reasons.
-- [~] M3.2.5 Test non-matching route behavior.
+- [x] M3.2.4 Record hint applied/rejected reasons.
+- [x] M3.2.5 Test non-matching route behavior.
 
 Acceptance:
 
@@ -170,14 +170,14 @@ Acceptance:
 ### M3.3 Query Intelligence
 
 - [x] M3.3.1 Track query parameter names by route.
-- [~] M3.3.2 Track bounded cardinality classes.
-- [~] M3.3.3 Track fingerprint sensitivity.
-- [~] M3.3.4 Generate safe-ignore suggestions.
+- [x] M3.3.2 Track bounded cardinality classes.
+- [x] M3.3.3 Track fingerprint sensitivity.
+- [x] M3.3.4 Generate safe-ignore suggestions.
 - [x] M3.3.5 Redact sensitive query values everywhere.
 
 Acceptance:
 
-- Dashboard/API can show query parameter names, configured actions, and conservative noise-parameter suggestions.
+- Dashboard/API can show query parameter names, configured actions, bounded cardinality classes, fingerprint sensitivity, and conservative noise-parameter suggestions.
 - Raw query values never appear in metrics or dashboard output.
 
 ## M4: Disk Store
@@ -203,13 +203,14 @@ Acceptance:
 - [x] M4.2.2 Recover entries on restart.
 - [x] M4.2.3 Drop expired entries on startup or first access.
 - [x] M4.2.4 Skip corrupt entries safely.
-- [ ] M4.2.5 Protect Tokio runtime from blocking disk I/O.
+- [x] M4.2.5 Protect Tokio runtime from blocking disk I/O.
 
 Acceptance:
 
 - Safe entry survives restart.
 - Corrupt single entry does not crash hot path.
 - Corrupt metadata cannot cause arbitrary body file reads.
+- Disk get/put/purge work runs behind blocking-task boundaries instead of the Tokio core scheduler.
 
 ## M5: Dashboard, Metrics, CLI, and Docs
 
@@ -219,8 +220,8 @@ Goal: expose v0.2.0 behavior clearly.
 
 - [x] M5.1.1 Add revalidation counters.
 - [x] M5.1.2 Add stale served/denied counters.
-- [~] M5.1.3 Add hint counters.
-- [~] M5.1.4 Add store error counters.
+- [x] M5.1.3 Add hint counters.
+- [x] M5.1.4 Add store error counters.
 - [x] M5.1.5 Add bounded event types.
 
 Acceptance:
@@ -238,7 +239,7 @@ Acceptance:
 
 Acceptance:
 
-- User can inspect revalidation, stale, query snapshots, conservative suggestions, and store status; richer hint status remains follow-up.
+- User can inspect revalidation, stale, query snapshots, hint status, conservative suggestions, store errors, and store status.
 
 ### M5.3 CLI and Docs
 
@@ -262,8 +263,8 @@ Goal: ship v0.2.0 with safety, persistence, and performance confidence.
 
 - [x] M6.1.1 Add revalidation integration tests.
 - [x] M6.1.2 Add stale-if-error integration tests.
-- [~] M6.1.3 Add route hint tests.
-- [~] M6.1.4 Add query intelligence tests.
+- [x] M6.1.3 Add route hint tests.
+- [x] M6.1.4 Add query intelligence tests.
 - [x] M6.1.5 Add disk persistence tests.
 - [x] M6.1.6 Add privacy regression tests.
 
@@ -274,10 +275,10 @@ Acceptance:
 
 ### M6.2 Performance and Release
 
-- [ ] M6.2.1 Extend local performance smoke script.
-- [ ] M6.2.2 Add disk store smoke test.
-- [ ] M6.2.3 Add release artifact smoke with v0.2.0 config.
-- [ ] M6.2.4 Update Docker image smoke.
+- [x] M6.2.1 Extend local performance smoke script.
+- [x] M6.2.2 Add disk store smoke test.
+- [x] M6.2.3 Add release artifact smoke with v0.2.0 config.
+- [x] M6.2.4 Update Docker image smoke.
 - [x] M6.2.5 Publish release notes.
 
 Acceptance:

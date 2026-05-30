@@ -9,10 +9,10 @@ use axum::routing::any;
 use axum::Router;
 use http::header;
 use kubio_core::{
-    body_hash, build_cache_key_with_query_config, is_hop_by_hop_header, matching_route_hint,
-    query_pattern_matches, stable_header_hash, CacheKeyHash, Decision, DecisionReason,
-    EffectiveConfig, Mode, ResponseFingerprint, RouteHintConfig, RouteId, StaleIfErrorMode,
-    StoredCacheControl, Validators,
+    body_hash, build_cache_key_with_query_config, is_hop_by_hop_header, is_sensitive_query_param,
+    matching_route_hint, query_pattern_matches, short_hash, stable_header_hash, CacheKeyHash,
+    Decision, DecisionReason, EffectiveConfig, Mode, ResponseFingerprint, RouteHintConfig, RouteId,
+    StaleIfErrorMode, StoredCacheControl, Validators,
 };
 use kubio_observe::{
     EventType, ObservationRecord, Observer, QueryParamRecord, RevalidationOutcome,
@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
-use url::Url;
+use url::{form_urlencoded, Url};
 
 const DEFAULT_VARY_HEADERS: &[&str] = &["accept", "accept-encoding", "accept-language"];
 
@@ -118,12 +118,14 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
         .map(count_query_params)
         .unwrap_or_default()
         .min(u16::MAX as usize) as u16;
-    if state.config.policy.query_intelligence.enabled {
-        state.observer.record_query_params(
-            route_id.clone(),
-            query_param_records(query.as_deref(), route_hint),
-        );
-    }
+    let query_records = if state.config.policy.query_intelligence.enabled {
+        query_param_records(query.as_deref(), route_hint)
+    } else {
+        Vec::new()
+    };
+    state
+        .observer
+        .record_query_params(route_id.clone(), query_records.clone());
 
     let route_state = state.observer.route_state(&route_id);
     let mut request_decision = state.policy.decide_request(
@@ -143,6 +145,13 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
             -100,
         );
     }
+    record_hint_observations(
+        &state,
+        &route_id,
+        route_hint,
+        &request_signals,
+        &request_decision,
+    );
 
     let cache_key_hash = if request_signals.method_cacheable {
         let query_config = route_hint.and_then(|hint| {
@@ -553,6 +562,11 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     };
 
     let fingerprint = make_fingerprint(&state.config, status, &origin_headers, &response_bytes);
+    if let Some(fingerprint) = fingerprint.as_ref() {
+        state
+            .observer
+            .record_query_fingerprint(route_id.clone(), &query_records, fingerprint);
+    }
     let response_decision = state.policy.decide_response(
         state.config.mode,
         state.observer.route_state(&route_id),
@@ -948,6 +962,46 @@ fn route_hint_vary_names(route_hint: Option<&RouteHintConfig>) -> Vec<&str> {
         .unwrap_or_else(|| DEFAULT_VARY_HEADERS.to_vec())
 }
 
+fn record_hint_observations(
+    state: &ProxyState,
+    route_id: &RouteId,
+    route_hint: Option<&RouteHintConfig>,
+    request_signals: &kubio_policy::RequestSignals,
+    request_decision: &kubio_policy::PolicyDecision,
+) {
+    let Some(hint) = route_hint else {
+        return;
+    };
+
+    let rejected_by_hard_deny = request_decision.decision == Decision::Protect
+        && !request_decision
+            .reasons
+            .contains(&DecisionReason::RouteHintApplied);
+    state.observer.record_route_hint(
+        route_id.clone(),
+        hint.display_name(),
+        !rejected_by_hard_deny,
+        if rejected_by_hard_deny {
+            DecisionReason::RouteHintRejected
+        } else {
+            DecisionReason::RouteHintApplied
+        },
+    );
+
+    if !hint.query.is_empty() {
+        let query_hint_applied = request_signals.method_cacheable && !rejected_by_hard_deny;
+        state.observer.record_query_hint(
+            route_id.clone(),
+            query_hint_applied,
+            if query_hint_applied {
+                DecisionReason::QueryHintApplied
+            } else {
+                DecisionReason::QueryHintRejected
+            },
+        );
+    }
+}
+
 fn response_from_origin_stream(
     config: &EffectiveConfig,
     status: StatusCode,
@@ -1065,17 +1119,22 @@ fn query_param_records(
     let Some(query) = query else {
         return Vec::new();
     };
-    query
-        .split('&')
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| {
-            let name = part.split_once('=').map(|(name, _)| name).unwrap_or(part);
+    form_urlencoded::parse(query.as_bytes())
+        .filter_map(|(name, value)| {
             if name.is_empty() {
                 return None;
             }
+            let sensitive = is_sensitive_query_param(&name);
+            let value_hash = if sensitive {
+                None
+            } else {
+                Some(short_hash(&format!("{name}={value}")))
+            };
             Some(QueryParamRecord {
-                name: name.to_string(),
-                configured_action: query_param_action(name, route_hint).to_string(),
+                configured_action: query_param_action(&name, route_hint).to_string(),
+                name: name.into_owned(),
+                value_hash,
+                sensitive,
             })
         })
         .collect()

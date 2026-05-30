@@ -1,6 +1,6 @@
 # Testing and Release
 
-Status: implementation gates passing; release artifact smoke remains
+Status: implementation gates passing; release smoke automation added
 Target release: `v0.2.0`
 
 ## Goals
@@ -30,7 +30,7 @@ cargo test --workspace
 git diff --check
 ```
 
-`cargo deny check`, `cargo audit`, release artifact smoke, and Docker image smoke remain release-gate follow-ups.
+`cargo deny check` and `cargo audit` remain external release-gate follow-ups when those tools are available locally or in CI.
 
 ## Unit Tests
 
@@ -54,7 +54,7 @@ Required new unit areas:
 ### Revalidation
 
 - [x] ETag stale entry sends `If-None-Match`.
-- [~] Last-Modified stale entry sends `If-Modified-Since`.
+- [x] Last-Modified stale entry sends `If-Modified-Since`.
 - [x] 304 returns stored body with refreshed metadata.
 - [x] 200 revalidation replaces stored body.
 - [x] Unsafe 304 metadata causes purge plus safe refetch.
@@ -75,9 +75,9 @@ Required new unit areas:
 
 - [x] Matching hint applies TTL.
 - [x] Matching hint ignores configured query parameter.
-- [~] Non-matching route does not use hint.
+- [x] Non-matching route does not use hint.
 - [~] Sensitive path acknowledgment only affects sensitive path reason and cannot override personalized signals.
-- [~] Force-protect hint protects otherwise safe public routes.
+- [x] Force-protect hint protects otherwise safe public routes.
 - [x] Conflicting hints fail config validation.
 
 ### Query Intelligence
@@ -85,8 +85,8 @@ Required new unit areas:
 - [x] Query parameter stats are recorded without raw values.
 - [x] Repeated query parameter ordering stays deterministic.
 - [x] Ignored parameters merge cache keys only on configured routes.
-- [~] Dashboard/API suggestions are generated only after sufficient shadow evidence.
-- [~] Sensitive query parameter names never produce auto-ignore suggestions.
+- [x] Dashboard/API suggestions are generated only after sufficient bounded fingerprint evidence.
+- [x] Sensitive query parameter names never produce auto-ignore suggestions.
 
 ### Disk Store
 
@@ -186,6 +186,14 @@ Expected:
 - Metrics expose v0.2.0 counters.
 - Disk store opens when configured.
 - No protected traffic is reused.
+
+Implemented smoke scripts:
+
+```bash
+MODE=auto STORAGE_KIND=disk bash examples/bench/local_smoke.sh
+KUBIO_BIN=dist/kubio-x86_64-unknown-linux-gnu bash examples/bench/release_smoke.sh
+KUBIO_IMAGE=kubio:v0.2.0 bash examples/bench/docker_smoke.sh
+```
 
 ## Release Exit Criteria
 

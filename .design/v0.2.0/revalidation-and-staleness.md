@@ -1,6 +1,6 @@
 # Revalidation and Staleness
 
-Status: implemented baseline and safety-hardened
+Status: implemented
 Target release: `v0.2.0`
 
 ## Goals
@@ -236,7 +236,7 @@ Do not include validator values or route ids in response headers.
 ## Acceptance
 
 - Stale ETag entry receives conditional request and 304 serves stored body.
-- Last-Modified validators are parsed and sent as `If-Modified-Since`; dedicated Last-Modified-only integration coverage remains a follow-up.
+- Last-Modified validators are parsed and sent as `If-Modified-Since`; Last-Modified-only integration coverage verifies the 304 reuse path.
 - Revalidation 200 replaces the cache entry when safe.
 - Unsafe 304 metadata purges the cache entry and refetches safely.
 - `no-cache` entries are never served without contacting origin.

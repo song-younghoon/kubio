@@ -9,9 +9,10 @@ kubio v0.2.0 adds safer real-world reuse while keeping v0.1.0 hard safety denies
 - Bounded stale-if-error when origin headers or route policy explicitly allow stale recovery.
 - Route hints for freshness, query key behavior, stale-if-error, and force-protect behavior.
 - Query key hints with ignored parameter patterns such as `utm_*`.
+- Bounded query intelligence for cardinality, fingerprint sensitivity, and safe-ignore suggestions.
 - Optional process-local disk store.
 - Dashboard/API/CLI fields for revalidation, stale responses, and store state.
-- Prometheus metrics for revalidation outcomes, stale served/denied counts, and store kind.
+- Prometheus metrics for revalidation outcomes, stale served/denied counts, hint activity, query suggestions, store errors, and store kind.
 
 ## Safety Notes
 
@@ -28,4 +29,7 @@ Required local checks:
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace
+MODE=auto STORAGE_KIND=disk bash examples/bench/local_smoke.sh
+KUBIO_BIN=dist/kubio-x86_64-unknown-linux-gnu bash examples/bench/release_smoke.sh
+KUBIO_IMAGE=kubio:v0.2.0 bash examples/bench/docker_smoke.sh
 ```

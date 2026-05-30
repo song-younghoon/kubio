@@ -1,6 +1,6 @@
 # Route Hints and Query Intelligence
 
-Status: implemented baseline; richer query analysis follow-up remains
+Status: implemented
 Target release: `v0.2.0`
 
 ## Goals
@@ -101,12 +101,9 @@ v0.1.0 includes all query parameters in the cache key. v0.2.0 observes query beh
 - Parameter names seen per route.
 - Occurrence rate.
 - Whether a configured hint is actively changing cache keys.
-
-Follow-up query analysis should add:
-
-- Value cardinality class beyond the current `unknown` placeholder.
-- Whether a parameter appears correlated with response fingerprint changes.
-- Whether ignoring a parameter would merge keys that have matched fingerprints in shadow mode.
+- Bounded value cardinality classes.
+- Whether observed values correlate with response fingerprint changes.
+- Conservative ignore suggestions when repeated observations show stable fingerprints.
 
 Observation data should avoid raw values by default:
 
@@ -132,7 +129,7 @@ high
 unknown
 ```
 
-Implementation may later use approximate counting or bounded hashes of values. The current implementation stores parameter names and configured actions only; it does not store raw values in metrics or dashboard APIs.
+The implementation stores bounded hashes for value/fingerprint samples only. It does not store raw query values in metrics, dashboard APIs, or events.
 
 ## Query Key Construction
 
@@ -161,8 +158,8 @@ Dashboard and CLI may show suggestions:
 GET /api/products
 
 Query suggestions:
-- utm_source appears unrelated to response pattern after 48 shadow comparisons.
-- gclid appears unrelated to response pattern after 48 shadow comparisons.
+- utm_source appears unrelated to response fingerprints after repeated observations.
+- gclid appears unrelated to response fingerprints after repeated observations.
 ```
 
 Suggestions are advisory. `policy.query_intelligence.auto_ignore` defaults to `false`.
@@ -175,7 +172,7 @@ If `auto_ignore` is enabled later, it must require:
 - No personalized request/response signals.
 - Event emission before activation.
 
-For the implemented v0.2.0 baseline, suggestions are conservative name-based hints for common noise parameters such as `utm_*`, `gclid`, and `fbclid` after repeated observation. Evidence-based suggestions from shadow fingerprint grouping remain a follow-up.
+The implemented v0.2.0 suggestion path is conservative: a parameter must still be in `observe` mode, must not look sensitive, must not be fingerprint-sensitive, must have repeated fingerprint observations, and must either match a known noise name such as `utm_*`, `gclid`, or `fbclid` or show enough bounded cardinality to fragment cache keys.
 
 ## Sensitive Query Parameters
 
@@ -206,7 +203,7 @@ Event types exist for:
 - `query_hint_rejected`
 - `query_param_suggestion_created`
 
-The implemented baseline records query parameter snapshots and configured actions. Full event emission for every hint application/rejection remains a metrics/observability follow-up.
+The implementation emits hint applied/rejected events, query hint applied/rejected events, and query-parameter suggestion events with bounded reasons and no raw query values.
 
 ## Acceptance
 
@@ -214,5 +211,5 @@ The implemented baseline records query parameter snapshots and configured action
 - Non-matching routes keep v0.1.0 query behavior.
 - Repeated query parameters preserve relative order after hints.
 - Sensitive query values do not appear in logs, metrics, dashboard APIs, or events.
-- Dashboard/API can show parameter names, configured action, an `unknown` cardinality placeholder, and conservative suggestions.
+- Dashboard/API can show parameter names, configured action, bounded cardinality, fingerprint sensitivity, and conservative suggestions.
 - Hints cannot override Authorization, Cookie, Set-Cookie, no-store, private, Vary wildcard, or shadow mismatch protection.

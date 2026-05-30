@@ -1,6 +1,6 @@
 # Observability and Dashboard
 
-Status: implemented baseline; hint/store metric polish remains
+Status: implemented
 Target release: `v0.2.0`
 
 ## Goals
@@ -32,11 +32,16 @@ pub struct RouteSnapshot {
     pub stale_served: u64,
     pub stale_denied: u64,
     pub route_hint: Option<String>,
+    pub route_hint_applied: u64,
+    pub route_hint_rejected: u64,
+    pub query_hint_applied: u64,
+    pub query_hint_rejected: u64,
+    pub query_param_suggestions: u64,
     pub query_params: Vec<QueryParamSnapshot>,
 }
 ```
 
-`route_hint` is reserved for richer hint display. The current dashboard/API exposes query configured actions and v0.2.0 counters; full route hint status remains a follow-up.
+`route_hint` is the configured display name for the matching hint when a hint has been observed for the route.
 
 ### Store Snapshot
 
@@ -69,7 +74,7 @@ pub struct QueryParamSnapshot {
 }
 ```
 
-No raw values. The current implementation uses `unknown` for cardinality until bounded value-class tracking is added.
+No raw values. Cardinality is derived from bounded value hashes and reports `unknown`, `one`, `low`, `medium`, or `high`.
 
 ## Events
 
@@ -91,7 +96,7 @@ Event types are defined for:
 
 Events should include route id and key hash when available, but not validator values, raw query values, or headers.
 
-The implemented baseline emits revalidation, stale, panic-switch, and store fail-open events. Full route/query hint event emission remains a follow-up.
+The implementation emits revalidation, stale, panic-switch, route/query hint, query suggestion, and store fail-open events.
 
 ## Metrics
 
@@ -105,13 +110,11 @@ kubio_stale_responses_denied_total
 kubio_cache_entries{store="memory|disk"}
 kubio_cache_bytes{store="memory|disk"}
 kubio_cache_evictions_total{store="memory|disk"}
-```
-
-Follow-up metrics:
-
-```text
 kubio_route_hints_applied_total
+kubio_route_hints_rejected_total
 kubio_query_hints_applied_total
+kubio_query_hints_rejected_total
+kubio_query_param_suggestions_total
 kubio_store_errors_total
 ```
 
@@ -174,7 +177,7 @@ Add:
 
 - `GET /api/store`
 
-Query snapshots and hint placeholders are folded into route detail for the v0.2.0 baseline. Separate bounded query/hint endpoints remain optional follow-ups.
+Query snapshots and hint counters are folded into route detail for v0.2.0. Separate bounded query/hint endpoints remain optional future work if the dashboard needs richer drill-downs.
 
 ### Overview Additions
 
@@ -185,6 +188,12 @@ Query snapshots and hint placeholders are folded into route detail for the v0.2.
   "revalidation_modified": 12,
   "revalidation_failed": 5,
   "stale_responses_served": 3,
+  "route_hints_applied": 42,
+  "route_hints_rejected": 1,
+  "query_hints_applied": 30,
+  "query_hints_rejected": 1,
+  "query_param_suggestions": 2,
+  "store_errors": 0,
   "store_kind": "disk"
 }
 ```
@@ -197,6 +206,9 @@ Add:
 
 - Revalidated responses.
 - Stale responses served.
+- Hint applied/rejected counters.
+- Query suggestion count.
+- Store error count.
 - Store kind and cache size.
 - Recent revalidation/stale events.
 
@@ -206,11 +218,8 @@ Add columns:
 
 - Revalidated.
 - Stale served.
-
-Follow-up columns:
-
-- Hint status.
 - Query suggestions count.
+- Hint status.
 
 ### Route Detail
 
@@ -219,9 +228,6 @@ Add sections:
 - Revalidation history.
 - Stale-if-error status.
 - Query parameters and suggestions.
-
-Follow-up sections:
-
 - Freshness and validator presence.
 - Route hints applied.
 
@@ -280,7 +286,8 @@ It is acceptable to expose:
 ## Acceptance
 
 - Metrics expose revalidation and stale counters with bounded labels.
-- Dashboard APIs show store kind and revalidation counts.
+- Metrics expose hint and store-error counters with bounded labels.
+- Dashboard APIs show store kind, revalidation counts, hint counts, query suggestions, and store errors.
 - Query snapshots never include raw values.
-- Events explain stale served and stale denied cases.
+- Events explain stale served/denied and hint applied/rejected cases.
 - CLI explain includes v0.2.0 revalidation/stale counts without exposing sensitive metadata.

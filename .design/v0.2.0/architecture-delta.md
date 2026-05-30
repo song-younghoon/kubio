@@ -1,6 +1,6 @@
 # Architecture Delta
 
-Status: implemented baseline and safety-hardened
+Status: implemented
 Target release: `v0.2.0`
 
 ## Goals
@@ -214,9 +214,6 @@ Watch and shadow modes should record validators and freshness metadata but never
 - Disk metadata body file names must match the cache key and cannot point outside the entry directory.
 - Disk store does not claim encryption at rest in v0.2.0.
 
-## Follow-Ups
+## Deferred Future Work
 
-- Move blocking disk file operations behind `spawn_blocking`, an async file API, or a dedicated store worker before high-concurrency disk-store use.
-- Expand query intelligence beyond parameter names and simple noise-parameter suggestions to bounded cardinality and fingerprint sensitivity.
-- Add release artifact and Docker smoke automation for the v0.2.0 config.
 - Keep dashboard route-hint editing out of v0.2.0; dashboard remains read-only.

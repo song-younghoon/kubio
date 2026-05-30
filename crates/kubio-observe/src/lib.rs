@@ -6,8 +6,11 @@ use kubio_core::{
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime};
+
+const QUERY_VALUE_SAMPLE_LIMIT: usize = 32;
+const QUERY_SUGGESTION_MIN_FINGERPRINTS: u64 = 2;
 
 #[derive(Debug)]
 pub struct Observer {
@@ -285,14 +288,122 @@ impl Observer {
             let stats = route
                 .query_params
                 .entry(param.name.clone())
-                .or_insert_with(|| QueryParamStats {
-                    name: param.name,
-                    seen_count: 0,
-                    configured_action: param.configured_action,
-                    fingerprint_sensitive: false,
-                });
-            stats.seen_count += 1;
+                .or_insert_with(|| QueryParamStats::new(param.name.clone()));
+            stats.record_seen(&param);
         }
+    }
+
+    pub fn record_query_fingerprint(
+        &self,
+        route_id: RouteId,
+        params: &[QueryParamRecord],
+        fingerprint: &ResponseFingerprint,
+    ) {
+        if params.is_empty() {
+            return;
+        }
+
+        let mut inner = self.inner.lock();
+        let mut suggestions = Vec::new();
+        {
+            let route = inner
+                .routes
+                .entry(route_id.clone())
+                .or_insert_with(|| RouteStats::new(route_id.clone()));
+            let fingerprint_hash = response_fingerprint_hash(fingerprint);
+            for param in params {
+                let stats = route
+                    .query_params
+                    .entry(param.name.clone())
+                    .or_insert_with(|| QueryParamStats::new(param.name.clone()));
+                let had_suggestion = stats.suggestion().is_some();
+                stats.record_fingerprint(param, &fingerprint_hash);
+                if !had_suggestion
+                    && stats.suggestion().is_some()
+                    && !stats.suggestion_event_emitted
+                {
+                    stats.suggestion_event_emitted = true;
+                    suggestions.push(stats.name.clone());
+                    route.query_param_suggestions += 1;
+                }
+            }
+        }
+
+        for name in suggestions {
+            self.push_event_locked(
+                &mut inner,
+                EventType::QueryParamSuggestionCreated,
+                Some(route_id.clone()),
+                None,
+                vec![DecisionReason::QueryHintApplied],
+                format!("query parameter `{name}` is a candidate for explicit ignore"),
+            );
+        }
+    }
+
+    pub fn record_route_hint(
+        &self,
+        route_id: RouteId,
+        hint_name: String,
+        applied: bool,
+        reason: DecisionReason,
+    ) {
+        let mut inner = self.inner.lock();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.route_hint = Some(hint_name);
+        if applied {
+            route.route_hint_applied += 1;
+        } else {
+            route.route_hint_rejected += 1;
+        }
+        self.push_event_locked(
+            &mut inner,
+            if applied {
+                EventType::RouteHintApplied
+            } else {
+                EventType::RouteHintRejected
+            },
+            Some(route_id),
+            None,
+            vec![reason],
+            if applied {
+                "route hint applied"
+            } else {
+                "route hint rejected by safety policy"
+            },
+        );
+    }
+
+    pub fn record_query_hint(&self, route_id: RouteId, applied: bool, reason: DecisionReason) {
+        let mut inner = self.inner.lock();
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        if applied {
+            route.query_hint_applied += 1;
+        } else {
+            route.query_hint_rejected += 1;
+        }
+        self.push_event_locked(
+            &mut inner,
+            if applied {
+                EventType::QueryHintApplied
+            } else {
+                EventType::QueryHintRejected
+            },
+            Some(route_id),
+            None,
+            vec![reason],
+            if applied {
+                "query hint applied to cache key construction"
+            } else {
+                "query hint was not used for this request"
+            },
+        );
     }
 
     pub fn route_state(&self, route_id: &RouteId) -> RouteState {
@@ -337,7 +448,8 @@ impl Observer {
                 .then_with(|| right.request_count.cmp(&left.request_count))
         });
 
-        let overview = OverviewSnapshot::from_routes(&routes);
+        let mut overview = OverviewSnapshot::from_routes(&routes);
+        overview.store_errors = inner.store_errors;
         ObserverSnapshot {
             overview,
             routes,
@@ -481,6 +593,14 @@ impl Observer {
         reasons: Vec<DecisionReason>,
         message: impl Into<String>,
     ) {
+        if matches!(
+            event_type,
+            EventType::StoreErrorFailOpen
+                | EventType::DiskStoreErrorFailOpen
+                | EventType::DiskStoreCorruptEntrySkipped
+        ) {
+            inner.store_errors += 1;
+        }
         inner.events.push_back(Event {
             timestamp: SystemTime::now(),
             event_type,
@@ -530,6 +650,7 @@ struct ObserverInner {
     routes: HashMap<RouteId, RouteStats>,
     keys: HashMap<CacheKeyHash, KeyObservation>,
     events: VecDeque<Event>,
+    store_errors: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -549,6 +670,12 @@ struct RouteStats {
     revalidation_failed: u64,
     stale_served: u64,
     stale_denied: u64,
+    route_hint: Option<String>,
+    route_hint_applied: u64,
+    route_hint_rejected: u64,
+    query_hint_applied: u64,
+    query_hint_rejected: u64,
+    query_param_suggestions: u64,
     status_classes: StatusClassCounts,
     latencies: VecDeque<Duration>,
     score: i16,
@@ -574,6 +701,12 @@ impl RouteStats {
             revalidation_failed: 0,
             stale_served: 0,
             stale_denied: 0,
+            route_hint: None,
+            route_hint_applied: 0,
+            route_hint_rejected: 0,
+            query_hint_applied: 0,
+            query_hint_rejected: 0,
+            query_param_suggestions: 0,
             status_classes: StatusClassCounts::default(),
             latencies: VecDeque::new(),
             score: 0,
@@ -620,6 +753,11 @@ impl RouteStats {
             revalidation_failed: self.revalidation_failed,
             stale_served: self.stale_served,
             stale_denied: self.stale_denied,
+            route_hint_applied: self.route_hint_applied,
+            route_hint_rejected: self.route_hint_rejected,
+            query_hint_applied: self.query_hint_applied,
+            query_hint_rejected: self.query_hint_rejected,
+            query_param_suggestions: self.query_param_suggestions,
             status_classes: self.status_classes.clone(),
             latency: latency_snapshot(&self.latencies),
             repeat_rate: self.repeat_rate(),
@@ -636,7 +774,7 @@ impl RouteStats {
                 .iter()
                 .map(|reason| reason.user_message().to_string())
                 .collect(),
-            route_hint: None,
+            route_hint: self.route_hint.clone(),
             query_params: self
                 .query_params
                 .values()
@@ -652,25 +790,128 @@ struct QueryParamStats {
     seen_count: u64,
     configured_action: String,
     fingerprint_sensitive: bool,
+    sensitive: bool,
+    value_hashes: HashSet<String>,
+    value_hash_overflow: bool,
+    fingerprints_by_value: HashMap<String, String>,
+    fingerprint_hashes: HashSet<String>,
+    fingerprint_observations: u64,
+    suggestion_event_emitted: bool,
 }
 
 impl QueryParamStats {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            seen_count: 0,
+            configured_action: "observe".to_string(),
+            fingerprint_sensitive: false,
+            sensitive: false,
+            value_hashes: HashSet::new(),
+            value_hash_overflow: false,
+            fingerprints_by_value: HashMap::new(),
+            fingerprint_hashes: HashSet::new(),
+            fingerprint_observations: 0,
+            suggestion_event_emitted: false,
+        }
+    }
+
+    fn record_seen(&mut self, param: &QueryParamRecord) {
+        self.seen_count += 1;
+        self.configured_action.clone_from(&param.configured_action);
+        self.sensitive |= param.sensitive;
+        if self.sensitive {
+            return;
+        }
+        if let Some(value_hash) = param.value_hash.as_ref() {
+            if self.value_hashes.contains(value_hash) {
+                return;
+            }
+            if self.value_hashes.len() < QUERY_VALUE_SAMPLE_LIMIT {
+                self.value_hashes.insert(value_hash.clone());
+            } else {
+                self.value_hash_overflow = true;
+            }
+        }
+    }
+
+    fn record_fingerprint(&mut self, param: &QueryParamRecord, fingerprint_hash: &str) {
+        self.configured_action.clone_from(&param.configured_action);
+        self.sensitive |= param.sensitive;
+        if self.sensitive {
+            return;
+        }
+        self.fingerprint_observations += 1;
+        if !self.fingerprint_hashes.contains(fingerprint_hash) {
+            if !self.fingerprint_hashes.is_empty() {
+                self.fingerprint_sensitive = true;
+            }
+            if self.fingerprint_hashes.len() < QUERY_VALUE_SAMPLE_LIMIT {
+                self.fingerprint_hashes.insert(fingerprint_hash.to_string());
+            }
+        }
+        let Some(value_hash) = param.value_hash.as_ref() else {
+            return;
+        };
+        if let Some(previous) = self.fingerprints_by_value.get(value_hash) {
+            if previous != fingerprint_hash {
+                self.fingerprint_sensitive = true;
+            }
+        } else if self.fingerprints_by_value.len() < QUERY_VALUE_SAMPLE_LIMIT {
+            self.fingerprints_by_value
+                .insert(value_hash.clone(), fingerprint_hash.to_string());
+        }
+        if self.value_count() > 1 && self.fingerprint_hashes.len() > 1 {
+            self.fingerprint_sensitive = true;
+        }
+    }
+
+    fn value_count(&self) -> usize {
+        self.value_hashes.len()
+            + usize::from(self.value_hash_overflow && self.value_hashes.len() < usize::MAX)
+    }
+
+    fn cardinality(&self) -> &'static str {
+        if self.sensitive || (self.value_hashes.is_empty() && !self.value_hash_overflow) {
+            "unknown"
+        } else if self.value_hash_overflow || self.value_hashes.len() > 16 {
+            "high"
+        } else if self.value_hashes.len() > 4 {
+            "medium"
+        } else if self.value_hashes.len() > 1 {
+            "low"
+        } else {
+            "one"
+        }
+    }
+
+    fn suggestion(&self) -> Option<String> {
+        if self.configured_action != "observe"
+            || self.sensitive
+            || self.fingerprint_sensitive
+            || self.fingerprint_observations < QUERY_SUGGESTION_MIN_FINGERPRINTS
+            || self.fingerprint_hashes.len() > 1
+        {
+            return None;
+        }
+        let known_noise = self.name.starts_with("utm_")
+            || matches!(self.name.as_str(), "gclid" | "fbclid" | "mc_cid" | "mc_eid");
+        let fragmented = matches!(self.cardinality(), "medium" | "high");
+        if known_noise || fragmented {
+            Some("candidate_ignore".to_string())
+        } else {
+            None
+        }
+    }
+
     fn snapshot(&self) -> QueryParamSnapshot {
         QueryParamSnapshot {
             name: self.name.clone(),
             seen_count: self.seen_count,
-            cardinality: "unknown".to_string(),
+            cardinality: self.cardinality().to_string(),
             fingerprint_sensitive: self.fingerprint_sensitive,
             configured_action: self.configured_action.clone(),
-            suggestion: if self.configured_action == "observe"
-                && (self.name.starts_with("utm_")
-                    || matches!(self.name.as_str(), "gclid" | "fbclid"))
-                && self.seen_count >= 2
-            {
-                Some("candidate_ignore".to_string())
-            } else {
-                None
-            },
+            suggestion: self.suggestion(),
         }
     }
 }
@@ -679,6 +920,8 @@ impl QueryParamStats {
 pub struct QueryParamRecord {
     pub name: String,
     pub configured_action: String,
+    pub value_hash: Option<String>,
+    pub sensitive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -754,6 +997,12 @@ pub struct OverviewSnapshot {
     pub revalidation_failed: u64,
     pub stale_responses_served: u64,
     pub stale_responses_denied: u64,
+    pub route_hints_applied: u64,
+    pub route_hints_rejected: u64,
+    pub query_hints_applied: u64,
+    pub query_hints_rejected: u64,
+    pub query_param_suggestions: u64,
+    pub store_errors: u64,
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
 }
@@ -776,6 +1025,11 @@ impl OverviewSnapshot {
             overview.revalidation_failed += route.revalidation_failed;
             overview.stale_responses_served += route.stale_served;
             overview.stale_responses_denied += route.stale_denied;
+            overview.route_hints_applied += route.route_hint_applied;
+            overview.route_hints_rejected += route.route_hint_rejected;
+            overview.query_hints_applied += route.query_hint_applied;
+            overview.query_hints_rejected += route.query_hint_rejected;
+            overview.query_param_suggestions += route.query_param_suggestions;
             if route.state == RouteState::Candidate || route.state == RouteState::ShadowValidated {
                 overview.candidate_routes += 1;
             }
@@ -821,6 +1075,11 @@ pub struct RouteSnapshot {
     pub revalidation_failed: u64,
     pub stale_served: u64,
     pub stale_denied: u64,
+    pub route_hint_applied: u64,
+    pub route_hint_rejected: u64,
+    pub query_hint_applied: u64,
+    pub query_hint_rejected: u64,
+    pub query_param_suggestions: u64,
     pub status_classes: StatusClassCounts,
     pub latency: LatencySnapshot,
     pub repeat_rate: f64,
@@ -883,6 +1142,15 @@ pub enum EventType {
     DiskStoreOpened,
     DiskStoreCorruptEntrySkipped,
     DiskStoreErrorFailOpen,
+}
+
+fn response_fingerprint_hash(fingerprint: &ResponseFingerprint) -> String {
+    format!(
+        "{}:{}:{}",
+        fingerprint.status,
+        fingerprint.header_hash,
+        fingerprint.body_hash.as_deref().unwrap_or("")
+    )
 }
 
 fn state_sort_key(state: RouteState) -> u8 {
@@ -1029,6 +1297,110 @@ mod tests {
         assert_eq!(snapshot.events.len(), 2);
         assert_eq!(snapshot.events[0].message, "event-2");
         assert_eq!(snapshot.events[1].message, "event-3");
+        assert_eq!(snapshot.overview.store_errors, 4);
+    }
+
+    #[test]
+    fn query_stats_track_cardinality_and_suggestion_without_values() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let params = ["a", "b", "c"]
+            .into_iter()
+            .map(|value| QueryParamRecord {
+                name: "utm_source".to_string(),
+                configured_action: "observe".to_string(),
+                value_hash: Some(value.to_string()),
+                sensitive: false,
+            })
+            .collect::<Vec<_>>();
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("stable".to_string()));
+
+        for param in &params {
+            observer.record_query_params(route.clone(), vec![param.clone()]);
+            observer.record_query_fingerprint(route.clone(), std::slice::from_ref(param), &fp);
+        }
+
+        let snapshot = observer.snapshot();
+        let route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.route_id.template == "/api/products")
+            .unwrap();
+        let param = route
+            .query_params
+            .iter()
+            .find(|param| param.name == "utm_source")
+            .unwrap();
+        assert_eq!(param.cardinality, "low");
+        assert!(!param.fingerprint_sensitive);
+        assert_eq!(param.suggestion.as_deref(), Some("candidate_ignore"));
+        assert_eq!(snapshot.overview.query_param_suggestions, 1);
+    }
+
+    #[test]
+    fn query_stats_mark_fingerprint_sensitive_params() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+
+        for (value_hash, body_hash) in [("a", "body-a"), ("b", "body-b")] {
+            let param = QueryParamRecord {
+                name: "variant".to_string(),
+                configured_action: "observe".to_string(),
+                value_hash: Some(value_hash.to_string()),
+                sensitive: false,
+            };
+            observer.record_query_params(route.clone(), vec![param.clone()]);
+            observer.record_query_fingerprint(
+                route.clone(),
+                &[param],
+                &ResponseFingerprint::new(200, "h".to_string(), Some(body_hash.to_string())),
+            );
+        }
+
+        let snapshot = observer.snapshot();
+        let route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.route_id.template == "/api/products")
+            .unwrap();
+        let param = route
+            .query_params
+            .iter()
+            .find(|param| param.name == "variant")
+            .unwrap();
+        assert!(param.fingerprint_sensitive);
+        assert_eq!(param.suggestion, None);
+    }
+
+    #[test]
+    fn query_stats_keep_value_and_fingerprint_samples_bounded() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+        let fp = ResponseFingerprint::new(200, "h".to_string(), Some("stable".to_string()));
+
+        for index in 0..(QUERY_VALUE_SAMPLE_LIMIT + 8) {
+            let param = QueryParamRecord {
+                name: "utm_source".to_string(),
+                configured_action: "observe".to_string(),
+                value_hash: Some(format!("value-{index}")),
+                sensitive: false,
+            };
+            observer.record_query_params(route.clone(), vec![param.clone()]);
+            observer.record_query_fingerprint(route.clone(), &[param], &fp);
+        }
+
+        let inner = observer.inner.lock();
+        let param = inner
+            .routes
+            .get(&route)
+            .unwrap()
+            .query_params
+            .get("utm_source")
+            .unwrap();
+        assert_eq!(param.value_hashes.len(), QUERY_VALUE_SAMPLE_LIMIT);
+        assert_eq!(param.fingerprints_by_value.len(), QUERY_VALUE_SAMPLE_LIMIT);
+        assert_eq!(param.fingerprint_hashes.len(), 1);
+        assert!(param.value_hash_overflow);
     }
 
     #[test]

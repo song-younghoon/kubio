@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -157,9 +158,9 @@ struct MemoryStoreInner {
     evictions: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DiskStore {
-    inner: Mutex<MemoryStoreInner>,
+    inner: Arc<Mutex<MemoryStoreInner>>,
     path: PathBuf,
     max_size: u64,
     max_object_size: u64,
@@ -210,7 +211,7 @@ impl DiskStore {
         }
 
         let store = Self {
-            inner: Mutex::new(inner),
+            inner: Arc::new(Mutex::new(inner)),
             path,
             max_size: config.max_size,
             max_object_size: config.max_object_size,
@@ -224,6 +225,61 @@ impl DiskStore {
             store.evict_until_within_limit(&mut inner);
         }
         Ok(store)
+    }
+
+    fn get_blocking(&self, key: &CacheKeyHash) -> Result<Option<CacheEntry>, StoreError> {
+        let mut inner = self.inner.lock();
+        self.purge_expired_locked(&mut inner);
+        Ok(inner.entries.get(key).cloned())
+    }
+
+    fn put_blocking(&self, key: CacheKeyHash, entry: CacheEntry) -> Result<(), StoreError> {
+        let entry_size = entry.size_bytes();
+        if entry_size > self.max_object_size {
+            return Err(StoreError::ObjectTooLarge {
+                size: entry_size,
+                max: self.max_object_size,
+            });
+        }
+
+        self.write_entry(&key, &entry)?;
+        let mut inner = self.inner.lock();
+        if let Some(previous) = inner.entries.insert(key, entry) {
+            inner.bytes = inner.bytes.saturating_sub(previous.size_bytes());
+        }
+        inner.bytes += entry_size;
+        self.evict_until_within_limit(&mut inner);
+        Ok(())
+    }
+
+    fn purge_blocking(&self, selector: PurgeSelector) -> Result<PurgeResult, StoreError> {
+        let mut inner = self.inner.lock();
+        let keys = match selector {
+            PurgeSelector::All => inner.entries.keys().cloned().collect::<Vec<_>>(),
+            PurgeSelector::Route(route_id) => inner
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.route_id == route_id)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>(),
+            PurgeSelector::Key(key) => vec![key],
+        };
+
+        let mut purged = 0;
+        let mut bytes = 0;
+        for key in keys {
+            if let Some(entry) = inner.entries.remove(&key) {
+                purged += 1;
+                bytes += entry.size_bytes();
+                inner.bytes = inner.bytes.saturating_sub(entry.size_bytes());
+                self.remove_files(&key);
+            }
+        }
+
+        Ok(PurgeResult {
+            purged_entries: purged,
+            purged_bytes: bytes,
+        })
     }
 
     fn entries_dir(&self) -> PathBuf {
@@ -305,58 +361,19 @@ impl DiskStore {
 #[async_trait]
 impl CacheStore for DiskStore {
     async fn get(&self, key: &CacheKeyHash) -> Result<Option<CacheEntry>, StoreError> {
-        let mut inner = self.inner.lock();
-        self.purge_expired_locked(&mut inner);
-        Ok(inner.entries.get(key).cloned())
+        let store = self.clone();
+        let key = key.clone();
+        spawn_disk_task("get", move || store.get_blocking(&key)).await
     }
 
     async fn put(&self, key: CacheKeyHash, entry: CacheEntry) -> Result<(), StoreError> {
-        let entry_size = entry.size_bytes();
-        if entry_size > self.max_object_size {
-            return Err(StoreError::ObjectTooLarge {
-                size: entry_size,
-                max: self.max_object_size,
-            });
-        }
-
-        self.write_entry(&key, &entry)?;
-        let mut inner = self.inner.lock();
-        if let Some(previous) = inner.entries.insert(key, entry) {
-            inner.bytes = inner.bytes.saturating_sub(previous.size_bytes());
-        }
-        inner.bytes += entry_size;
-        self.evict_until_within_limit(&mut inner);
-        Ok(())
+        let store = self.clone();
+        spawn_disk_task("put", move || store.put_blocking(key, entry)).await
     }
 
     async fn purge(&self, selector: PurgeSelector) -> Result<PurgeResult, StoreError> {
-        let mut inner = self.inner.lock();
-        let keys = match selector {
-            PurgeSelector::All => inner.entries.keys().cloned().collect::<Vec<_>>(),
-            PurgeSelector::Route(route_id) => inner
-                .entries
-                .iter()
-                .filter(|(_, entry)| entry.route_id == route_id)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>(),
-            PurgeSelector::Key(key) => vec![key],
-        };
-
-        let mut purged = 0;
-        let mut bytes = 0;
-        for key in keys {
-            if let Some(entry) = inner.entries.remove(&key) {
-                purged += 1;
-                bytes += entry.size_bytes();
-                inner.bytes = inner.bytes.saturating_sub(entry.size_bytes());
-                self.remove_files(&key);
-            }
-        }
-
-        Ok(PurgeResult {
-            purged_entries: purged,
-            purged_bytes: bytes,
-        })
+        let store = self.clone();
+        spawn_disk_task("purge", move || store.purge_blocking(selector)).await
     }
 
     fn stats(&self) -> StoreStats {
@@ -378,6 +395,16 @@ impl CacheStore for DiskStore {
     fn kind(&self) -> StoreKind {
         StoreKind::Disk
     }
+}
+
+async fn spawn_disk_task<T, F>(operation: &'static str, task: F) -> Result<T, StoreError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, StoreError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|err| StoreError::Other(format!("disk store {operation} task failed: {err}")))?
 }
 
 #[derive(Debug, Clone)]

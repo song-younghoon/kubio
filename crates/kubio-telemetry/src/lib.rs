@@ -194,6 +194,78 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
         &[],
         snapshot.overview.stale_responses_denied,
     );
+    line(
+        &mut out,
+        "kubio_route_hints_applied_total",
+        "Total route hints applied.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_route_hints_applied_total",
+        &[],
+        snapshot.overview.route_hints_applied,
+    );
+    line(
+        &mut out,
+        "kubio_route_hints_rejected_total",
+        "Total route hints rejected by safety policy.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_route_hints_rejected_total",
+        &[],
+        snapshot.overview.route_hints_rejected,
+    );
+    line(
+        &mut out,
+        "kubio_query_hints_applied_total",
+        "Total query hints applied to cache keys.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_query_hints_applied_total",
+        &[],
+        snapshot.overview.query_hints_applied,
+    );
+    line(
+        &mut out,
+        "kubio_query_hints_rejected_total",
+        "Total query hints rejected or unused.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_query_hints_rejected_total",
+        &[],
+        snapshot.overview.query_hints_rejected,
+    );
+    line(
+        &mut out,
+        "kubio_query_param_suggestions_total",
+        "Total query parameter ignore suggestions created.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_query_param_suggestions_total",
+        &[],
+        snapshot.overview.query_param_suggestions,
+    );
+    line(
+        &mut out,
+        "kubio_store_errors_total",
+        "Total store errors or corrupt entries observed.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_store_errors_total",
+        &[("store", store_kind)],
+        snapshot.overview.store_errors,
+    );
 
     line(
         &mut out,
@@ -428,6 +500,11 @@ mod tests {
                 revalidation_failed: 0,
                 stale_served: 0,
                 stale_denied: 0,
+                route_hint_applied: 0,
+                route_hint_rejected: 0,
+                query_hint_applied: 0,
+                query_hint_rejected: 0,
+                query_param_suggestions: 0,
                 status_classes: StatusClassCounts::default(),
                 latency: LatencySnapshot {
                     p50_ms: 1.0,
@@ -469,5 +546,8 @@ mod tests {
         assert!(metrics.contains("kubio_request_duration_seconds_bucket"));
         assert!(metrics.contains("kubio_request_duration_seconds_sum"));
         assert!(metrics.contains("kubio_request_duration_seconds_count"));
+        assert!(metrics.contains("kubio_route_hints_applied_total"));
+        assert!(metrics.contains("kubio_query_hints_applied_total"));
+        assert!(metrics.contains("kubio_store_errors_total"));
     }
 }

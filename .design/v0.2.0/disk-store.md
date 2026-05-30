@@ -1,6 +1,6 @@
 # Disk Store
 
-Status: implemented baseline; nonblocking disk I/O follow-up remains
+Status: implemented
 Target release: `v0.2.0`
 
 ## Goals
@@ -143,7 +143,7 @@ Optional:
 
 The proxy hot path must not block the Tokio runtime on disk I/O.
 
-Current implementation note: the baseline uses synchronous filesystem operations behind the store trait. This is acceptable for functional v0.2.0 validation and local/single-node use, but production hardening should move disk I/O behind `spawn_blocking`, an async file API, or a dedicated store worker.
+The implemented disk store wraps `get`, `put`, and `purge` filesystem work in `spawn_blocking`, keeping blocking disk operations off the Tokio core scheduler. Store open/recovery and dashboard stats collection may still perform synchronous filesystem work outside the request hot path.
 
 Options:
 
@@ -173,9 +173,10 @@ Add or extend:
 kubio_cache_entries{store="memory|disk"}
 kubio_cache_bytes{store="memory|disk"}
 kubio_cache_evictions_total{store="memory|disk"}
+kubio_store_errors_total{store="memory|disk"}
 ```
 
-Labels must remain bounded. Eviction reasons and explicit store error counters remain follow-ups; store fail-open behavior is currently visible through bounded events and dashboard/API store stats.
+Labels must remain bounded. Store fail-open behavior is visible through bounded events, dashboard/API store stats, and the store error counter.
 
 ## Acceptance
 
@@ -187,3 +188,4 @@ Labels must remain bounded. Eviction reasons and explicit store error counters r
 - Corrupt single entry does not crash the proxy hot path.
 - Corrupt metadata cannot cause path traversal or arbitrary body file reads.
 - Disk I/O errors return origin responses rather than failed reused responses.
+- Disk get/put/purge operations do not block the Tokio core scheduler.

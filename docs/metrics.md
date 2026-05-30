@@ -24,6 +24,12 @@ Required metrics include:
 - `kubio_revalidation_outcomes_total`
 - `kubio_stale_responses_served_total`
 - `kubio_stale_responses_denied_total`
+- `kubio_route_hints_applied_total`
+- `kubio_route_hints_rejected_total`
+- `kubio_query_hints_applied_total`
+- `kubio_query_hints_rejected_total`
+- `kubio_query_param_suggestions_total`
+- `kubio_store_errors_total`
 - `kubio_request_duration_seconds`
 - `kubio_origin_duration_seconds`
 - `kubio_policy_decisions_total`
@@ -36,4 +42,4 @@ kubio_request_duration_seconds_sum{route_id="GET /api/products"} 0.42
 kubio_request_duration_seconds_count{route_id="GET /api/products"} 20
 ```
 
-Allowed labels are bounded to method, route id, decision, status class, and histogram bucket. Raw paths, query strings, user identifiers, header values, and IP addresses are not used as metric labels.
+Allowed labels are bounded to method, route id, decision, outcome, status class, store kind, and histogram bucket. Raw paths, query strings, user identifiers, header values, disk paths, and IP addresses are not used as metric labels.
