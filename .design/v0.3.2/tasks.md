@@ -144,11 +144,11 @@ Goal: split runtime-heavy code without changing request behavior.
 
 ### M3.1 `kubio-transport`
 
-- [ ] M3.1.1 Move HTTP/1.1 and HTTP/2 serving into `http12.rs`.
-- [ ] M3.1.2 Move origin client builder helpers into `origin.rs`.
-- [ ] M3.1.3 Move TLS loading and ALPN helpers into `tls.rs`.
-- [ ] M3.1.4 Move HTTP/3 server/client/body/config code under `http3/`.
-- [ ] M3.1.5 Re-export default and feature-gated public transport APIs.
+- [x] M3.1.1 Move HTTP/1.1 and HTTP/2 serving into `http12.rs`.
+- [x] M3.1.2 Move origin client builder helpers into `origin.rs`.
+- [x] M3.1.3 Move TLS loading and ALPN helpers into `tls.rs`.
+- [x] M3.1.4 Move HTTP/3 server/client/body/config code under `http3/`.
+- [x] M3.1.5 Re-export default and feature-gated public transport APIs.
 
 Acceptance:
 
