@@ -17,5 +17,6 @@ async fn main() -> Result<()> {
         Command::Explain(args) => commands::explain(args).await,
         Command::Doctor(args) => commands::doctor(args).await,
         Command::Purge(args) => commands::purge(args).await,
+        Command::Update(args) => commands::update(args).await,
     }
 }

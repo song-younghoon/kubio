@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
+    let no_update_check = args.no_update_check;
     let config = Arc::new(load_config_for_serve(&args)?);
     validate_config(&config)?;
 
@@ -58,6 +59,8 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     } else {
         None
     };
+
+    crate::commands::spawn_ambient_update_check(no_update_check);
 
     tokio::select! {
         result = proxy_task => {

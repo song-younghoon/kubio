@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: bash -n install.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
@@ -34,6 +35,37 @@ jobs:
       - run: dist/kubio-x86_64-unknown-linux-gnu-http3-experimental --help
       - run: KUBIO_BIN=dist/kubio-x86_64-unknown-linux-gnu bash examples/bench/release_smoke.sh
       - run: cd dist && sha256sum kubio-x86_64-unknown-linux-gnu kubio-x86_64-unknown-linux-gnu-http3-experimental > SHA256SUMS
+      - run: |
+          bad_dist="$(mktemp -d)"
+          cp dist/kubio-x86_64-unknown-linux-gnu "$bad_dist/"
+          printf '%064d  kubio-x86_64-unknown-linux-gnu\n' 0 > "$bad_dist/SHA256SUMS"
+          install_dir="$(mktemp -d)/bin"
+          if KUBIO_DOWNLOAD_BASE_URL="file://${bad_dist}" KUBIO_INSTALL_DIR="$install_dir" bash install.sh; then
+            echo "installer accepted a bad checksum" >&2
+            exit 1
+          fi
+      - run: |
+          install_dir="$(mktemp -d)/bin"
+          KUBIO_DOWNLOAD_BASE_URL="file://${PWD}/dist" KUBIO_INSTALL_DIR="$install_dir" bash install.sh
+          "$install_dir/kubio" --help
+          "$install_dir/kubio" --version
+          printf '{"tag_name":"v999.0.0","html_url":"https://github.com/%s/releases/tag/v999.0.0","prerelease":false}\n' "${{ github.repository }}" > dist/latest-fixture.json
+          "$install_dir/kubio" update --check --release-api-url "file://${PWD}/dist/latest-fixture.json"
+          version="$("$install_dir/kubio" --version)"
+          set -- $version
+          "$install_dir/kubio" update --version "v$2" --force --download-base-url "file://${PWD}/dist" --install-dir "$install_dir"
+      - run: |
+          install_dir="$(mktemp -d)/bin"
+          KUBIO_DOWNLOAD_BASE_URL="file://${PWD}/dist" KUBIO_INSTALL_DIR="$install_dir" KUBIO_FLAVOR=http3-experimental bash install.sh
+          "$install_dir/kubio" --help
+      - run: |
+          test -f install.sh
+          test -f dist/kubio-x86_64-unknown-linux-gnu
+          test -f dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
+          test -f dist/SHA256SUMS
+          test -f dist/bench/kubio-bench-h1.json
+          test -f dist/bench/kubio-bench-h2.json
+          test -f dist/bench/kubio-bench-h3.json
       - uses: actions/upload-artifact@v4
         with:
           name: kubio-linux-x86_64
@@ -41,6 +73,7 @@ jobs:
             dist/kubio-x86_64-unknown-linux-gnu
             dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
             dist/SHA256SUMS
+            install.sh
             dist/bench/*.json
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -51,6 +84,7 @@ jobs:
             dist/kubio-x86_64-unknown-linux-gnu
             dist/kubio-x86_64-unknown-linux-gnu-http3-experimental
             dist/SHA256SUMS
+            install.sh
             dist/bench/kubio-bench-h1.json
             dist/bench/kubio-bench-h2.json
             dist/bench/kubio-bench-h3.json

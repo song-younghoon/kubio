@@ -16,6 +16,7 @@ pub(crate) enum Command {
     Explain(ExplainArgs),
     Doctor(DoctorArgs),
     Purge(PurgeArgs),
+    Update(UpdateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -39,6 +40,8 @@ pub(crate) struct ServeArgs {
     pub(crate) debug_headers: bool,
     #[arg(long)]
     pub(crate) panic_file: Option<PathBuf>,
+    #[arg(long, help = "disable best-effort latest-version check")]
+    pub(crate) no_update_check: bool,
 }
 
 #[derive(Debug, Args)]
@@ -62,6 +65,8 @@ pub(crate) struct DoctorArgs {
     pub(crate) to: Option<String>,
     #[arg(long, default_value = "http://127.0.0.1:9900")]
     pub(crate) dashboard: String,
+    #[arg(long, help = "disable best-effort latest-version check")]
+    pub(crate) no_update_check: bool,
 }
 
 #[derive(Debug, Args)]
@@ -74,4 +79,24 @@ pub(crate) struct PurgeArgs {
     pub(crate) dashboard: String,
     #[arg(long, env = "KUBIO_ADMIN_TOKEN")]
     pub(crate) admin_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UpdateArgs {
+    #[arg(long, help = "check for a newer release without installing it")]
+    pub(crate) check: bool,
+    #[arg(long, help = "install a specific release tag, such as v0.4.1")]
+    pub(crate) version: Option<String>,
+    #[arg(long, value_parser = ["standard", "http3-experimental"])]
+    pub(crate) flavor: Option<String>,
+    #[arg(long)]
+    pub(crate) install_dir: Option<PathBuf>,
+    #[arg(long, help = "allow updating a development binary under target/")]
+    pub(crate) force: bool,
+    #[arg(long, hide = true, env = "KUBIO_REPO")]
+    pub(crate) repo: Option<String>,
+    #[arg(long, hide = true, env = "KUBIO_RELEASE_API_URL")]
+    pub(crate) release_api_url: Option<String>,
+    #[arg(long, hide = true, env = "KUBIO_DOWNLOAD_BASE_URL")]
+    pub(crate) download_base_url: Option<String>,
 }

@@ -70,6 +70,7 @@ pub(crate) async fn explain(args: ExplainArgs) -> Result<()> {
 }
 
 pub(crate) async fn doctor(args: DoctorArgs) -> Result<()> {
+    let no_update_check = args.no_update_check;
     let mut checks = Vec::new();
 
     let (file_config, effective_config, config_ok) = if let Some(path) = args.config.as_ref() {
@@ -170,6 +171,8 @@ pub(crate) async fn doctor(args: DoctorArgs) -> Result<()> {
     for (name, ok) in &checks {
         println!("{name}: {}", if *ok { "ok" } else { "failed" });
     }
+
+    let _ = crate::commands::run_ambient_update_check(no_update_check).await;
 
     if checks.iter().all(|(_, ok)| *ok) {
         Ok(())

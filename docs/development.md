@@ -51,6 +51,13 @@ cargo test --workspace
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+Release install/update checks:
+
+```bash
+bash -n install.sh
+cargo run -p kubio-cli -- update --check
+```
+
 Local smoke benchmark:
 
 ```bash

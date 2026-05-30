@@ -1,6 +1,32 @@
 # kubio
 
-kubio is an open-source reverse proxy that learns which API responses are safe to reuse. It starts in watch mode, protects risky traffic by default, validates repeated responses through shadow checks, and only reuses conservative GET/HEAD responses in auto mode.
+kubio is a local-first reverse proxy that learns which API responses are safe to
+reuse. It starts in watch mode, protects risky traffic by default, validates
+repeated responses through shadow checks, and only reuses conservative GET/HEAD
+responses after you opt in.
+
+Use kubio when you want a cautious API response reuse layer in front of an
+origin service without a hosted control plane or required telemetry.
+
+## Install
+
+v0.4.0 supports released binaries for Linux x86_64.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | bash
+```
+
+The installer downloads a GitHub Release artifact, verifies it with
+`SHA256SUMS`, installs `kubio`, and prints a `PATH` hint if needed. It does not
+build from source.
+
+Common install variants:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.4.0 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_INSTALL_DIR=/usr/local/bin bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_FLAVOR=http3-experimental bash
+```
 
 ## Quick Start
 
@@ -13,7 +39,7 @@ python -m http.server 3000
 Run kubio in front of it:
 
 ```bash
-cargo run -p kubio-cli -- serve --to http://localhost:3000
+kubio serve --to http://localhost:3000
 ```
 
 Send traffic through kubio:
@@ -22,7 +48,8 @@ Send traffic through kubio:
 curl http://localhost:8080
 ```
 
-kubio starts in Watch mode. It does not reuse responses until you explicitly enable Auto mode.
+kubio starts in Watch mode. It observes traffic but does not reuse responses
+until you choose Shadow or Auto mode.
 
 Dashboard:
 
@@ -47,6 +74,31 @@ kubio explain "GET /api/products"
 kubio doctor --to http://localhost:3000
 kubio purge --all
 kubio purge --all --admin-token "$KUBIO_ADMIN_TOKEN"
+kubio update --check
+kubio update
+```
+
+## Update
+
+Check whether a newer stable release exists:
+
+```bash
+kubio update --check
+```
+
+Install the latest stable release:
+
+```bash
+kubio update
+```
+
+Update checks use public GitHub Release metadata only. They do not send route,
+origin, cache, dashboard, request, or config data. Disable best-effort ambient
+notices with:
+
+```bash
+KUBIO_UPDATE_CHECK=off kubio serve --to http://localhost:3000
+kubio serve --no-update-check --to http://localhost:3000
 ```
 
 ## Safety Defaults
@@ -58,34 +110,62 @@ kubio protects:
 - Unsafe methods such as POST, PUT, PATCH, and DELETE.
 - Responses with `Set-Cookie`.
 - Responses with `Cache-Control: no-store` or `private`.
-- Responses with `Cache-Control: no-cache` unless they can be revalidated with `ETag` or `Last-Modified`.
+- Responses with `Cache-Control: no-cache` unless they can be revalidated with
+  `ETag` or `Last-Modified`.
 - Responses with `Vary: *` or unsupported `Vary` headers.
 - Sensitive-looking routes such as `/me`, `/account`, `/login`, and `/admin`.
 
 When kubio is unsure, it passes through to origin.
 
-Configure `--panic-file /path/to/file` to immediately disable reuse while keeping origin pass-through active.
+Configure `--panic-file /path/to/file` to immediately disable reuse while
+keeping origin pass-through active.
+
+## Development
+
+Run from a checkout:
+
+```bash
+cargo run -p kubio-cli -- serve --to http://localhost:3000
+```
+
+Build the standard binary:
+
+```bash
+cargo build --release -p kubio-cli
+```
+
+Build the HTTP/3 experimental binary:
+
+```bash
+cargo build --release -p kubio-cli --features experimental-http3
+```
 
 ## Project Status
 
-This repository is at v0.3.1 implementation stage for the deferred HTTP/3 runtime. kubio remains local-first and process-local:
+kubio remains local-first and process-local:
 
 - HTTP/1.1 reverse proxy.
-- HTTP/2 downstream support through explicit h2c prior knowledge or TLS ALPN when certificates are configured, with configured stream/window/keepalive/header-list settings applied through Hyper.
-- HTTP/2 upstream support through reqwest, including optional prior knowledge for trusted origins and HTTP/1.1 retry fallback for replayable safe requests.
-- Local dashboard.
-- Prometheus-style metrics.
-- Bounded protocol, fallback, HTTP/3 runtime, Alt-Svc, upstream HTTP/3, in-flight, backpressure, store-operation, and observer event-drop counters in snapshots, dashboard pages, metrics, and CLI output.
-- Configurable metrics path.
-- In-memory observation store.
+- HTTP/2 downstream support through explicit h2c prior knowledge or TLS ALPN.
+- HTTP/2 upstream support through reqwest.
+- Experimental HTTP/3 support through the `experimental-http3` feature and a
+  separate release artifact.
+- Local dashboard and Prometheus-style metrics.
 - In-memory or process-local disk cache store.
 - Conditional revalidation with `ETag` and `Last-Modified`.
-- Bounded stale-if-error when origin headers or route policy explicitly allow it.
-- Route policy hints and query key hints with indexed lookup and precomputed vary names.
+- Bounded stale-if-error when origin headers or route policy explicitly allow
+  it.
+- Route policy hints and query key hints.
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
-- HTTP/3 support is available behind `--features experimental-http3`: downstream QUIC listener, opt-in Alt-Svc for configured authorities, and an HTTPS-origin upstream HTTP/3 experiment with replay-safe fallback.
-- Dedicated local benchmark crate: `cargo run -p kubio-bench -- --protocol h1 --output json`, plus h3 with `--features experimental-http3`.
 
-See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), [.design/v0.3.0](.design/v0.3.0), [.design/v0.3.1](.design/v0.3.1), and [docs/safety-model.md](docs/safety-model.md).
+## Docs
+
+- [Getting Started](docs/getting-started.md)
+- [Deployment](docs/deployment.md)
+- [Install and Update](docs/install-update.md)
+- [Configuration](docs/configuration.md)
+- [Metrics](docs/metrics.md)
+- [Safety Model](docs/safety-model.md)
+- [Roadmap](docs/roadmap.md)
+- [v0.4.0 Design](.design/v0.4.0)

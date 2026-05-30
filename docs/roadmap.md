@@ -59,6 +59,22 @@ v0.3.2:
 - Add source-layout documentation after implementation.
 - Design status: `.design/v0.3.2` records the refactor scope, module map, compatibility rules, test gates, and task plan.
 
+v0.4.0:
+
+- Distribution and usability release, not a proxy feature release.
+- Add one-command Linux x86_64 install through repository-root `install.sh`.
+- Install released binaries from GitHub Releases without requiring Rust, git, or a source checkout.
+- Verify downloaded artifacts with `SHA256SUMS` before installation or update.
+- Support the standard and HTTP/3 experimental release artifacts through explicit flavor selection.
+- Add `kubio update --check` for latest-version discovery.
+- Add `kubio update` for verified self-update of installed release binaries.
+- Rate-limit best-effort update notices and provide opt-out controls.
+- Keep update checks out of stdout and out of the proxy request path.
+- Refresh README so new users can understand, install, run, and update kubio from the repository front page.
+- Document Linux x86_64-only support, install environment variables, checksum trust model, and update behavior.
+- Design status: `.design/v0.4.0` records the installer, artifact, update-check, self-update, test, and release plan.
+- Release notes: `docs/release-notes-v0.4.0.md`.
+
 v0.4+ candidates:
 
 - Redis-compatible shared store.
