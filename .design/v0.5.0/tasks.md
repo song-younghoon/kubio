@@ -1,6 +1,6 @@
 # v0.5.0 Implementation Tasks
 
-Status: implemented
+Status: implemented and verified locally
 Target release: `v0.5.0`
 
 Task states:

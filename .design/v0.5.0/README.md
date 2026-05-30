@@ -1,8 +1,11 @@
 # kubio v0.5.0 Design Index
 
-Status: draft
+Status: implemented
 Source: v0.4.1 runtime baseline and reuse-rate feedback
 Target release: `v0.5.0`
+
+Implementation state: adaptive reuse, path intelligence, observability, docs,
+examples, benchmarks, and release hardening gates are implemented on `main`.
 
 v0.5.0 is a proxy behavior release. v0.4.x made kubio easier to install and
 update; v0.5.0 should make automatic reuse effective enough to matter in real
@@ -106,12 +109,12 @@ help new keys. `/notice/{id}` should become useful after enough safe evidence.
 - Fail open remains the default for internal uncertainty: pass through to
   origin instead of serving stale or unverified cache data.
 
-## Milestone Map
+## Milestone Status
 
-- M0: Design, terminology, and schema lock.
-- M1: Policy taxonomy and route/key eligibility model.
-- M2: Path intelligence and public object classification.
-- M3: Store/reuse flow changes and demotion/purge behavior.
-- M4: Dashboard, metrics, CLI, docs, and examples.
-- M5: Benchmarks, safety tests, and release hardening.
-
+- [x] M0: Design, terminology, and schema lock.
+- [x] M1: Policy taxonomy and route/key eligibility model.
+- [x] M2: Path intelligence and public object classification.
+- [x] M3: Store/reuse flow changes and demotion/purge behavior.
+- [x] M4: Demotion and purge.
+- [x] M5: Dashboard, metrics, CLI, docs, and examples.
+- [x] M6: Benchmarks, safety tests, and release hardening.

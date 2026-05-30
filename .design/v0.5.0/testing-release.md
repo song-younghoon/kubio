@@ -1,7 +1,18 @@
 # Testing and Release Plan
 
-Status: draft
+Status: implemented local gates passing
 Target release: `v0.5.0`
+
+Verification state:
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo check --workspace`
+- [x] `cargo test --workspace`
+- [x] `cargo test --workspace --features experimental-http3`
+- [x] `cargo run -p kubio-bench -- --scenario origin-public-fast-path --requests 4 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario exact-key-adaptive --requests 4 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario public-object-sweep --requests 12 --output json`
+- [x] `cargo run -p kubio-bench -- --scenario protected-user-sweep --requests 6 --output json`
 
 ## Unit Tests
 
@@ -181,4 +192,3 @@ Before release:
 - Confirm `README.md`, `docs/how-kubio-decides.md`, `docs/safety-model.md`,
   `docs/configuration.md`, `docs/metrics.md`, `docs/roadmap.md`, and release
   notes are updated during implementation.
-

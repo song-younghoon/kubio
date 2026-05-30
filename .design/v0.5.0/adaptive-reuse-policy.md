@@ -1,7 +1,11 @@
 # Adaptive Reuse Policy
 
-Status: draft
+Status: implemented
 Target release: `v0.5.0`
+
+Implementation state: adaptive config, hard/evidence split, key validation,
+public-object promotion, origin-public fast path, and mismatch purge behavior
+are implemented on `main`.
 
 ## Goals
 
@@ -276,4 +280,3 @@ origin_public
 revalidated
 stale
 ```
-

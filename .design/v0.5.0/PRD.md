@@ -1,8 +1,12 @@
 # PRD: kubio v0.5.0
 
-Document status: draft
+Document status: implemented
 Target release: `v0.5.0`
 Core philosophy: **raise cache hit rate through evidence, not optimism**
+
+Implementation state: goals and safety constraints are implemented on `main`;
+local workspace, HTTP/3 feature, integration, and adaptive benchmark gates have
+passed.
 
 ## 1. Product Summary
 
@@ -177,4 +181,3 @@ The release is successful when:
   and blocking reasons without raw path IDs.
 - Existing v0.4.1 protocol, store, revalidation, stale-if-error, install, and
   update tests remain green.
-

@@ -1,7 +1,11 @@
 # Path Intelligence
 
-Status: draft
+Status: implemented
 Target release: `v0.5.0`
+
+Implementation state: bounded path observation, sensitive resource
+classification, distinct key tracking, and raw ID non-leakage tests are
+implemented on `main`.
 
 ## Goals
 
@@ -254,4 +258,3 @@ entries across products.
 - Approximate distinct counters beyond bounded hash sets.
 - Cookie variance proof for public endpoints that receive irrelevant cookies.
 - Public/sensitive resource dictionaries configurable by operators.
-

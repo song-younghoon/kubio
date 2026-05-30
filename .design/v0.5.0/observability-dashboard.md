@@ -1,7 +1,10 @@
 # Observability and Dashboard
 
-Status: draft
+Status: implemented
 Target release: `v0.5.0`
+
+Implementation state: route snapshots, dashboard pages, CLI output, debug
+headers, and bounded metrics expose adaptive reuse state on `main`.
 
 ## Goals
 
@@ -212,4 +215,3 @@ not contain:
 - Set-Cookie values;
 - validator values;
 - response body content.
-
