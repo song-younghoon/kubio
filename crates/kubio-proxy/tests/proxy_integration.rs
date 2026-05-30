@@ -1769,7 +1769,7 @@ impl TestHttp3Origin {
     }
 
     fn url(&self) -> Url {
-        Url::parse(&format!("https://localhost:{}", self.addr.port())).unwrap()
+        Url::parse(&format!("https://127.0.0.1:{}", self.addr.port())).unwrap()
     }
 
     async fn shutdown(mut self) {

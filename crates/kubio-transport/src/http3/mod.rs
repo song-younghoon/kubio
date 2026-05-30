@@ -241,19 +241,42 @@ impl Http3OriginClient {
     }
 
     async fn connect(&self, authority: &str, host: &str) -> anyhow::Result<PooledHttp3Connection> {
-        let mut addrs = tokio::net::lookup_host(authority)
+        let addrs = tokio::net::lookup_host(authority)
             .await
-            .with_context(|| format!("resolve HTTP/3 origin {authority}"))?;
-        let addr = addrs
-            .next()
-            .with_context(|| format!("HTTP/3 origin {authority} resolved to no addresses"))?;
-        let connection = self
-            .inner
-            .endpoint
-            .connect(addr, host)
-            .context("connect HTTP/3 origin")?
-            .await
-            .context("complete HTTP/3 origin QUIC handshake")?;
+            .with_context(|| format!("resolve HTTP/3 origin {authority}"))?
+            .collect::<Vec<_>>();
+        if addrs.is_empty() {
+            anyhow::bail!("HTTP/3 origin {authority} resolved to no addresses");
+        }
+
+        let mut last_error = None;
+        let mut connection = None;
+        for addr in addrs {
+            let connecting = match self.inner.endpoint.connect(addr, host) {
+                Ok(connecting) => connecting,
+                Err(err) => {
+                    last_error = Some(anyhow::anyhow!("connect HTTP/3 origin {addr}: {err}"));
+                    continue;
+                }
+            };
+            match connecting.await {
+                Ok(established) => {
+                    connection = Some(established);
+                    break;
+                }
+                Err(err) => {
+                    last_error = Some(anyhow::anyhow!(
+                        "complete HTTP/3 origin QUIC handshake with {addr}: {err}"
+                    ));
+                }
+            }
+        }
+
+        let connection = connection.ok_or_else(|| {
+            last_error.unwrap_or_else(|| {
+                anyhow::anyhow!("HTTP/3 origin {authority} resolved to no usable addresses")
+            })
+        })?;
         let quic = h3_quinn::Connection::new(connection);
         let (mut connection, send) = h3::client::builder()
             .build(quic)
