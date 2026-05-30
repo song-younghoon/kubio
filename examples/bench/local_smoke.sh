@@ -7,6 +7,7 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-19901}"
 REQUESTS="${REQUESTS:-100}"
 MODE="${MODE:-watch}"
 STORAGE_KIND="${STORAGE_KIND:-memory}"
+KUBIO_READY_ATTEMPTS="${KUBIO_READY_ATTEMPTS:-1200}"
 
 origin_dir="$(mktemp -d)"
 cache_dir="$(mktemp -d)"
@@ -86,7 +87,7 @@ cargo run -p kubio-cli -- serve --config "${config_file}" >/tmp/kubio-bench.log 
 kubio_pid="$!"
 
 ready=""
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "${KUBIO_READY_ATTEMPTS}"); do
   if curl -fsS "http://127.0.0.1:${DASHBOARD_PORT}/api/overview" >/dev/null 2>&1; then
     ready="1"
     break
