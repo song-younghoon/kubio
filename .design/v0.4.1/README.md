@@ -1,6 +1,6 @@
 # kubio v0.4.1 Design Index
 
-Status: implemented; release workflow validated.
+Status: released.
 Source: v0.4.0 distribution follow-up
 Target release: `v0.4.1`
 

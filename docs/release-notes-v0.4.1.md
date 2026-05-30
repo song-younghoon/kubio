@@ -1,6 +1,6 @@
 # Release Notes v0.4.1
 
-Status: implemented; release workflow validated.
+Status: released.
 
 ## Highlights
 

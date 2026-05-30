@@ -1,6 +1,6 @@
 # Release Workflow
 
-Status: implemented; release workflow validated.
+Status: released.
 Target release: `v0.4.1`
 
 ## 1. Workflow Shape

@@ -1,6 +1,6 @@
 # v0.4.1 Implementation Tasks
 
-Status: implemented; release workflow validated.
+Status: released.
 Target release: `v0.4.1`
 
 Task states:
@@ -154,7 +154,7 @@ Goal: ship v0.4.1 as a platform-coverage patch release.
 - [x] M6.3 Run full Linux x86_64 release gate.
 - [x] M6.4 Run Linux arm64 cross-build and startup smoke gate.
 - [x] M6.5 Run macOS arm64 native build and smoke gate.
-- [ ] M6.6 Confirm release assets and `SHA256SUMS` after publish.
+- [x] M6.6 Confirm release assets and `SHA256SUMS` after publish.
 - [x] M6.7 Confirm a v0.4.0 Linux x86_64 install can update to v0.4.1.
 
 Acceptance:
