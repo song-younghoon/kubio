@@ -802,8 +802,7 @@ impl Observer {
                 vec![AdaptiveReuseBlocker::ProtectedRoute],
             );
         }
-        if route.shadow_mismatches as u64 > self.adaptive_reuse.public_object.max_shadow_mismatches
-        {
+        if route.shadow_mismatches > self.adaptive_reuse.public_object.max_shadow_mismatches {
             return ReuseEligibility::blocked(
                 ReuseClass::HardProtected,
                 vec![AdaptiveReuseBlocker::ShadowMismatch],
