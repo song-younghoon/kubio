@@ -33,12 +33,12 @@ Acceptance:
 
 ### M0.2 Baseline Characterization
 
-- [ ] M0.2.1 Run default workspace tests.
-- [ ] M0.2.2 Run HTTP/3 feature tests for `kubio-transport`.
-- [ ] M0.2.3 Run HTTP/3 feature tests for `kubio-proxy`.
-- [ ] M0.2.4 Run HTTP/3 feature tests for `kubio-cli`.
-- [ ] M0.2.5 Run HTTP/3 feature tests for `kubio-bench`.
-- [ ] M0.2.6 Record any pre-existing failures.
+- [x] M0.2.1 Run default workspace tests.
+- [x] M0.2.2 Run HTTP/3 feature tests for `kubio-transport`.
+- [x] M0.2.3 Run HTTP/3 feature tests for `kubio-proxy`.
+- [x] M0.2.4 Run HTTP/3 feature tests for `kubio-cli`.
+- [x] M0.2.5 Run HTTP/3 feature tests for `kubio-bench`.
+- [x] M0.2.6 Record any pre-existing failures.
 
 Acceptance:
 
@@ -51,13 +51,13 @@ Goal: split pure or mostly pure crates first.
 
 ### M1.1 `kubio-core`
 
-- [ ] M1.1.1 Move modes and protocol enums into focused modules.
-- [ ] M1.1.2 Move config structs into `config/`.
-- [ ] M1.1.3 Move cache key helpers into `cache_key.rs`.
-- [ ] M1.1.4 Move decision/reason/validator types into `decision.rs`.
-- [ ] M1.1.5 Move normalization, header, hash, metric, and parsing helpers into focused modules.
-- [ ] M1.1.6 Re-export existing public names from `lib.rs`.
-- [ ] M1.1.7 Move unit tests with their target modules.
+- [x] M1.1.1 Move modes and protocol enums into focused modules.
+- [x] M1.1.2 Move config structs into `config/`.
+- [x] M1.1.3 Move cache key helpers into `cache_key.rs`.
+- [x] M1.1.4 Move decision/reason/validator types into `decision.rs`.
+- [x] M1.1.5 Move normalization, header, hash, metric, and parsing helpers into focused modules.
+- [x] M1.1.6 Re-export existing public names from `lib.rs`.
+- [x] M1.1.7 Move unit tests with their target modules.
 
 Acceptance:
 
