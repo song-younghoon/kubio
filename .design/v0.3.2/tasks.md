@@ -197,10 +197,10 @@ Acceptance:
 
 ### M4.2 `kubio-bench`
 
-- [ ] M4.2.1 Move args and report types into `args.rs` and `report.rs`.
-- [ ] M4.2.2 Move managed origin/proxy helpers into `origin.rs` and `proxy.rs`.
-- [ ] M4.2.3 Move protocol clients into `client.rs` and feature-gated `h3.rs`.
-- [ ] M4.2.4 Keep JSON output stable.
+- [x] M4.2.1 Move args and report types into `args.rs` and `report.rs`.
+- [x] M4.2.2 Move managed origin/proxy helpers into `origin.rs` and `proxy.rs`.
+- [x] M4.2.3 Move protocol clients into `client.rs` and feature-gated `h3.rs`.
+- [x] M4.2.4 Keep JSON output stable.
 
 Acceptance:
 
