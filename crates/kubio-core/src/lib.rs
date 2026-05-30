@@ -89,15 +89,71 @@ impl FreshnessProfile {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProtocol {
+    #[default]
+    Http1,
+    Http2,
+    Http3,
+}
+
+impl Display for HttpProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http1 => f.write_str("http1"),
+            Self::Http2 => f.write_str("http2"),
+            Self::Http3 => f.write_str("http3"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginProtocolPreference {
+    #[default]
+    Auto,
+    Http1,
+    Http2,
+    Http3,
+}
+
+impl Display for OriginProtocolPreference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Http1 => f.write_str("http1"),
+            Self::Http2 => f.write_str("http2"),
+            Self::Http3 => f.write_str("http3"),
+        }
+    }
+}
+
+impl FromStr for OriginProtocolPreference {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "http1" | "h1" | "http/1.1" => Ok(Self::Http1),
+            "http2" | "h2" | "http/2" => Ok(Self::Http2),
+            "http3" | "h3" | "http/3" => Ok(Self::Http3),
+            other => Err(format!("unsupported origin protocol preference `{other}`")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectiveConfig {
     pub server: ServerConfig,
     pub origin: Url,
+    pub origin_protocol: OriginProtocolConfig,
     pub mode: Mode,
     pub freshness: FreshnessProfile,
     pub dashboard: DashboardConfig,
     pub policy: PolicyConfig,
     pub storage: StorageConfig,
+    pub performance: PerformanceConfig,
     pub observability: ObservabilityConfig,
     pub routes: Vec<RouteHintConfig>,
     pub debug_headers: bool,
@@ -110,11 +166,13 @@ impl EffectiveConfig {
         RedactedConfig {
             server: self.server.clone(),
             origin: self.origin.to_string(),
+            origin_protocol: self.origin_protocol.clone(),
             mode: self.mode,
             freshness: self.freshness,
             dashboard: self.dashboard.clone(),
             policy: self.policy.clone(),
             storage: self.storage.clone(),
+            performance: self.performance.clone(),
             observability: self.observability.clone(),
             routes: self.routes.clone(),
             debug_headers: self.debug_headers,
@@ -130,8 +188,13 @@ impl Default for EffectiveConfig {
             server: ServerConfig {
                 listen: DEFAULT_PROXY_LISTEN.parse().expect("valid default listen"),
                 origin_timeout: Duration::from_millis(DEFAULT_ORIGIN_TIMEOUT_MS),
+                tls: None,
+                protocols: ServerProtocolConfig::default(),
+                http2: Http2Config::default(),
+                http3: Http3ServerConfig::default(),
             },
             origin: Url::parse("http://localhost:3000").expect("valid default origin"),
+            origin_protocol: OriginProtocolConfig::default(),
             mode: Mode::Watch,
             freshness: FreshnessProfile::Balanced,
             dashboard: DashboardConfig {
@@ -144,6 +207,7 @@ impl Default for EffectiveConfig {
             },
             policy: PolicyConfig::default(),
             storage: StorageConfig::default(),
+            performance: PerformanceConfig::default(),
             observability: ObservabilityConfig::default(),
             routes: Vec::new(),
             debug_headers: false,
@@ -157,11 +221,13 @@ impl Default for EffectiveConfig {
 pub struct RedactedConfig {
     pub server: ServerConfig,
     pub origin: String,
+    pub origin_protocol: OriginProtocolConfig,
     pub mode: Mode,
     pub freshness: FreshnessProfile,
     pub dashboard: DashboardConfig,
     pub policy: PolicyConfig,
     pub storage: StorageConfig,
+    pub performance: PerformanceConfig,
     pub observability: ObservabilityConfig,
     pub routes: Vec<RouteHintConfig>,
     pub debug_headers: bool,
@@ -173,6 +239,100 @@ pub struct RedactedConfig {
 pub struct ServerConfig {
     pub listen: SocketAddr,
     pub origin_timeout: Duration,
+    pub tls: Option<TlsConfig>,
+    pub protocols: ServerProtocolConfig,
+    pub http2: Http2Config,
+    pub http3: Http3ServerConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsConfig {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerProtocolConfig {
+    pub http1: bool,
+    pub http2: bool,
+    pub h2c: bool,
+}
+
+impl Default for ServerProtocolConfig {
+    fn default() -> Self {
+        Self {
+            http1: true,
+            http2: false,
+            h2c: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Http2Config {
+    pub max_concurrent_streams: u32,
+    pub initial_stream_window_size: u32,
+    pub initial_connection_window_size: u32,
+    pub keepalive_interval: Option<Duration>,
+    pub keepalive_timeout: Duration,
+    pub max_header_list_size: u64,
+}
+
+impl Default for Http2Config {
+    fn default() -> Self {
+        Self {
+            max_concurrent_streams: 256,
+            initial_stream_window_size: mib(1) as u32,
+            initial_connection_window_size: (4 * mib(1)) as u32,
+            keepalive_interval: None,
+            keepalive_timeout: Duration::from_secs(10),
+            max_header_list_size: 64 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Http3ServerConfig {
+    pub enabled: bool,
+    pub listen: Option<SocketAddr>,
+    pub advertise: bool,
+    pub alt_svc_ma: Duration,
+    pub max_concurrent_streams: u64,
+    pub max_field_section_size: u64,
+    pub idle_timeout: Duration,
+}
+
+impl Default for Http3ServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: None,
+            advertise: false,
+            alt_svc_ma: Duration::from_secs(3600),
+            max_concurrent_streams: 128,
+            max_field_section_size: 64 * 1024,
+            idle_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginProtocolConfig {
+    pub preferred: OriginProtocolPreference,
+    pub fallback: bool,
+    pub http2_prior_knowledge: bool,
+    pub http3_experimental: bool,
+}
+
+impl Default for OriginProtocolConfig {
+    fn default() -> Self {
+        Self {
+            preferred: OriginProtocolPreference::Auto,
+            fallback: true,
+            http2_prior_knowledge: false,
+            http3_experimental: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +478,31 @@ impl Default for StorageConfig {
             max_object_size: mib(1),
             path: None,
             sync: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceConfig {
+    pub max_in_flight_requests: usize,
+    pub max_buffered_response_size: u64,
+    pub stream_unstoreable_bodies: bool,
+    pub observer_shards: usize,
+    pub async_disk_writes: bool,
+    pub origin_pool_max_idle_per_host: usize,
+    pub origin_pool_idle_timeout: Duration,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight_requests: 4096,
+            max_buffered_response_size: mib(2),
+            stream_unstoreable_bodies: true,
+            observer_shards: 64,
+            async_disk_writes: true,
+            origin_pool_max_idle_per_host: 32,
+            origin_pool_idle_timeout: Duration::from_secs(90),
         }
     }
 }
@@ -627,6 +812,7 @@ pub enum DecisionReason {
     InsufficientShadowValidations,
     LowEstimatedBenefit,
     ObjectTooLarge,
+    HeaderListTooLarge,
     FingerprintUnavailable,
     PanicSwitchActive,
     PolicyError,
@@ -674,6 +860,7 @@ impl DecisionReason {
             }
             Self::LowEstimatedBenefit => "kubio has not seen enough repeat traffic yet.",
             Self::ObjectTooLarge => "The response is larger than the configured object limit.",
+            Self::HeaderListTooLarge => "The request headers exceed the configured protocol limit.",
             Self::FingerprintUnavailable => "kubio could not build a safe response fingerprint.",
             Self::PanicSwitchActive => "The panic switch is active.",
             Self::PolicyError => "A policy error caused kubio to pass through to origin.",

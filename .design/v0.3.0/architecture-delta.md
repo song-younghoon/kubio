@@ -1,11 +1,25 @@
 # Architecture Delta
 
-Status: design draft
+Status: implemented for v0.3.0 protocol/performance slice; HTTP/3 runtime deferred
 Target release: `v0.3.0`
 
 ## Goals
 
 v0.3.0 should add performance improvements and modern HTTP protocol support without replacing the v0.2.0 safety architecture.
+
+Implemented status:
+
+- `kubio-core` includes protocol, TLS, origin protocol, HTTP/2, HTTP/3, and performance config types.
+- `kubio-cli` parses and validates v0.3.0 protocol and performance config.
+- `kubio-proxy` supports HTTP/2 through Axum/Hyper, h2c prior knowledge, TLS ALPN, reqwest upstream HTTP/2, origin pool tuning, and global request backpressure.
+- `kubio-observe`, `kubio-dashboard`, and `kubio-telemetry` expose protocol mix, fallback, in-flight, store operation, store saturation, and observer event-drop signals with bounded labels/events.
+- HTTP/3 config is present and fails clearly when enabled because the default v0.3.0 build does not include the QUIC runtime.
+
+Deferred status:
+
+- Dedicated transport crate or full protocol abstraction.
+- QUIC listener, h3 adapters, Alt-Svc emission, and upstream HTTP/3 runtime.
+- Deeper HTTP/2 flow-control application and observer sharding.
 
 The main architectural change is a transport boundary:
 

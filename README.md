@@ -68,11 +68,14 @@ Configure `--panic-file /path/to/file` to immediately disable reuse while keepin
 
 ## Project Status
 
-This repository is at v0.2.0 implementation stage. v0.2.0 is local-first and process-local:
+This repository is at v0.3.0 implementation stage. kubio remains local-first and process-local:
 
 - HTTP/1.1 reverse proxy.
+- HTTP/2 downstream support through explicit h2c prior knowledge or TLS ALPN when certificates are configured.
+- HTTP/2 upstream support through reqwest, including optional prior knowledge for trusted origins.
 - Local dashboard.
 - Prometheus-style metrics.
+- Bounded protocol, fallback, in-flight, backpressure, store-operation, and observer event-drop counters in snapshots, dashboard pages, metrics, and CLI output.
 - Configurable metrics path.
 - In-memory observation store.
 - In-memory or process-local disk cache store.
@@ -82,7 +85,6 @@ This repository is at v0.2.0 implementation stage. v0.2.0 is local-first and pro
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
-
-v0.3.0 is currently design-stage and focuses on performance, HTTP/2, and guarded HTTP/3 support.
+- HTTP/3 config is parsed and guarded, but the QUIC runtime is not enabled in the default v0.3.0 build.
 
 See [.design/v0.1.0](.design/v0.1.0), [.design/v0.2.0](.design/v0.2.0), [.design/v0.3.0](.design/v0.3.0), and [docs/safety-model.md](docs/safety-model.md).

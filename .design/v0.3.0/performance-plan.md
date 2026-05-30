@@ -1,11 +1,30 @@
 # Performance Plan
 
-Status: design draft
+Status: partially implemented; full benchmark budgets deferred
 Target release: `v0.3.0`
 
 ## Goals
 
 v0.3.0 should make kubio's performance measurable and improve the proxy hot path without weakening safe reuse.
+
+Implemented status:
+
+- Global in-flight request limiter with bounded 503 rejection on saturation.
+- Configurable origin pool idle limits and idle timeout.
+- Configurable bounded response buffering limit.
+- Early streaming path for unstoreable responses where configured.
+- Large protected and oversized storeable response regression tests.
+- Store operation counters/latency totals and bounded store saturation events.
+- In-flight request gauges and bounded observer event-drop counters.
+- Local benchmark smoke script emits JSON latency, cache, and protocol counters and runs in CI.
+- HTTP/2 config surface for compatibility and future tuning.
+- HTTP/2 header-list limit enforcement at the proxy request boundary.
+
+Deferred status:
+
+- Dedicated benchmark crate and committed release budgets.
+- Observer sharding and deeper contention reduction.
+- Per-connection HTTP/2 flow-control tuning.
 
 Performance work must answer three questions:
 

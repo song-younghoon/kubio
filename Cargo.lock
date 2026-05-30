@@ -435,6 +435,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "171fefbc92fe4a4de27e0698d6a5b392d6a0e333506bc49133760b3bcf948733"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -501,6 +520,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -696,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -718,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "http",
@@ -730,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-dashboard"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -747,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-observe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kubio-core",
  "parking_lot",
@@ -756,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-policy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "http",
  "kubio-core",
@@ -765,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-proxy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -780,13 +800,14 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
 ]
 
 [[package]]
 name = "kubio-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -801,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-telemetry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kubio-core",
  "kubio-observe",
@@ -1154,6 +1175,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",

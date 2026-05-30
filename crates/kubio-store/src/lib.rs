@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[async_trait]
@@ -73,61 +73,106 @@ impl MemoryStore {
             }
         }
     }
+
+    fn record_operation(
+        &self,
+        operation: StoreOperation,
+        latency: Duration,
+        success: bool,
+        saturated: bool,
+    ) {
+        let mut inner = self.inner.lock();
+        inner
+            .operation_stats
+            .record(operation, latency, success, saturated);
+    }
 }
 
 #[async_trait]
 impl CacheStore for MemoryStore {
     async fn get(&self, key: &CacheKeyHash) -> Result<Option<CacheEntry>, StoreError> {
-        let mut inner = self.inner.lock();
-        self.purge_expired_locked(&mut inner);
-        Ok(inner.entries.get(key).cloned())
+        let started = Instant::now();
+        let result = {
+            let mut inner = self.inner.lock();
+            self.purge_expired_locked(&mut inner);
+            Ok(inner.entries.get(key).cloned())
+        };
+        self.record_operation(
+            StoreOperation::Get,
+            started.elapsed(),
+            result.is_ok(),
+            false,
+        );
+        result
     }
 
     async fn put(&self, key: CacheKeyHash, entry: CacheEntry) -> Result<(), StoreError> {
+        let started = Instant::now();
         let entry_size = entry.size_bytes();
         if entry_size > self.max_object_size {
-            return Err(StoreError::ObjectTooLarge {
+            let result = Err(StoreError::ObjectTooLarge {
                 size: entry_size,
                 max: self.max_object_size,
             });
+            self.record_operation(StoreOperation::Put, started.elapsed(), false, true);
+            return result;
         }
 
-        let mut inner = self.inner.lock();
-        if let Some(previous) = inner.entries.insert(key, entry) {
-            inner.bytes = inner.bytes.saturating_sub(previous.size_bytes());
-        }
-        inner.bytes += entry_size;
-        self.evict_until_within_limit(&mut inner);
-        Ok(())
+        let result = {
+            let mut inner = self.inner.lock();
+            if let Some(previous) = inner.entries.insert(key, entry) {
+                inner.bytes = inner.bytes.saturating_sub(previous.size_bytes());
+            }
+            inner.bytes += entry_size;
+            self.evict_until_within_limit(&mut inner);
+            Ok(())
+        };
+        self.record_operation(
+            StoreOperation::Put,
+            started.elapsed(),
+            result.is_ok(),
+            false,
+        );
+        result
     }
 
     async fn purge(&self, selector: PurgeSelector) -> Result<PurgeResult, StoreError> {
-        let mut inner = self.inner.lock();
-        let keys = match selector {
-            PurgeSelector::All => inner.entries.keys().cloned().collect::<Vec<_>>(),
-            PurgeSelector::Route(route_id) => inner
-                .entries
-                .iter()
-                .filter(|(_, entry)| entry.route_id == route_id)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>(),
-            PurgeSelector::Key(key) => vec![key],
-        };
+        let started = Instant::now();
+        let result = {
+            let mut inner = self.inner.lock();
+            let keys = match selector {
+                PurgeSelector::All => inner.entries.keys().cloned().collect::<Vec<_>>(),
+                PurgeSelector::Route(route_id) => inner
+                    .entries
+                    .iter()
+                    .filter(|(_, entry)| entry.route_id == route_id)
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>(),
+                PurgeSelector::Key(key) => vec![key],
+            };
 
-        let mut purged = 0;
-        let mut bytes = 0;
-        for key in keys {
-            if let Some(entry) = inner.entries.remove(&key) {
-                purged += 1;
-                bytes += entry.size_bytes();
-                inner.bytes = inner.bytes.saturating_sub(entry.size_bytes());
+            let mut purged = 0;
+            let mut bytes = 0;
+            for key in keys {
+                if let Some(entry) = inner.entries.remove(&key) {
+                    purged += 1;
+                    bytes += entry.size_bytes();
+                    inner.bytes = inner.bytes.saturating_sub(entry.size_bytes());
+                }
             }
-        }
 
-        Ok(PurgeResult {
-            purged_entries: purged,
-            purged_bytes: bytes,
-        })
+            Ok(PurgeResult {
+                purged_entries: purged,
+                purged_bytes: bytes,
+            })
+        };
+        self.record_operation(
+            StoreOperation::Purge,
+            started.elapsed(),
+            result.is_ok(),
+            false,
+        );
+        result
     }
 
     fn stats(&self) -> StoreStats {
@@ -143,6 +188,7 @@ impl CacheStore for MemoryStore {
             disk_path: None,
             startup_recovered_entries: None,
             corrupt_entries_skipped: None,
+            operations: inner.operation_stats.clone(),
         }
     }
 
@@ -156,6 +202,7 @@ struct MemoryStoreInner {
     entries: HashMap<CacheKeyHash, CacheEntry>,
     bytes: u64,
     evictions: u64,
+    operation_stats: StoreOperationMetrics,
 }
 
 #[derive(Debug, Clone)]
@@ -356,24 +403,62 @@ impl DiskStore {
             .map_err(|err| StoreError::Other(format!("commit disk metadata: {err}")))?;
         Ok(())
     }
+
+    fn record_operation(
+        &self,
+        operation: StoreOperation,
+        latency: Duration,
+        success: bool,
+        saturated: bool,
+    ) {
+        let mut inner = self.inner.lock();
+        inner
+            .operation_stats
+            .record(operation, latency, success, saturated);
+    }
 }
 
 #[async_trait]
 impl CacheStore for DiskStore {
     async fn get(&self, key: &CacheKeyHash) -> Result<Option<CacheEntry>, StoreError> {
+        let started = Instant::now();
         let store = self.clone();
         let key = key.clone();
-        spawn_disk_task("get", move || store.get_blocking(&key)).await
+        let result = spawn_disk_task("get", move || store.get_blocking(&key)).await;
+        self.record_operation(
+            StoreOperation::Get,
+            started.elapsed(),
+            result.is_ok(),
+            false,
+        );
+        result
     }
 
     async fn put(&self, key: CacheKeyHash, entry: CacheEntry) -> Result<(), StoreError> {
+        let started = Instant::now();
         let store = self.clone();
-        spawn_disk_task("put", move || store.put_blocking(key, entry)).await
+        let result = spawn_disk_task("put", move || store.put_blocking(key, entry)).await;
+        let saturated = matches!(result, Err(StoreError::ObjectTooLarge { .. }));
+        self.record_operation(
+            StoreOperation::Put,
+            started.elapsed(),
+            result.is_ok(),
+            saturated,
+        );
+        result
     }
 
     async fn purge(&self, selector: PurgeSelector) -> Result<PurgeResult, StoreError> {
+        let started = Instant::now();
         let store = self.clone();
-        spawn_disk_task("purge", move || store.purge_blocking(selector)).await
+        let result = spawn_disk_task("purge", move || store.purge_blocking(selector)).await;
+        self.record_operation(
+            StoreOperation::Purge,
+            started.elapsed(),
+            result.is_ok(),
+            false,
+        );
+        result
     }
 
     fn stats(&self) -> StoreStats {
@@ -389,6 +474,7 @@ impl CacheStore for DiskStore {
             disk_path: Some(self.path.display().to_string()),
             startup_recovered_entries: Some(self.startup_recovered_entries),
             corrupt_entries_skipped: Some(self.corrupt_entries_skipped),
+            operations: inner.operation_stats.clone(),
         }
     }
 
@@ -475,6 +561,61 @@ pub struct StoreStats {
     pub disk_path: Option<String>,
     pub startup_recovered_entries: Option<u64>,
     pub corrupt_entries_skipped: Option<u64>,
+    pub operations: StoreOperationMetrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreOperation {
+    Get,
+    Put,
+    Purge,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreOperationMetrics {
+    pub get: StoreOperationStats,
+    pub put: StoreOperationStats,
+    pub purge: StoreOperationStats,
+    pub saturation_events: u64,
+}
+
+impl StoreOperationMetrics {
+    fn record(
+        &mut self,
+        operation: StoreOperation,
+        latency: Duration,
+        success: bool,
+        saturated: bool,
+    ) {
+        let stats = match operation {
+            StoreOperation::Get => &mut self.get,
+            StoreOperation::Put => &mut self.put,
+            StoreOperation::Purge => &mut self.purge,
+        };
+        stats.record(latency, success);
+        if saturated {
+            self.saturation_events += 1;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreOperationStats {
+    pub count: u64,
+    pub error_count: u64,
+    pub total_latency_us: u64,
+}
+
+impl StoreOperationStats {
+    fn record(&mut self, latency: Duration, success: bool) {
+        self.count += 1;
+        if !success {
+            self.error_count += 1;
+        }
+        self.total_latency_us = self
+            .total_latency_us
+            .saturating_add(latency.as_micros().min(u128::from(u64::MAX)) as u64);
+    }
 }
 
 #[derive(Debug, Error)]
@@ -762,6 +903,28 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::ObjectTooLarge { .. }));
+        let stats = store.stats();
+        assert_eq!(stats.operations.put.count, 1);
+        assert_eq!(stats.operations.put.error_count, 1);
+        assert_eq!(stats.operations.saturation_events, 1);
+    }
+
+    #[tokio::test]
+    async fn store_operation_stats_are_recorded() {
+        let store = MemoryStore::new(&StorageConfig::default());
+        let key = CacheKeyHash("a".to_string());
+
+        store
+            .put(key.clone(), entry("body", "/a", Duration::from_secs(60)))
+            .await
+            .unwrap();
+        assert!(store.get(&key).await.unwrap().is_some());
+        store.purge(PurgeSelector::Key(key)).await.unwrap();
+
+        let stats = store.stats();
+        assert_eq!(stats.operations.put.count, 1);
+        assert_eq!(stats.operations.get.count, 1);
+        assert_eq!(stats.operations.purge.count, 1);
     }
 
     #[tokio::test]

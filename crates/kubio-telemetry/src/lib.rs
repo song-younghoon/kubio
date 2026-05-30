@@ -266,6 +266,177 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
         &[("store", store_kind)],
         snapshot.overview.store_errors,
     );
+    line(
+        &mut out,
+        "kubio_observer_events_dropped_total",
+        "Observation events dropped because the bounded event buffer was full.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_observer_events_dropped_total",
+        &[],
+        snapshot.overview.dropped_events,
+    );
+    line(
+        &mut out,
+        "kubio_store_operations_total",
+        "Store operations by operation and result.",
+        "counter",
+    );
+    store_operation_metrics(
+        &mut out,
+        store_kind,
+        "get",
+        store.operations.get.count,
+        store.operations.get.error_count,
+    );
+    store_operation_metrics(
+        &mut out,
+        store_kind,
+        "put",
+        store.operations.put.count,
+        store.operations.put.error_count,
+    );
+    store_operation_metrics(
+        &mut out,
+        store_kind,
+        "purge",
+        store.operations.purge.count,
+        store.operations.purge.error_count,
+    );
+    line(
+        &mut out,
+        "kubio_store_operation_duration_seconds_sum",
+        "Total store operation duration by operation.",
+        "counter",
+    );
+    store_operation_latency(
+        &mut out,
+        store_kind,
+        "get",
+        store.operations.get.total_latency_us,
+    );
+    store_operation_latency(
+        &mut out,
+        store_kind,
+        "put",
+        store.operations.put.total_latency_us,
+    );
+    store_operation_latency(
+        &mut out,
+        store_kind,
+        "purge",
+        store.operations.purge.total_latency_us,
+    );
+    line(
+        &mut out,
+        "kubio_store_saturation_events_total",
+        "Store operations rejected because configured store limits were reached.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_store_saturation_events_total",
+        &[("store", store_kind)],
+        store.operations.saturation_events,
+    );
+    line(
+        &mut out,
+        "kubio_downstream_requests_total",
+        "Requests by downstream protocol.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_downstream_requests_total",
+        &[("protocol", "http1")],
+        snapshot.overview.downstream_http1_requests,
+    );
+    metric(
+        &mut out,
+        "kubio_downstream_requests_total",
+        &[("protocol", "http2")],
+        snapshot.overview.downstream_http2_requests,
+    );
+    metric(
+        &mut out,
+        "kubio_downstream_requests_total",
+        &[("protocol", "http3")],
+        snapshot.overview.downstream_http3_requests,
+    );
+    line(
+        &mut out,
+        "kubio_upstream_requests_total",
+        "Origin requests by upstream protocol.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_requests_total",
+        &[("protocol", "http1")],
+        snapshot.overview.upstream_http1_requests,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_requests_total",
+        &[("protocol", "http2")],
+        snapshot.overview.upstream_http2_requests,
+    );
+    metric(
+        &mut out,
+        "kubio_upstream_requests_total",
+        &[("protocol", "http3")],
+        snapshot.overview.upstream_http3_requests,
+    );
+    line(
+        &mut out,
+        "kubio_backpressure_rejections_total",
+        "Requests rejected because kubio reached a configured concurrency limit.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_backpressure_rejections_total",
+        &[],
+        snapshot.overview.backpressure_rejections,
+    );
+    line(
+        &mut out,
+        "kubio_in_flight_requests",
+        "Current in-flight proxy requests.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_in_flight_requests",
+        &[],
+        snapshot.overview.in_flight_requests,
+    );
+    line(
+        &mut out,
+        "kubio_max_in_flight_requests",
+        "Configured in-flight request limit.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_max_in_flight_requests",
+        &[],
+        snapshot.overview.max_in_flight_requests,
+    );
+    line(
+        &mut out,
+        "kubio_protocol_fallbacks_total",
+        "Origin protocol fallbacks observed.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_protocol_fallbacks_total",
+        &[],
+        snapshot.overview.protocol_fallbacks,
+    );
 
     line(
         &mut out,
@@ -383,6 +554,48 @@ fn store_kind_label(kind: StoreKind) -> &'static str {
     }
 }
 
+fn store_operation_metrics(
+    out: &mut String,
+    store_kind: &str,
+    operation: &str,
+    count: u64,
+    error_count: u64,
+) {
+    metric(
+        out,
+        "kubio_store_operations_total",
+        &[
+            ("store", store_kind),
+            ("operation", operation),
+            ("result", "ok"),
+        ],
+        count.saturating_sub(error_count),
+    );
+    metric(
+        out,
+        "kubio_store_operations_total",
+        &[
+            ("store", store_kind),
+            ("operation", operation),
+            ("result", "error"),
+        ],
+        error_count,
+    );
+}
+
+fn store_operation_latency(
+    out: &mut String,
+    store_kind: &str,
+    operation: &str,
+    total_latency_us: u64,
+) {
+    out.push_str("kubio_store_operation_duration_seconds_sum");
+    push_labels(out, &[("store", store_kind), ("operation", operation)]);
+    out.push(' ');
+    out.push_str(&format!("{:.6}", total_latency_us as f64 / 1_000_000.0));
+    out.push('\n');
+}
+
 pub fn sanitize_label(value: &str) -> String {
     value
         .chars()
@@ -471,8 +684,8 @@ mod tests {
     use kubio_core::{
         LatencyBucketSnapshot, LatencySnapshot, RouteId, RouteState, StatusClassCounts,
     };
-    use kubio_observe::{ObserverSnapshot, OverviewSnapshot, RouteSnapshot};
-    use kubio_store::StoreStats;
+    use kubio_observe::{ObserverSnapshot, OverviewSnapshot, ProtocolCounts, RouteSnapshot};
+    use kubio_store::{StoreOperationMetrics, StoreStats};
 
     #[test]
     fn sanitizer_removes_metric_breakouts() {
@@ -505,6 +718,8 @@ mod tests {
                 query_hint_applied: 0,
                 query_hint_rejected: 0,
                 query_param_suggestions: 0,
+                downstream_protocols: ProtocolCounts::default(),
+                upstream_protocols: ProtocolCounts::default(),
                 status_classes: StatusClassCounts::default(),
                 latency: LatencySnapshot {
                     p50_ms: 1.0,
@@ -540,6 +755,7 @@ mod tests {
                 disk_path: None,
                 startup_recovered_entries: None,
                 corrupt_entries_skipped: None,
+                operations: StoreOperationMetrics::default(),
             },
         );
 
@@ -549,5 +765,14 @@ mod tests {
         assert!(metrics.contains("kubio_route_hints_applied_total"));
         assert!(metrics.contains("kubio_query_hints_applied_total"));
         assert!(metrics.contains("kubio_store_errors_total"));
+        assert!(metrics.contains("kubio_store_operations_total"));
+        assert!(metrics.contains("kubio_store_operation_duration_seconds_sum"));
+        assert!(metrics.contains("kubio_store_saturation_events_total"));
+        assert!(metrics.contains("kubio_downstream_requests_total"));
+        assert!(metrics.contains("kubio_upstream_requests_total"));
+        assert!(metrics.contains("kubio_backpressure_rejections_total"));
+        assert!(metrics.contains("kubio_in_flight_requests"));
+        assert!(metrics.contains("kubio_protocol_fallbacks_total"));
+        assert!(metrics.contains("kubio_observer_events_dropped_total"));
     }
 }

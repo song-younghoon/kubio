@@ -1,11 +1,24 @@
 # HTTP/3 Support
 
-Status: design draft
+Status: guarded config implemented; QUIC runtime deferred
 Target release: `v0.3.0`
 
 ## Goals
 
 HTTP/3 support should make kubio usable over QUIC while keeping the feature guarded and measurable.
+
+Implemented status:
+
+- HTTP/3 server and origin config fields are parsed.
+- Invalid combinations are rejected before listeners bind.
+- Enabling downstream HTTP/3 or upstream HTTP/3 in the default v0.3.0 build fails with a clear operator-facing error.
+- Example config documents the guarded behavior.
+
+Deferred status:
+
+- QUIC listener, h3 request adapter, h3 response writer, and Alt-Svc emission.
+- Upstream HTTP/3 client path and fallback runtime.
+- HTTP/3 safety, interoperability, and metrics tests.
 
 v0.3.0 should provide:
 

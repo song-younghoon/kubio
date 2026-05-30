@@ -1,0 +1,27 @@
+version: 1
+
+server:
+  listen: "0.0.0.0:8443"
+  tls:
+    cert: "certs/kubio.pem"
+    key: "certs/kubio-key.pem"
+  protocols:
+    http1: true
+    http2: true
+    h2c: false
+  http3:
+    enabled: false
+    advertise: false
+    alt_svc_ma: "1h"
+    max_concurrent_streams: 128
+    max_field_section_size: "64KiB"
+    idle_timeout: "30s"
+
+origin: "https://api.example.com"
+origin_protocol:
+  preferred: "auto"
+  fallback: true
+  http2_prior_knowledge: false
+  http3_experimental: false
+
+mode: "watch"

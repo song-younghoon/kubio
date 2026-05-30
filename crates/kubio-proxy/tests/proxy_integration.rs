@@ -5,8 +5,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use kubio_core::{
-    DecisionReason, EffectiveConfig, Mode, RouteHintConfig, RouteMatchConfig, RouteQueryConfig,
-    RouteSafetyConfig, RouteState,
+    DecisionReason, EffectiveConfig, Mode, OriginProtocolPreference, RouteHintConfig,
+    RouteMatchConfig, RouteQueryConfig, RouteSafetyConfig, RouteState,
 };
 use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
@@ -37,6 +37,185 @@ async fn watch_mode_forwards_and_observes() {
     let snapshot = runtime.observer.snapshot();
     assert_eq!(snapshot.overview.origin_requests, 1);
     assert_eq!(snapshot.overview.reused_responses, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h2c_prior_knowledge_forwards_and_observes() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c(origin.url(), Mode::Watch, 100, 5, 20).await;
+    let client = h2_client();
+
+    let response = client
+        .get(format!("{}/stable", runtime.proxy_url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert_eq!(response.text().await.unwrap(), "stable");
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 1);
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h2c_auto_mode_reuses_after_shadow_confidence() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c(origin.url(), Mode::Auto, 2, 2, 1).await;
+    let client = h2_client();
+
+    for _ in 0..3 {
+        let response = client
+            .get(format!("{}/stable", runtime.proxy_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.version(), reqwest::Version::HTTP_2);
+        assert_eq!(response.text().await.unwrap(), "stable");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.downstream_http2_requests, 3);
+    assert_eq!(snapshot.overview.origin_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    assert_eq!(runtime.store.stats().entries, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h2c_authorization_and_cookie_are_protected() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c(origin.url(), Mode::Auto, 1, 1, 1).await;
+    let client = h2_client();
+
+    let auth = client
+        .get(format!("{}/auth", runtime.proxy_url()))
+        .header("authorization", "Bearer secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(auth.version(), reqwest::Version::HTTP_2);
+    assert!(auth.status().is_success());
+
+    let cookie = client
+        .get(format!("{}/cookie", runtime.proxy_url()))
+        .header("cookie", "session=secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cookie.version(), reqwest::Version::HTTP_2);
+    assert!(cookie.status().is_success());
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.protected_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h2c_unsafe_response_headers_are_not_stored() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c(origin.url(), Mode::Auto, 1, 1, 1).await;
+    let client = h2_client();
+
+    for path in ["set-cookie", "nostore", "private"] {
+        let response = client
+            .get(format!("{}/{}", runtime.proxy_url(), path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.version(), reqwest::Version::HTTP_2);
+        assert!(response.status().is_success());
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    assert_eq!(runtime.store.stats().entries, 0);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h2c_stale_etag_entry_revalidates_with_304() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c(origin.url(), Mode::Auto, 2, 2, 1).await;
+    let client = h2_client();
+
+    for _ in 0..3 {
+        let response = client
+            .get(format!("{}/etag", runtime.proxy_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.version(), reqwest::Version::HTTP_2);
+        assert_eq!(response.text().await.unwrap(), "etag-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.revalidation_not_modified, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h2c_stale_if_error_serves_verified_stale_response() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c(origin.url(), Mode::Auto, 2, 2, 1).await;
+    let client = h2_client();
+
+    for _ in 0..3 {
+        let response = client
+            .get(format!("{}/stale-error", runtime.proxy_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.version(), reqwest::Version::HTTP_2);
+        assert_eq!(response.text().await.unwrap(), "stale-error-body");
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.stale_responses_served, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h1_and_h2c_share_safe_cache_keys() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c(origin.url(), Mode::Auto, 2, 2, 1).await;
+
+    for _ in 0..2 {
+        let body = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "stable");
+    }
+
+    let response = h2_client()
+        .get(format!("{}/stable", runtime.proxy_url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert_eq!(response.text().await.unwrap(), "stable");
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.downstream_http1_requests, 2);
+    assert_eq!(snapshot.overview.downstream_http2_requests, 1);
+    assert_eq!(snapshot.overview.origin_requests, 2);
+    assert_eq!(snapshot.overview.reused_responses, 1);
     runtime.shutdown().await;
     origin.shutdown().await;
 }
@@ -292,6 +471,160 @@ async fn origin_timeout_returns_gateway_timeout() {
         .events
         .iter()
         .any(|event| event.event_type == EventType::OriginRequestFailed));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn backpressure_limit_rejects_new_requests() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_with_max_in_flight(origin.url(), Mode::Watch, 1).await;
+    let client = reqwest::Client::new();
+    let slow_url = format!("{}/slow", runtime.proxy_url());
+
+    let first_client = client.clone();
+    let first_url = slow_url.clone();
+    let first = tokio::spawn(async move { first_client.get(first_url).send().await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let rejected = client.get(slow_url).send().await.unwrap();
+    assert_eq!(rejected.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(first.await.unwrap().status().is_success());
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.backpressure_rejections, 1);
+    assert_eq!(snapshot.overview.max_in_flight_requests, 1);
+    assert_eq!(snapshot.overview.in_flight_requests, 0);
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::BackpressureRejected));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn h2c_header_list_limit_rejects_oversized_headers() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_h2c_with_header_limit(origin.url(), 32).await;
+    let client = h2_client();
+
+    let response = client
+        .get(format!("{}/stable", runtime.proxy_url()))
+        .header("x-large-header", "x".repeat(128))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+    );
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 0);
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::RequestHeaderLimitExceeded));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn large_protected_response_is_not_stored() {
+    let origin = TestOrigin::start().await;
+    let runtime =
+        TestRuntime::start_with_small_response_limits(origin.url(), "/large-private").await;
+
+    let body = reqwest::get(format!("{}/large-private", runtime.proxy_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert_eq!(body.len(), LARGE_BODY_SIZE);
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.protected_requests, 1);
+    assert_eq!(runtime.store.stats().entries, 0);
+    assert!(!snapshot
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::StoreSaturated));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn oversized_storeable_response_is_not_partially_stored() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_with_small_response_limits(origin.url(), "/large-cache").await;
+
+    for _ in 0..2 {
+        let body = reqwest::get(format!("{}/large-cache", runtime.proxy_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body.len(), LARGE_BODY_SIZE);
+    }
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.reused_responses, 0);
+    assert_eq!(runtime.store.stats().entries, 0);
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::StoreSaturated));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn origin_protocol_fallback_is_recorded_when_preference_is_not_met() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_with_origin_protocol(
+        origin.url(),
+        OriginProtocolPreference::Http3,
+        true,
+    )
+    .await;
+
+    let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.protocol_fallbacks, 1);
+    assert_eq!(snapshot.overview.upstream_http1_requests, 1);
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::ProtocolFallback));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn required_origin_protocol_mismatch_fails_closed() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start_with_origin_protocol(
+        origin.url(),
+        OriginProtocolPreference::Http3,
+        false,
+    )
+    .await;
+
+    let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 1);
+    assert_eq!(snapshot.overview.protocol_fallbacks, 0);
     runtime.shutdown().await;
     origin.shutdown().await;
 }
@@ -711,6 +1044,15 @@ async fn query_intelligence_marks_fingerprint_sensitive_params() {
     origin.shutdown().await;
 }
 
+fn h2_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap()
+}
+
+const LARGE_BODY_SIZE: usize = 8192;
+
 struct TestOrigin {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
@@ -740,6 +1082,8 @@ impl TestOrigin {
             .route("/query-sensitive", get(query_sensitive))
             .route("/vary-star", get(vary_star))
             .route("/unstable", get(unstable))
+            .route("/large-private", get(large_private))
+            .route("/large-cache", get(large_cache))
             .route("/slow", get(slow))
             .route("/echo", post(echo))
             .with_state(hits);
@@ -901,6 +1245,17 @@ async fn unstable(State(hits): State<Arc<AtomicUsize>>) -> String {
     format!("unstable-{count}")
 }
 
+async fn large_private() -> impl IntoResponse {
+    ([("cache-control", "private")], "x".repeat(LARGE_BODY_SIZE))
+}
+
+async fn large_cache() -> impl IntoResponse {
+    (
+        [("cache-control", "public, max-age=60")],
+        "x".repeat(LARGE_BODY_SIZE),
+    )
+}
+
 async fn slow() -> impl IntoResponse {
     tokio::time::sleep(Duration::from_millis(200)).await;
     "slow"
@@ -960,6 +1315,53 @@ impl TestRuntime {
         Self::start_with_options(origin, mode, 100, 5, 20, None, Some(origin_timeout)).await
     }
 
+    async fn start_with_max_in_flight(
+        origin: Url,
+        mode: Mode,
+        max_in_flight_requests: usize,
+    ) -> Self {
+        let addr = unused_addr().await;
+        let defaults = EffectiveConfig::default();
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        let mut performance = defaults.performance.clone();
+        performance.max_in_flight_requests = max_in_flight_requests;
+        let config = Arc::new(EffectiveConfig {
+            origin,
+            mode,
+            server: server_config,
+            performance,
+            ..defaults
+        });
+        let observer = Arc::new(Observer::new(
+            100,
+            100,
+            100,
+            config.policy.min_route_samples,
+            config.policy.min_key_repeats,
+            config.policy.min_shadow_validations,
+        ));
+        let store = Arc::new(MemoryStore::new(&config.storage));
+        let policy = Arc::new(PolicyEngine::new(&config));
+        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = run_proxy(state, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        let runtime = Self {
+            addr,
+            observer,
+            store,
+            shutdown: Some(tx),
+        };
+        runtime.wait_ready().await;
+        runtime
+    }
+
     async fn start_with_routes(
         origin: Url,
         mode: Mode,
@@ -978,6 +1380,123 @@ impl TestRuntime {
             None,
             routes,
         )
+        .await
+    }
+
+    async fn start_h2c(
+        origin: Url,
+        mode: Mode,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+    ) -> Self {
+        let addr = unused_addr().await;
+        let defaults = EffectiveConfig::default();
+        let mut policy_config = defaults.policy.clone();
+        policy_config.min_route_samples = min_route_samples;
+        policy_config.min_key_repeats = min_key_repeats;
+        policy_config.min_shadow_validations = min_shadow_validations;
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        server_config.protocols.http2 = true;
+        server_config.protocols.h2c = true;
+        let config = Arc::new(EffectiveConfig {
+            origin,
+            mode,
+            server: server_config,
+            policy: policy_config,
+            ..defaults
+        });
+        let observer = Arc::new(Observer::new(
+            100,
+            100,
+            100,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+        ));
+        let store = Arc::new(MemoryStore::new(&config.storage));
+        let policy = Arc::new(PolicyEngine::new(&config));
+        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = run_proxy(state, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        let runtime = Self {
+            addr,
+            observer,
+            store,
+            shutdown: Some(tx),
+        };
+        runtime.wait_ready().await;
+        runtime
+    }
+
+    async fn start_h2c_with_header_limit(origin: Url, max_header_list_size: u64) -> Self {
+        let addr = unused_addr().await;
+        let defaults = EffectiveConfig::default();
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        server_config.protocols.http2 = true;
+        server_config.protocols.h2c = true;
+        server_config.http2.max_header_list_size = max_header_list_size;
+        Self::start_from_config(EffectiveConfig {
+            origin,
+            server: server_config,
+            ..defaults
+        })
+        .await
+    }
+
+    async fn start_with_small_response_limits(origin: Url, _path: &str) -> Self {
+        let addr = unused_addr().await;
+        let defaults = EffectiveConfig::default();
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        let mut policy_config = defaults.policy.clone();
+        policy_config.min_route_samples = 1;
+        policy_config.min_key_repeats = 1;
+        policy_config.min_shadow_validations = 1;
+        policy_config.max_object_size = 128;
+        policy_config.max_fingerprint_body_size = 128;
+        let mut storage_config = defaults.storage.clone();
+        storage_config.max_object_size = 128;
+        let mut performance = defaults.performance.clone();
+        performance.max_buffered_response_size = 128;
+        Self::start_from_config(EffectiveConfig {
+            origin,
+            mode: Mode::Auto,
+            server: server_config,
+            policy: policy_config,
+            storage: storage_config,
+            performance,
+            ..defaults
+        })
+        .await
+    }
+
+    async fn start_with_origin_protocol(
+        origin: Url,
+        preferred: OriginProtocolPreference,
+        fallback: bool,
+    ) -> Self {
+        let addr = unused_addr().await;
+        let defaults = EffectiveConfig::default();
+        let mut server_config = defaults.server.clone();
+        server_config.listen = addr;
+        let mut origin_protocol = defaults.origin_protocol.clone();
+        origin_protocol.preferred = preferred;
+        origin_protocol.fallback = fallback;
+        Self::start_from_config(EffectiveConfig {
+            origin,
+            server: server_config,
+            origin_protocol,
+            ..defaults
+        })
         .await
     }
 
@@ -1043,6 +1562,38 @@ impl TestRuntime {
             min_route_samples,
             min_key_repeats,
             min_shadow_validations,
+        ));
+        let store = Arc::new(MemoryStore::new(&config.storage));
+        let policy = Arc::new(PolicyEngine::new(&config));
+        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = run_proxy(state, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        let runtime = Self {
+            addr,
+            observer,
+            store,
+            shutdown: Some(tx),
+        };
+        runtime.wait_ready().await;
+        runtime
+    }
+
+    async fn start_from_config(config: EffectiveConfig) -> Self {
+        let addr = config.server.listen;
+        let config = Arc::new(config);
+        let observer = Arc::new(Observer::new(
+            100,
+            100,
+            100,
+            config.policy.min_route_samples,
+            config.policy.min_key_repeats,
+            config.policy.min_shadow_validations,
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));

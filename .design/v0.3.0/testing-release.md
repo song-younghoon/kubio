@@ -1,11 +1,26 @@
 # Testing and Release
 
-Status: design draft
+Status: implemented gates passing for shipped slice; HTTP/3 runtime tests deferred
 Target release: `v0.3.0`
 
 ## Goals
 
 Testing must prove v0.3.0 improves performance and adds HTTP/2/HTTP/3 support without weakening v0.2.0 safety.
+
+Implemented status:
+
+- `cargo fmt --all --check` passes.
+- `cargo test --workspace` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- CLI validation tests cover HTTP/2 h2c/TLS constraints and guarded HTTP/3 startup failure.
+- Proxy integration coverage includes h2c prior-knowledge forwarding, safe reuse, protected requests, response hard-denies, revalidation, stale-if-error, cross-protocol cache-key equivalence, backpressure rejection behavior, HTTP/2 header-limit rejection, large protected response streaming behavior, oversized no-partial-store behavior, and origin protocol fallback/fail-closed behavior.
+- `examples/bench/local_smoke.sh` emits JSON with latency, cache, and protocol counters.
+
+Deferred status:
+
+- Full HTTP/3 QUIC runtime tests.
+- Dedicated benchmark crate gates and recorded release budgets.
+- External interoperability smoke tests such as `curl --http2`, `h2spec`, and `curl --http3`.
 
 The release should be blocked by any regression that:
 

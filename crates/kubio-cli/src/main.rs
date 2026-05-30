@@ -1,13 +1,14 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use kubio_core::{
-    parse_duration, parse_size, DashboardConfig, EffectiveConfig, FreshnessProfile, Mode,
-    ObservabilityConfig, PolicyConfig, RouteFreshnessConfig, RouteHintConfig, RouteId,
-    RouteMatchConfig, RouteQueryConfig, RouteSafetyConfig, RouteStaleIfErrorConfig,
-    RouteVaryConfig, StorageConfig,
+    parse_duration, parse_size, DashboardConfig, EffectiveConfig, FreshnessProfile, Http2Config,
+    Http3ServerConfig, Mode, ObservabilityConfig, OriginProtocolPreference, PerformanceConfig,
+    PolicyConfig, RouteFreshnessConfig, RouteHintConfig, RouteId, RouteMatchConfig,
+    RouteQueryConfig, RouteSafetyConfig, RouteStaleIfErrorConfig, RouteVaryConfig, StorageConfig,
+    TlsConfig,
 };
 use kubio_dashboard::{run_dashboard, DashboardState};
-use kubio_observe::{Observer, RouteSnapshot};
+use kubio_observe::{Observer, ProtocolCounts, RouteSnapshot};
 use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
 use kubio_store::{CacheStore, DiskStore, MemoryStore, PurgeResult, PurgeSelector};
@@ -185,7 +186,7 @@ async fn routes(args: AdminArgs) -> Result<()> {
     }
     for route in snapshot.routes {
         println!(
-            "{}\t{}\trequests={}\torigin={}\treused={}\tprotected={}\trevalidated={}\tstale={}",
+            "{}\t{}\trequests={}\torigin={}\treused={}\tprotected={}\trevalidated={}\tstale={}\tdownstream={}\tupstream={}",
             route.route_id.as_label(),
             route.state,
             route.request_count,
@@ -193,7 +194,9 @@ async fn routes(args: AdminArgs) -> Result<()> {
             route.reuse_count,
             route.protected_count,
             route.revalidation_attempts,
-            route.stale_served
+            route.stale_served,
+            protocol_counts_label(&route.downstream_protocols),
+            protocol_counts_label(&route.upstream_protocols)
         );
     }
     Ok(())
@@ -221,14 +224,16 @@ async fn explain(args: ExplainArgs) -> Result<()> {
         }
     }
     println!(
-        "\nRequests: {}\nOrigin: {}\nReused: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}",
+        "\nRequests: {}\nOrigin: {}\nReused: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}\nDownstream protocols: {}\nUpstream protocols: {}",
         route.request_count,
         route.origin_count,
         route.reuse_count,
         route.shadow_matches,
         route.shadow_mismatches,
         route.revalidation_attempts,
-        route.stale_served
+        route.stale_served,
+        protocol_counts_label(&route.downstream_protocols),
+        protocol_counts_label(&route.upstream_protocols)
     );
     Ok(())
 }
@@ -236,21 +241,33 @@ async fn explain(args: ExplainArgs) -> Result<()> {
 async fn doctor(args: DoctorArgs) -> Result<()> {
     let mut checks = Vec::new();
 
-    let (file_config, config_ok) = if let Some(path) = args.config.as_ref() {
+    let (file_config, effective_config, config_ok) = if let Some(path) = args.config.as_ref() {
         match load_config_file(path) {
             Ok(file_config) => {
                 let mut effective = EffectiveConfig::default();
                 let ok = apply_file_config(&mut effective, file_config.clone())
                     .and_then(|_| validate_config(&effective))
                     .is_ok();
-                (Some(file_config), ok)
+                (Some(file_config), Some(effective), ok)
             }
-            Err(_) => (None, false),
+            Err(_) => (None, None, false),
         }
     } else {
-        (None, true)
+        (None, Some(EffectiveConfig::default()), true)
     };
     checks.push(("config parsing", config_ok));
+    if let Some(config) = effective_config.as_ref() {
+        checks.push((
+            "http/2 config",
+            !config.server.protocols.http2
+                || config.server.tls.is_some()
+                || config.server.protocols.h2c,
+        ));
+        checks.push((
+            "http/3 guarded disabled",
+            !config.server.http3.enabled && !config.origin_protocol.http3_experimental,
+        ));
+    }
 
     if let Some(origin) = args.to.as_ref() {
         let origin_ok = Url::parse(origin).is_ok()
@@ -322,6 +339,13 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
     }
 }
 
+fn protocol_counts_label(counts: &ProtocolCounts) -> String {
+    format!(
+        "http1:{},http2:{},http3:{}",
+        counts.http1, counts.http2, counts.http3
+    )
+}
+
 async fn purge(args: PurgeArgs) -> Result<()> {
     let selector = if args.all {
         PurgeRequest {
@@ -361,7 +385,15 @@ async fn purge(args: PurgeArgs) -> Result<()> {
 fn print_startup(config: &EffectiveConfig) {
     println!("kubio is watching your API.\n");
     println!("Origin: {}", config.origin);
-    println!("Proxy:  http://{}", config.server.listen);
+    println!(
+        "Proxy:  {}://{}",
+        if config.server.tls.is_some() {
+            "https"
+        } else {
+            "http"
+        },
+        config.server.listen
+    );
     println!("Mode:   {}", title_case(&config.mode.to_string()));
     match config.mode {
         Mode::Watch => {
@@ -379,6 +411,17 @@ fn print_startup(config: &EffectiveConfig) {
     if config.dashboard.enabled {
         println!("\nDashboard: http://{}", config.dashboard.listen);
     }
+    println!(
+        "Protocols: http1={} http2={} h2c={} http3={}",
+        config.server.protocols.http1,
+        config.server.protocols.http2,
+        config.server.protocols.h2c,
+        config.server.http3.enabled
+    );
+    println!(
+        "Origin protocol: {} (fallback={})",
+        config.origin_protocol.preferred, config.origin_protocol.fallback
+    );
     println!("Store: {}", config.storage.kind);
 }
 
@@ -491,6 +534,43 @@ fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<(
             }
             config.server.origin_timeout = Duration::from_millis(origin_timeout_ms);
         }
+        if let Some(tls) = server.tls {
+            config.server.tls = Some(TlsConfig {
+                cert: PathBuf::from(tls.cert),
+                key: PathBuf::from(tls.key),
+            });
+        }
+        if let Some(protocols) = server.protocols {
+            if let Some(http1) = protocols.http1 {
+                config.server.protocols.http1 = http1;
+            }
+            if let Some(http2) = protocols.http2 {
+                config.server.protocols.http2 = http2;
+            }
+            if let Some(h2c) = protocols.h2c {
+                config.server.protocols.h2c = h2c;
+            }
+        }
+        if let Some(http2) = server.http2 {
+            apply_http2_config(&mut config.server.http2, http2)?;
+        }
+        if let Some(http3) = server.http3 {
+            apply_http3_config(&mut config.server.http3, http3)?;
+        }
+    }
+    if let Some(origin_protocol) = file.origin_protocol {
+        if let Some(preferred) = origin_protocol.preferred {
+            config.origin_protocol.preferred = preferred.parse().map_err(anyhow::Error::msg)?;
+        }
+        if let Some(fallback) = origin_protocol.fallback {
+            config.origin_protocol.fallback = fallback;
+        }
+        if let Some(http2_prior_knowledge) = origin_protocol.http2_prior_knowledge {
+            config.origin_protocol.http2_prior_knowledge = http2_prior_knowledge;
+        }
+        if let Some(http3_experimental) = origin_protocol.http3_experimental {
+            config.origin_protocol.http3_experimental = http3_experimental;
+        }
     }
     if let Some(dashboard) = file.dashboard {
         if let Some(enabled) = dashboard.enabled {
@@ -528,6 +608,9 @@ fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<(
             config.storage.sync = sync;
         }
     }
+    if let Some(performance) = file.performance {
+        apply_performance_config(&mut config.performance, performance)?;
+    }
     if let Some(observability) = file.observability {
         if let Some(metrics) = observability.metrics {
             config.observability.metrics = metrics;
@@ -553,6 +636,92 @@ fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<(
             .into_iter()
             .map(RouteHintConfig::try_from)
             .collect::<Result<Vec<_>>>()?;
+    }
+    Ok(())
+}
+
+fn apply_http2_config(config: &mut Http2Config, http2: FileHttp2Config) -> Result<()> {
+    if let Some(max_concurrent_streams) = http2.max_concurrent_streams {
+        config.max_concurrent_streams = max_concurrent_streams;
+    }
+    if let Some(initial_stream_window_size) = http2.initial_stream_window_size {
+        config.initial_stream_window_size = parse_size_u32(&initial_stream_window_size)?;
+    }
+    if let Some(initial_connection_window_size) = http2.initial_connection_window_size {
+        config.initial_connection_window_size = parse_size_u32(&initial_connection_window_size)?;
+    }
+    if let Some(keepalive_interval) = http2.keepalive_interval {
+        config.keepalive_interval =
+            Some(parse_duration(&keepalive_interval).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(keepalive_timeout) = http2.keepalive_timeout {
+        config.keepalive_timeout =
+            parse_duration(&keepalive_timeout).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(max_header_list_size) = http2.max_header_list_size {
+        config.max_header_list_size =
+            parse_size(&max_header_list_size).map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
+fn parse_size_u32(value: &str) -> Result<u32> {
+    let parsed = parse_size(value).map_err(anyhow::Error::msg)?;
+    u32::try_from(parsed).context("size exceeds u32 limit")
+}
+
+fn apply_http3_config(config: &mut Http3ServerConfig, http3: FileHttp3Config) -> Result<()> {
+    if let Some(enabled) = http3.enabled {
+        config.enabled = enabled;
+    }
+    if let Some(listen) = http3.listen {
+        config.listen = Some(listen.parse().context("parse server.http3.listen")?);
+    }
+    if let Some(advertise) = http3.advertise {
+        config.advertise = advertise;
+    }
+    if let Some(alt_svc_ma) = http3.alt_svc_ma {
+        config.alt_svc_ma = parse_duration(&alt_svc_ma).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(max_concurrent_streams) = http3.max_concurrent_streams {
+        config.max_concurrent_streams = max_concurrent_streams;
+    }
+    if let Some(max_field_section_size) = http3.max_field_section_size {
+        config.max_field_section_size =
+            parse_size(&max_field_section_size).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(idle_timeout) = http3.idle_timeout {
+        config.idle_timeout = parse_duration(&idle_timeout).map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
+fn apply_performance_config(
+    config: &mut PerformanceConfig,
+    performance: FilePerformanceConfig,
+) -> Result<()> {
+    if let Some(max_in_flight_requests) = performance.max_in_flight_requests {
+        config.max_in_flight_requests = max_in_flight_requests;
+    }
+    if let Some(max_buffered_response_size) = performance.max_buffered_response_size {
+        config.max_buffered_response_size =
+            parse_size(&max_buffered_response_size).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(stream_unstoreable_bodies) = performance.stream_unstoreable_bodies {
+        config.stream_unstoreable_bodies = stream_unstoreable_bodies;
+    }
+    if let Some(observer_shards) = performance.observer_shards {
+        config.observer_shards = observer_shards;
+    }
+    if let Some(async_disk_writes) = performance.async_disk_writes {
+        config.async_disk_writes = async_disk_writes;
+    }
+    if let Some(origin_pool_max_idle_per_host) = performance.origin_pool_max_idle_per_host {
+        config.origin_pool_max_idle_per_host = origin_pool_max_idle_per_host;
+    }
+    if let Some(origin_pool_idle_timeout) = performance.origin_pool_idle_timeout {
+        config.origin_pool_idle_timeout =
+            parse_duration(&origin_pool_idle_timeout).map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }
@@ -623,6 +792,42 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     if config.origin.scheme() != "http" && config.origin.scheme() != "https" {
         bail!("origin must use http or https");
     }
+    if !config.server.protocols.http1 && !config.server.protocols.http2 {
+        bail!("at least one of server.protocols.http1 or server.protocols.http2 must be enabled");
+    }
+    if config.server.protocols.h2c && !config.server.protocols.http2 {
+        bail!("server.protocols.h2c requires server.protocols.http2: true");
+    }
+    if config.server.tls.is_none() && config.server.protocols.http2 && !config.server.protocols.h2c
+    {
+        bail!("HTTP/2 without TLS requires server.protocols.h2c: true");
+    }
+    if config.server.http2.max_concurrent_streams == 0 {
+        bail!("server.http2.max_concurrent_streams must be greater than zero");
+    }
+    if config.server.http2.initial_stream_window_size == 0 {
+        bail!("server.http2.initial_stream_window_size must be greater than zero");
+    }
+    if config.server.http2.initial_connection_window_size == 0 {
+        bail!("server.http2.initial_connection_window_size must be greater than zero");
+    }
+    if config.server.http2.max_header_list_size == 0 {
+        bail!("server.http2.max_header_list_size must be greater than zero");
+    }
+    if config.server.http3.advertise && !config.server.http3.enabled {
+        bail!("server.http3.advertise requires server.http3.enabled: true");
+    }
+    if config.server.http3.enabled {
+        bail!("HTTP/3 runtime is not available in this v0.3.0 build; leave server.http3.enabled false");
+    }
+    if config.origin_protocol.preferred == OriginProtocolPreference::Http3
+        && !config.origin_protocol.http3_experimental
+    {
+        bail!("origin_protocol.preferred: http3 requires origin_protocol.http3_experimental: true");
+    }
+    if config.origin_protocol.http3_experimental {
+        bail!("upstream HTTP/3 is not available in this v0.3.0 build; leave origin_protocol.http3_experimental false");
+    }
     if config.storage.kind != "memory" && config.storage.kind != "disk" {
         bail!("storage.kind must be memory or disk");
     }
@@ -663,6 +868,21 @@ fn validate_config(config: &EffectiveConfig) -> Result<()> {
     }
     if config.policy.stale_if_error.max_stale.is_zero() {
         bail!("policy.stale_if_error.max_stale must be greater than zero");
+    }
+    if config.performance.max_in_flight_requests == 0 {
+        bail!("performance.max_in_flight_requests must be greater than zero");
+    }
+    if config.performance.max_buffered_response_size == 0 {
+        bail!("performance.max_buffered_response_size must be greater than zero");
+    }
+    if config.performance.observer_shards == 0 {
+        bail!("performance.observer_shards must be greater than zero");
+    }
+    if config.performance.origin_pool_max_idle_per_host == 0 {
+        bail!("performance.origin_pool_max_idle_per_host must be greater than zero");
+    }
+    if config.performance.origin_pool_idle_timeout.is_zero() {
+        bail!("performance.origin_pool_idle_timeout must be greater than zero");
     }
     validate_route_hints(&config.routes)?;
     if !valid_dashboard_path(&config.observability.metrics_path) {
@@ -783,11 +1003,13 @@ struct FileConfig {
     version: Option<u64>,
     server: Option<FileServerConfig>,
     origin: Option<String>,
+    origin_protocol: Option<FileOriginProtocolConfig>,
     mode: Option<String>,
     freshness: Option<String>,
     dashboard: Option<FileDashboardConfig>,
     policy: Option<FilePolicyConfig>,
     storage: Option<FileStorageConfig>,
+    performance: Option<FilePerformanceConfig>,
     observability: Option<FileObservabilityConfig>,
     routes: Option<Vec<FileRouteHintConfig>>,
     debug_headers: Option<bool>,
@@ -799,6 +1021,52 @@ struct FileConfig {
 struct FileServerConfig {
     listen: Option<String>,
     origin_timeout_ms: Option<u64>,
+    tls: Option<FileTlsConfig>,
+    protocols: Option<FileServerProtocolConfig>,
+    http2: Option<FileHttp2Config>,
+    http3: Option<FileHttp3Config>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileTlsConfig {
+    cert: String,
+    key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileServerProtocolConfig {
+    http1: Option<bool>,
+    http2: Option<bool>,
+    h2c: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileHttp2Config {
+    max_concurrent_streams: Option<u32>,
+    initial_stream_window_size: Option<String>,
+    initial_connection_window_size: Option<String>,
+    keepalive_interval: Option<String>,
+    keepalive_timeout: Option<String>,
+    max_header_list_size: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileHttp3Config {
+    enabled: Option<bool>,
+    listen: Option<String>,
+    advertise: Option<bool>,
+    alt_svc_ma: Option<String>,
+    max_concurrent_streams: Option<u64>,
+    max_field_section_size: Option<String>,
+    idle_timeout: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileOriginProtocolConfig {
+    preferred: Option<String>,
+    fallback: Option<bool>,
+    http2_prior_knowledge: Option<bool>,
+    http3_experimental: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -852,6 +1120,17 @@ struct FileStorageConfig {
     max_object_size: Option<String>,
     path: Option<String>,
     sync: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FilePerformanceConfig {
+    max_in_flight_requests: Option<usize>,
+    max_buffered_response_size: Option<String>,
+    stream_unstoreable_bodies: Option<bool>,
+    observer_shards: Option<usize>,
+    async_disk_writes: Option<bool>,
+    origin_pool_max_idle_per_host: Option<usize>,
+    origin_pool_idle_timeout: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -966,6 +1245,35 @@ mod tests {
         let err = validate_config(&config).unwrap_err().to_string();
 
         assert!(err.contains("metrics_path"));
+    }
+
+    #[test]
+    fn validation_rejects_http2_without_tls_or_h2c() {
+        let mut config = EffectiveConfig::default();
+        config.server.protocols.http2 = true;
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("h2c"));
+    }
+
+    #[test]
+    fn validation_accepts_explicit_h2c() {
+        let mut config = EffectiveConfig::default();
+        config.server.protocols.http2 = true;
+        config.server.protocols.h2c = true;
+
+        validate_config(&config).unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_http3_runtime_config() {
+        let mut config = EffectiveConfig::default();
+        config.server.http3.enabled = true;
+
+        let err = validate_config(&config).unwrap_err().to_string();
+
+        assert!(err.contains("HTTP/3 runtime is not available"));
     }
 
     #[test]

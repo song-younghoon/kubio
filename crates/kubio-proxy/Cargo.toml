@@ -17,6 +17,7 @@ kubio-policy.workspace = true
 kubio-store.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 url.workspace = true
 

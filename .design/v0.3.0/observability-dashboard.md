@@ -1,11 +1,13 @@
 # Observability and Dashboard
 
-Status: design draft
+Status: implemented for v0.3.0 local scope; advanced dashboard charts deferred
 Target release: `v0.3.0`
 
 ## Goals
 
 v0.3.0 observability should make performance and protocol behavior visible without exposing sensitive traffic data.
+
+Implementation status: the v0.3.0 codebase now exposes bounded downstream protocol counts, upstream protocol counts, protocol fallback counts/events, backpressure rejection counts/events, live in-flight gauges, store operation counters/latency totals, and observer event-drop counts in snapshots, dashboard JSON APIs, dashboard pages, CLI output, and Prometheus metrics. Advanced dashboard charting and per-protocol reuse breakdowns remain future work. The design below remains the reference for deeper follow-up work.
 
 Operators should be able to answer:
 

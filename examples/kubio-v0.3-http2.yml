@@ -1,0 +1,50 @@
+version: 1
+
+server:
+  listen: "0.0.0.0:8080"
+  origin_timeout_ms: 30000
+  protocols:
+    http1: true
+    http2: true
+    h2c: true
+  http2:
+    max_concurrent_streams: 256
+    initial_stream_window_size: "1MiB"
+    initial_connection_window_size: "4MiB"
+    keepalive_timeout: "10s"
+    max_header_list_size: "64KiB"
+
+origin: "http://localhost:3000"
+origin_protocol:
+  preferred: "auto"
+  fallback: true
+  http2_prior_knowledge: false
+
+mode: "auto"
+freshness: "balanced"
+
+performance:
+  max_in_flight_requests: 4096
+  max_buffered_response_size: "2MiB"
+  stream_unstoreable_bodies: true
+  observer_shards: 64
+  async_disk_writes: true
+  origin_pool_max_idle_per_host: 32
+  origin_pool_idle_timeout: "90s"
+
+policy:
+  revalidation:
+    enabled: true
+    prefer_etag: true
+    max_validator_length: 1024
+  stale_if_error:
+    mode: "origin"
+    max_stale: "5m"
+  query_intelligence:
+    enabled: true
+    auto_ignore: false
+
+storage:
+  kind: "memory"
+  max_size: "256MiB"
+  max_object_size: "1MiB"

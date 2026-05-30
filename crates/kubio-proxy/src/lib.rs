@@ -11,8 +11,9 @@ use http::header;
 use kubio_core::{
     body_hash, build_cache_key_with_query_config, is_hop_by_hop_header, is_sensitive_query_param,
     matching_route_hint, query_pattern_matches, short_hash, stable_header_hash, CacheKeyHash,
-    Decision, DecisionReason, EffectiveConfig, Mode, ResponseFingerprint, RouteHintConfig, RouteId,
-    StaleIfErrorMode, StoredCacheControl, Validators,
+    Decision, DecisionReason, EffectiveConfig, HttpProtocol, Mode, OriginProtocolPreference,
+    ResponseFingerprint, RouteHintConfig, RouteId, StaleIfErrorMode, StoredCacheControl, TlsConfig,
+    Validators,
 };
 use kubio_observe::{
     EventType, ObservationRecord, Observer, QueryParamRecord, RevalidationOutcome,
@@ -20,12 +21,20 @@ use kubio_observe::{
 use kubio_policy::PolicyEngine;
 use kubio_store::{CacheEntry, CacheStore, PurgeSelector};
 use reqwest::Client;
+use std::fmt;
 use std::future::Future;
+use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, warn};
 use url::{form_urlencoded, Url};
 
@@ -38,6 +47,7 @@ pub struct ProxyState {
     pub observer: Arc<Observer>,
     pub store: Arc<dyn CacheStore>,
     pub client: Client,
+    in_flight: Arc<Semaphore>,
     panic_switch_was_active: Arc<AtomicBool>,
 }
 
@@ -48,17 +58,27 @@ impl ProxyState {
         observer: Arc<Observer>,
         store: Arc<dyn CacheStore>,
     ) -> anyhow::Result<Self> {
-        let client = Client::builder()
+        let mut client = Client::builder()
             .timeout(config.server.origin_timeout)
             .connect_timeout(config.server.origin_timeout.min(Duration::from_secs(5)))
-            .build()
-            .context("build origin HTTP client")?;
+            .pool_max_idle_per_host(config.performance.origin_pool_max_idle_per_host)
+            .pool_idle_timeout(config.performance.origin_pool_idle_timeout);
+        if config.origin_protocol.http2_prior_knowledge
+            || (config.origin_protocol.preferred == OriginProtocolPreference::Http2
+                && config.origin.scheme() == "http")
+        {
+            client = client.http2_prior_knowledge();
+        }
+        let client = client.build().context("build origin HTTP client")?;
+        let max_in_flight_requests = config.performance.max_in_flight_requests;
+        observer.record_in_flight(0, max_in_flight_requests);
         Ok(Self {
             config,
             policy,
             observer,
             store,
             client,
+            in_flight: Arc::new(Semaphore::new(max_in_flight_requests)),
             panic_switch_was_active: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -76,21 +96,165 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let listener = TcpListener::bind(state.config.server.listen).await?;
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    if let Some(tls) = state.config.server.tls.as_ref() {
+        let acceptor = tls_acceptor(tls, &state.config)?;
+        let listener = TlsListener { listener, acceptor };
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    } else {
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    }
     Ok(())
+}
+
+struct TlsListener {
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = TlsStream<tokio::net::TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.listener.accept().await {
+                Ok((stream, addr)) => match self.acceptor.accept(stream).await {
+                    Ok(tls) => return (tls, addr),
+                    Err(err) => {
+                        warn!(error = %err, "TLS handshake failed");
+                    }
+                },
+                Err(err) if is_connection_accept_error(&err) => {}
+                Err(err) => {
+                    warn!(error = %err, "proxy accept failed");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+fn tls_acceptor(tls: &TlsConfig, config: &EffectiveConfig) -> anyhow::Result<TlsAcceptor> {
+    let certs = CertificateDer::pem_file_iter(&tls.cert)
+        .with_context(|| format!("open TLS cert {}", tls.cert.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read TLS certificates")?;
+    if certs.is_empty() {
+        anyhow::bail!(
+            "TLS cert file {} contained no certificates",
+            tls.cert.display()
+        );
+    }
+
+    let key = PrivateKeyDer::from_pem_file(&tls.key)
+        .with_context(|| format!("read TLS private key {}", tls.key.display()))?;
+
+    let mut server = RustlsServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("build TLS server config")?;
+    server.alpn_protocols = alpn_protocols(config);
+    Ok(TlsAcceptor::from(Arc::new(server)))
+}
+
+fn alpn_protocols(config: &EffectiveConfig) -> Vec<Vec<u8>> {
+    let mut protocols = Vec::new();
+    if config.server.protocols.http2 {
+        protocols.push(b"h2".to_vec());
+    }
+    if config.server.protocols.http1 {
+        protocols.push(b"http/1.1".to_vec());
+    }
+    protocols
+}
+
+struct ObservedInFlightPermit {
+    permit: Option<OwnedSemaphorePermit>,
+    semaphore: Arc<Semaphore>,
+    observer: Arc<Observer>,
+    max: usize,
+}
+
+impl ObservedInFlightPermit {
+    fn new(state: &ProxyState, permit: OwnedSemaphorePermit) -> Self {
+        let current = state
+            .config
+            .performance
+            .max_in_flight_requests
+            .saturating_sub(state.in_flight.available_permits());
+        state
+            .observer
+            .record_in_flight(current, state.config.performance.max_in_flight_requests);
+        Self {
+            permit: Some(permit),
+            semaphore: state.in_flight.clone(),
+            observer: state.observer.clone(),
+            max: state.config.performance.max_in_flight_requests,
+        }
+    }
+}
+
+impl Drop for ObservedInFlightPermit {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        let current = self.max.saturating_sub(self.semaphore.available_permits());
+        self.observer.record_in_flight(current, self.max);
+    }
+}
+
+fn is_connection_accept_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
 }
 
 async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) -> Response<Body> {
     let started = std::time::Instant::now();
+    let downstream_protocol = http_protocol_from_version(request.version());
     let method = request.method().clone();
     let uri = request.uri().clone();
     let path = uri.path().to_string();
     let query = uri.query().map(ToOwned::to_owned);
     let route_id = RouteId::from_method_path(&method, &path);
-    let route_hint = matching_route_hint(&route_id, &state.config.routes);
     let headers = request.headers().clone();
+    if downstream_protocol == HttpProtocol::Http2
+        && header_list_size(&headers) > state.config.server.http2.max_header_list_size
+    {
+        state
+            .observer
+            .record_header_limit_rejection(route_id, downstream_protocol);
+        return StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE.into_response();
+    }
+    let Ok(permit) = state.in_flight.clone().try_acquire_owned() else {
+        state
+            .observer
+            .record_backpressure_rejection(route_id, downstream_protocol);
+        state.observer.record_in_flight(
+            state
+                .config
+                .performance
+                .max_in_flight_requests
+                .saturating_sub(state.in_flight.available_permits()),
+            state.config.performance.max_in_flight_requests,
+        );
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let _permit = ObservedInFlightPermit::new(&state, permit);
+    state
+        .observer
+        .record_downstream_protocol(route_id.clone(), downstream_protocol);
+    let route_hint = matching_route_hint(&route_id, &state.config.routes);
     let panic_active = panic_switch_active(state.config.panic_file.as_deref());
     record_panic_switch_transition(&state, panic_active, &route_id, None);
 
@@ -207,6 +371,7 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                                 &method,
                                 &uri,
                                 &headers,
+                                &route_id,
                                 &entry.validators,
                             )
                             .await
@@ -266,9 +431,16 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                                         );
                                     }
                                     origin_response_override = Some(
-                                        send_origin(&state, &method, &uri, &headers, Body::empty())
-                                            .await
-                                            .unwrap_or(response),
+                                        send_origin(
+                                            &state,
+                                            &method,
+                                            &uri,
+                                            &headers,
+                                            Body::empty(),
+                                            &route_id,
+                                        )
+                                        .await
+                                        .unwrap_or(response),
                                     );
                                 }
                                 Ok(response) if response.status().is_server_error() => {
@@ -390,7 +562,16 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     let origin_response = if let Some(response) = origin_response_override {
         response
     } else {
-        match send_origin(&state, &method, &uri, &headers, request.into_body()).await {
+        match send_origin(
+            &state,
+            &method,
+            &uri,
+            &headers,
+            request.into_body(),
+            &route_id,
+        )
+        .await
+        {
             Ok(response) => response,
             Err(err) => {
                 warn!(error = %err, "origin request failed");
@@ -461,6 +642,14 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     let status = origin_response.status();
     let origin_headers = clone_response_headers(origin_response.headers());
     let response_signals = state.policy.response_signals(status, &origin_headers);
+    record_store_saturation_if_needed(
+        &state,
+        &route_id,
+        cache_key_hash.as_ref(),
+        &request_signals,
+        &response_signals,
+        response_signals.content_length,
+    );
     if should_stream_origin_response(
         &state,
         &request_signals,
@@ -560,6 +749,14 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
+    record_store_saturation_if_needed(
+        &state,
+        &route_id,
+        cache_key_hash.as_ref(),
+        &request_signals,
+        &response_signals,
+        Some(response_bytes.len() as u64),
+    );
 
     let fingerprint = make_fingerprint(&state.config, status, &origin_headers, &response_bytes);
     if let Some(fingerprint) = fingerprint.as_ref() {
@@ -692,8 +889,9 @@ async fn send_origin(
     uri: &Uri,
     headers: &HeaderMap,
     body: Body,
-) -> Result<reqwest::Response, reqwest::Error> {
-    send_origin_with_validators(state, method, uri, headers, body, None).await
+    route_id: &RouteId,
+) -> Result<reqwest::Response, OriginError> {
+    send_origin_with_validators(state, method, uri, headers, body, route_id, None).await
 }
 
 async fn send_conditional_origin(
@@ -701,9 +899,19 @@ async fn send_conditional_origin(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
+    route_id: &RouteId,
     validators: &Validators,
-) -> Result<reqwest::Response, reqwest::Error> {
-    send_origin_with_validators(state, method, uri, headers, Body::empty(), Some(validators)).await
+) -> Result<reqwest::Response, OriginError> {
+    send_origin_with_validators(
+        state,
+        method,
+        uri,
+        headers,
+        Body::empty(),
+        route_id,
+        Some(validators),
+    )
+    .await
 }
 
 async fn send_origin_with_validators(
@@ -712,8 +920,9 @@ async fn send_origin_with_validators(
     uri: &Uri,
     headers: &HeaderMap,
     body: Body,
+    route_id: &RouteId,
     validators: Option<&Validators>,
-) -> Result<reqwest::Response, reqwest::Error> {
+) -> Result<reqwest::Response, OriginError> {
     let url = origin_url(&state.config.origin, uri);
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
@@ -735,10 +944,82 @@ async fn send_origin_with_validators(
             request = request.header(header::IF_MODIFIED_SINCE.as_str(), last_modified);
         }
     }
-    request
+    let response = request
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
         .send()
         .await
+        .map_err(OriginError::Request)?;
+    let actual_protocol = http_protocol_from_version(response.version());
+    state
+        .observer
+        .record_upstream_protocol(route_id.clone(), actual_protocol);
+    if let Some(expected_protocol) =
+        expected_origin_protocol(state.config.origin_protocol.preferred)
+    {
+        if actual_protocol != expected_protocol {
+            if state.config.origin_protocol.fallback {
+                state.observer.record_protocol_fallback(
+                    route_id.clone(),
+                    expected_protocol,
+                    actual_protocol,
+                );
+            } else {
+                return Err(OriginError::RequiredProtocol {
+                    expected: expected_protocol,
+                    actual: actual_protocol,
+                });
+            }
+        }
+    }
+    Ok(response)
+}
+
+#[derive(Debug)]
+enum OriginError {
+    Request(reqwest::Error),
+    RequiredProtocol {
+        expected: HttpProtocol,
+        actual: HttpProtocol,
+    },
+}
+
+impl OriginError {
+    fn is_timeout(&self) -> bool {
+        matches!(self, Self::Request(err) if err.is_timeout())
+    }
+}
+
+impl fmt::Display for OriginError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Request(err) => err.fmt(f),
+            Self::RequiredProtocol { expected, actual } => {
+                write!(
+                    f,
+                    "origin used {actual} when {expected} was required by origin_protocol"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for OriginError {}
+
+fn expected_origin_protocol(preferred: OriginProtocolPreference) -> Option<HttpProtocol> {
+    match preferred {
+        OriginProtocolPreference::Auto => None,
+        OriginProtocolPreference::Http1 => Some(HttpProtocol::Http1),
+        OriginProtocolPreference::Http2 => Some(HttpProtocol::Http2),
+        OriginProtocolPreference::Http3 => Some(HttpProtocol::Http3),
+    }
+}
+
+fn http_protocol_from_version(version: http::Version) -> HttpProtocol {
+    match version {
+        http::Version::HTTP_2 => HttpProtocol::Http2,
+        http::Version::HTTP_3 => HttpProtocol::Http3,
+        _ => HttpProtocol::Http1,
+    }
 }
 
 fn origin_authority(origin: &Url) -> String {
@@ -1030,11 +1311,45 @@ fn should_stream_origin_response(
     response_signals: &kubio_policy::ResponseSignals,
     content_length: Option<u64>,
 ) -> bool {
-    !state.policy.request_is_reuse_safe(request_signals)
+    let known_too_large = content_length
+        .map(|length| {
+            length > state.config.policy.max_fingerprint_body_size
+                || length > state.config.storage.max_object_size
+                || length > state.config.performance.max_buffered_response_size
+        })
+        .unwrap_or(false);
+    (state.config.performance.stream_unstoreable_bodies
+        && (!state.policy.request_is_reuse_safe(request_signals)
+            || !state.policy.response_is_store_safe(response_signals)))
+        || known_too_large
+}
+
+fn record_store_saturation_if_needed(
+    state: &ProxyState,
+    route_id: &RouteId,
+    cache_key_hash: Option<&CacheKeyHash>,
+    request_signals: &kubio_policy::RequestSignals,
+    response_signals: &kubio_policy::ResponseSignals,
+    response_size: Option<u64>,
+) {
+    let Some(response_size) = response_size else {
+        return;
+    };
+    if response_size <= state.config.storage.max_object_size {
+        return;
+    }
+    if !state.policy.request_is_reuse_safe(request_signals)
         || !state.policy.response_is_store_safe(response_signals)
-        || content_length
-            .map(|length| length > state.config.policy.max_fingerprint_body_size)
-            .unwrap_or(false)
+    {
+        return;
+    }
+    state.observer.push_event(
+        EventType::StoreSaturated,
+        Some(route_id.clone()),
+        cache_key_hash.cloned(),
+        vec![DecisionReason::ObjectTooLarge],
+        "response was larger than the configured store object limit",
+    );
 }
 
 fn panic_switch_active(path: Option<&Path>) -> bool {
@@ -1047,6 +1362,13 @@ fn declared_request_body_len(headers: &HeaderMap) -> u64 {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+fn header_list_size(headers: &HeaderMap) -> u64 {
+    headers
+        .iter()
+        .map(|(name, value)| name.as_str().len() as u64 + value.as_bytes().len() as u64)
+        .sum()
 }
 
 fn unknown_streaming_body_signal(headers: &HeaderMap) -> u64 {

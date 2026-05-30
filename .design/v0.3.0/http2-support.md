@@ -1,11 +1,26 @@
 # HTTP/2 Support
 
-Status: design draft
+Status: implemented with limited per-connection tuning
 Target release: `v0.3.0`
 
 ## Goals
 
 HTTP/2 support should be a stable v0.3.0 feature for both client-facing and origin-facing traffic.
+
+Implemented status:
+
+- Downstream HTTP/2 is enabled through Axum/Hyper's HTTP/2 support.
+- TLS listener config uses rustls and ALPN values derived from `server.protocols`.
+- Explicit h2c prior-knowledge mode is available for local and service-mesh deployments.
+- Upstream HTTP/2 is enabled through reqwest, including optional prior knowledge.
+- HTTP/2 traffic uses the same policy, cache-key, observer, revalidation, stale-if-error, and store paths as HTTP/1.1.
+- HTTP/2 request header-list limits are enforced at the proxy boundary.
+- Upstream protocol preference can fail closed when fallback is disabled, and negotiated fallback is recorded.
+
+Deferred status:
+
+- Deeper Hyper per-connection HTTP/2 flow-control tuning.
+- Broader HTTP/2 interoperability smoke coverage beyond the workspace integration tests.
 
 kubio should support:
 

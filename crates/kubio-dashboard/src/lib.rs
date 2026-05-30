@@ -6,7 +6,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kubio_core::{CacheKeyHash, DecisionReason, EffectiveConfig, RedactedConfig, RouteId};
-use kubio_observe::{EventType, Observer, ObserverSnapshot};
+use kubio_observe::{EventType, Observer, ObserverSnapshot, ProtocolCounts};
 use kubio_store::{CacheStore, PurgeResult, PurgeSelector, StoreStats};
 use kubio_telemetry::render_metrics;
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,11 @@ async fn index(State(state): State<DashboardState>) -> Html<String> {
     <dt>Shadow mismatches</dt><dd>{}</dd>
     <dt>Revalidated</dt><dd>{}</dd>
     <dt>Stale served</dt><dd>{}</dd>
+    <dt>Backpressure rejections</dt><dd>{}</dd>
+    <dt>Protocol fallbacks</dt><dd>{}</dd>
+    <dt>In-flight requests</dt><dd>{}/{}</dd>
+    <dt>Downstream protocols</dt><dd>h1 {} / h2 {} / h3 {}</dd>
+    <dt>Upstream protocols</dt><dd>h1 {} / h2 {} / h3 {}</dd>
     <dt>Store</dt><dd>{:?}</dd>
   </dl>
 </section>
@@ -92,6 +97,16 @@ async fn index(State(state): State<DashboardState>) -> Html<String> {
             snapshot.overview.shadow_mismatches,
             snapshot.overview.revalidation_attempts,
             snapshot.overview.stale_responses_served,
+            snapshot.overview.backpressure_rejections,
+            snapshot.overview.protocol_fallbacks,
+            snapshot.overview.in_flight_requests,
+            snapshot.overview.max_in_flight_requests,
+            snapshot.overview.downstream_http1_requests,
+            snapshot.overview.downstream_http2_requests,
+            snapshot.overview.downstream_http3_requests,
+            snapshot.overview.upstream_http1_requests,
+            snapshot.overview.upstream_http2_requests,
+            snapshot.overview.upstream_http3_requests,
             state.store.stats().kind,
         ),
     ))
@@ -104,7 +119,7 @@ async fn routes_page(State(state): State<DashboardState>) -> Html<String> {
         .iter()
         .map(|route| {
             format!(
-                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td></tr>",
+                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td><td>{downstream}</td><td>{upstream}</td></tr>",
                 hash = route.route_hash,
                 label = escape_html(&route.route_id.as_label()),
                 state = route.state,
@@ -112,13 +127,15 @@ async fn routes_page(State(state): State<DashboardState>) -> Html<String> {
                 origin = route.origin_count,
                 reuse = route.reuse_count,
                 protected = route.protected_count,
+                downstream = protocol_counts_html(&route.downstream_protocols),
+                upstream = protocol_counts_html(&route.upstream_protocols),
             )
         })
         .collect::<String>();
     Html(layout(
         "Routes",
         &format!(
-            "<table><thead><tr><th>Route</th><th>Status</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th></tr></thead><tbody>{rows}</tbody></table>"
+            "<table><thead><tr><th>Route</th><th>Status</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th><th>Downstream</th><th>Upstream</th></tr></thead><tbody>{rows}</tbody></table>"
         ),
     ))
 }
@@ -152,6 +169,8 @@ async fn route_page(
     <dt>Shadow mismatches</dt><dd>{}</dd>
     <dt>Revalidated</dt><dd>{}</dd>
     <dt>Stale served</dt><dd>{}</dd>
+    <dt>Downstream protocols</dt><dd>{}</dd>
+    <dt>Upstream protocols</dt><dd>{}</dd>
     <dt>p95 latency</dt><dd>{:.2} ms</dd>
   </dl>
 </section>
@@ -166,6 +185,8 @@ async fn route_page(
             route.shadow_mismatches,
             route.revalidation_attempts,
             route.stale_served,
+            protocol_counts_html(&route.downstream_protocols),
+            protocol_counts_html(&route.upstream_protocols),
             route.latency.p95_ms,
         ),
     ))
@@ -239,6 +260,17 @@ async fn api_overview(State(state): State<DashboardState>) -> Json<OverviewRespo
         query_hints_rejected: snapshot.overview.query_hints_rejected,
         query_param_suggestions: snapshot.overview.query_param_suggestions,
         store_errors: snapshot.overview.store_errors,
+        dropped_events: snapshot.overview.dropped_events,
+        backpressure_rejections: snapshot.overview.backpressure_rejections,
+        protocol_fallbacks: snapshot.overview.protocol_fallbacks,
+        in_flight_requests: snapshot.overview.in_flight_requests,
+        max_in_flight_requests: snapshot.overview.max_in_flight_requests,
+        downstream_http1_requests: snapshot.overview.downstream_http1_requests,
+        downstream_http2_requests: snapshot.overview.downstream_http2_requests,
+        downstream_http3_requests: snapshot.overview.downstream_http3_requests,
+        upstream_http1_requests: snapshot.overview.upstream_http1_requests,
+        upstream_http2_requests: snapshot.overview.upstream_http2_requests,
+        upstream_http3_requests: snapshot.overview.upstream_http3_requests,
         p50_latency_ms: snapshot.overview.p50_latency_ms,
         p95_latency_ms: snapshot.overview.p95_latency_ms,
         cache_entries: state.store.stats().entries,
@@ -360,6 +392,13 @@ fn parse_route_id(value: &str) -> Option<RouteId> {
     Some(RouteId::new(method, path))
 }
 
+fn protocol_counts_html(counts: &ProtocolCounts) -> String {
+    format!(
+        "h1 {} / h2 {} / h3 {}",
+        counts.http1, counts.http2, counts.http3
+    )
+}
+
 fn layout(title: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -423,6 +462,17 @@ pub struct OverviewResponse {
     pub query_hints_rejected: u64,
     pub query_param_suggestions: u64,
     pub store_errors: u64,
+    pub dropped_events: u64,
+    pub backpressure_rejections: u64,
+    pub protocol_fallbacks: u64,
+    pub in_flight_requests: u64,
+    pub max_in_flight_requests: u64,
+    pub downstream_http1_requests: u64,
+    pub downstream_http2_requests: u64,
+    pub downstream_http3_requests: u64,
+    pub upstream_http1_requests: u64,
+    pub upstream_http2_requests: u64,
+    pub upstream_http3_requests: u64,
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
     pub cache_entries: u64,

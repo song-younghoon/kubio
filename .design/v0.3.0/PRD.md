@@ -1,12 +1,14 @@
 # PRD: kubio v0.3.0
 
-Document version: v0.3 draft
+Document version: v0.3 implemented scope
 Product type: Open-source software
 Primary implementation language: Rust
 Release target: Protocol-aware performance
 Core philosophy: **preserve safety, reduce overhead, support modern HTTP transports deliberately**
 
 ---
+
+Implementation status: v0.3.0 landed the protocol/performance configuration surface, stable HTTP/2 downstream and upstream support, TLS ALPN, h2c prior knowledge, request backpressure, origin pool tuning, guarded HTTP/3 config validation, protocol/store/backpressure/fallback observability, and local benchmark smoke JSON output. The full HTTP/3 QUIC runtime, dedicated benchmark crate, release budgets, observer sharding, and deeper HTTP/2 connection tuning are deferred to a later release.
 
 ## 1. Product Summary
 

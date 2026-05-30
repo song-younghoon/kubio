@@ -1,8 +1,8 @@
 //! Process-local observation state for kubio.
 
 use kubio_core::{
-    CacheKeyHash, Decision, DecisionReason, LatencyBucketSnapshot, LatencySnapshot, Mode,
-    ResponseFingerprint, RouteId, RouteState, StatusClass, StatusClassCounts,
+    CacheKeyHash, Decision, DecisionReason, HttpProtocol, LatencyBucketSnapshot, LatencySnapshot,
+    Mode, ResponseFingerprint, RouteId, RouteState, StatusClass, StatusClassCounts,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -406,6 +406,87 @@ impl Observer {
         );
     }
 
+    pub fn record_downstream_protocol(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.lock();
+        inner.downstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id));
+        route.downstream_protocols.increment(protocol);
+    }
+
+    pub fn record_upstream_protocol(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.lock();
+        inner.upstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id));
+        route.upstream_protocols.increment(protocol);
+    }
+
+    pub fn record_backpressure_rejection(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.lock();
+        inner.backpressure_rejections += 1;
+        inner.downstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.downstream_protocols.increment(protocol);
+        self.push_event_locked(
+            &mut inner,
+            EventType::BackpressureRejected,
+            Some(route_id),
+            None,
+            vec![DecisionReason::LowEstimatedBenefit],
+            "request rejected because the in-flight request limit was reached",
+        );
+    }
+
+    pub fn record_in_flight(&self, current: usize, max: usize) {
+        let mut inner = self.inner.lock();
+        inner.in_flight_requests = current as u64;
+        inner.max_in_flight_requests = max as u64;
+    }
+
+    pub fn record_protocol_fallback(
+        &self,
+        route_id: RouteId,
+        preferred: HttpProtocol,
+        actual: HttpProtocol,
+    ) {
+        let mut inner = self.inner.lock();
+        inner.protocol_fallbacks += 1;
+        self.push_event_locked(
+            &mut inner,
+            EventType::ProtocolFallback,
+            Some(route_id),
+            None,
+            vec![DecisionReason::PolicyError],
+            format!("origin protocol fallback from {preferred} to {actual}"),
+        );
+    }
+
+    pub fn record_header_limit_rejection(&self, route_id: RouteId, protocol: HttpProtocol) {
+        let mut inner = self.inner.lock();
+        inner.downstream_protocols.increment(protocol);
+        let route = inner
+            .routes
+            .entry(route_id.clone())
+            .or_insert_with(|| RouteStats::new(route_id.clone()));
+        route.downstream_protocols.increment(protocol);
+        self.push_event_locked(
+            &mut inner,
+            EventType::RequestHeaderLimitExceeded,
+            Some(route_id),
+            None,
+            vec![DecisionReason::HeaderListTooLarge],
+            "request rejected because HTTP/2 headers exceeded the configured limit",
+        );
+    }
+
     pub fn route_state(&self, route_id: &RouteId) -> RouteState {
         self.inner
             .lock()
@@ -450,6 +531,17 @@ impl Observer {
 
         let mut overview = OverviewSnapshot::from_routes(&routes);
         overview.store_errors = inner.store_errors;
+        overview.dropped_events = inner.dropped_events;
+        overview.backpressure_rejections = inner.backpressure_rejections;
+        overview.protocol_fallbacks = inner.protocol_fallbacks;
+        overview.in_flight_requests = inner.in_flight_requests;
+        overview.max_in_flight_requests = inner.max_in_flight_requests;
+        overview.downstream_http1_requests = inner.downstream_protocols.http1;
+        overview.downstream_http2_requests = inner.downstream_protocols.http2;
+        overview.downstream_http3_requests = inner.downstream_protocols.http3;
+        overview.upstream_http1_requests = inner.upstream_protocols.http1;
+        overview.upstream_http2_requests = inner.upstream_protocols.http2;
+        overview.upstream_http3_requests = inner.upstream_protocols.http3;
         ObserverSnapshot {
             overview,
             routes,
@@ -611,6 +703,7 @@ impl Observer {
         });
         while inner.events.len() > self.max_events {
             inner.events.pop_front();
+            inner.dropped_events += 1;
         }
     }
 
@@ -651,6 +744,30 @@ struct ObserverInner {
     keys: HashMap<CacheKeyHash, KeyObservation>,
     events: VecDeque<Event>,
     store_errors: u64,
+    dropped_events: u64,
+    backpressure_rejections: u64,
+    protocol_fallbacks: u64,
+    in_flight_requests: u64,
+    max_in_flight_requests: u64,
+    downstream_protocols: ProtocolCounts,
+    upstream_protocols: ProtocolCounts,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProtocolCounts {
+    pub http1: u64,
+    pub http2: u64,
+    pub http3: u64,
+}
+
+impl ProtocolCounts {
+    fn increment(&mut self, protocol: HttpProtocol) {
+        match protocol {
+            HttpProtocol::Http1 => self.http1 += 1,
+            HttpProtocol::Http2 => self.http2 += 1,
+            HttpProtocol::Http3 => self.http3 += 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -676,6 +793,8 @@ struct RouteStats {
     query_hint_applied: u64,
     query_hint_rejected: u64,
     query_param_suggestions: u64,
+    downstream_protocols: ProtocolCounts,
+    upstream_protocols: ProtocolCounts,
     status_classes: StatusClassCounts,
     latencies: VecDeque<Duration>,
     score: i16,
@@ -707,6 +826,8 @@ impl RouteStats {
             query_hint_applied: 0,
             query_hint_rejected: 0,
             query_param_suggestions: 0,
+            downstream_protocols: ProtocolCounts::default(),
+            upstream_protocols: ProtocolCounts::default(),
             status_classes: StatusClassCounts::default(),
             latencies: VecDeque::new(),
             score: 0,
@@ -758,6 +879,8 @@ impl RouteStats {
             query_hint_applied: self.query_hint_applied,
             query_hint_rejected: self.query_hint_rejected,
             query_param_suggestions: self.query_param_suggestions,
+            downstream_protocols: self.downstream_protocols.clone(),
+            upstream_protocols: self.upstream_protocols.clone(),
             status_classes: self.status_classes.clone(),
             latency: latency_snapshot(&self.latencies),
             repeat_rate: self.repeat_rate(),
@@ -1003,6 +1126,17 @@ pub struct OverviewSnapshot {
     pub query_hints_rejected: u64,
     pub query_param_suggestions: u64,
     pub store_errors: u64,
+    pub dropped_events: u64,
+    pub backpressure_rejections: u64,
+    pub protocol_fallbacks: u64,
+    pub in_flight_requests: u64,
+    pub max_in_flight_requests: u64,
+    pub downstream_http1_requests: u64,
+    pub downstream_http2_requests: u64,
+    pub downstream_http3_requests: u64,
+    pub upstream_http1_requests: u64,
+    pub upstream_http2_requests: u64,
+    pub upstream_http3_requests: u64,
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
 }
@@ -1080,6 +1214,8 @@ pub struct RouteSnapshot {
     pub query_hint_applied: u64,
     pub query_hint_rejected: u64,
     pub query_param_suggestions: u64,
+    pub downstream_protocols: ProtocolCounts,
+    pub upstream_protocols: ProtocolCounts,
     pub status_classes: StatusClassCounts,
     pub latency: LatencySnapshot,
     pub repeat_rate: f64,
@@ -1139,6 +1275,10 @@ pub enum EventType {
     QueryHintApplied,
     QueryHintRejected,
     QueryParamSuggestionCreated,
+    BackpressureRejected,
+    ProtocolFallback,
+    RequestHeaderLimitExceeded,
+    StoreSaturated,
     DiskStoreOpened,
     DiskStoreCorruptEntrySkipped,
     DiskStoreErrorFailOpen,
@@ -1298,6 +1438,47 @@ mod tests {
         assert_eq!(snapshot.events[0].message, "event-2");
         assert_eq!(snapshot.events[1].message, "event-3");
         assert_eq!(snapshot.overview.store_errors, 4);
+        assert_eq!(snapshot.overview.dropped_events, 2);
+    }
+
+    #[test]
+    fn protocol_and_backpressure_counts_are_bounded() {
+        let observer = observer();
+        let route = RouteId::new("GET", "/api/products");
+
+        observer.record_downstream_protocol(route.clone(), HttpProtocol::Http2);
+        observer.record_upstream_protocol(route.clone(), HttpProtocol::Http1);
+        observer.record_backpressure_rejection(route.clone(), HttpProtocol::Http2);
+        observer.record_in_flight(1, 2);
+        observer.record_protocol_fallback(route.clone(), HttpProtocol::Http2, HttpProtocol::Http1);
+        observer.record_header_limit_rejection(route.clone(), HttpProtocol::Http2);
+
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.overview.downstream_http2_requests, 3);
+        assert_eq!(snapshot.overview.upstream_http1_requests, 1);
+        assert_eq!(snapshot.overview.backpressure_rejections, 1);
+        assert_eq!(snapshot.overview.in_flight_requests, 1);
+        assert_eq!(snapshot.overview.max_in_flight_requests, 2);
+        assert_eq!(snapshot.overview.protocol_fallbacks, 1);
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::BackpressureRejected));
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::ProtocolFallback));
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::RequestHeaderLimitExceeded));
+        let route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.route_id.as_label() == "GET /api/products")
+            .unwrap();
+        assert_eq!(route.downstream_protocols.http2, 3);
+        assert_eq!(route.upstream_protocols.http1, 1);
     }
 
     #[test]
