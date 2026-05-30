@@ -35,6 +35,8 @@ use url::Url;
 static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(30000);
 #[cfg(feature = "experimental-http3")]
 static NEXT_TEST_UDP_PORT: AtomicUsize = AtomicUsize::new(40000);
+#[cfg(feature = "experimental-http3")]
+static UPSTREAM_H3_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn watch_mode_forwards_and_observes() {
@@ -894,6 +896,7 @@ async fn required_origin_protocol_mismatch_fails_closed() {
 #[cfg(feature = "experimental-http3")]
 #[tokio::test]
 async fn upstream_h3_origin_success_records_protocol() {
+    let _guard = UPSTREAM_H3_TEST_LOCK.lock().await;
     let origin = TestHttp3Origin::start().await;
     let runtime = TestRuntime::start_with_upstream_http3(
         origin.url(),
@@ -920,6 +923,7 @@ async fn upstream_h3_origin_success_records_protocol() {
 #[cfg(feature = "experimental-http3")]
 #[tokio::test]
 async fn upstream_h3_required_failure_fails_closed() {
+    let _guard = UPSTREAM_H3_TEST_LOCK.lock().await;
     let unused = unused_udp_addr();
     let origin = Url::parse(&format!("https://localhost:{}", unused.port())).unwrap();
     let runtime =
@@ -941,6 +945,7 @@ async fn upstream_h3_required_failure_fails_closed() {
 #[cfg(feature = "experimental-http3")]
 #[tokio::test]
 async fn upstream_h3_preferred_falls_back_for_replayable_http_origin() {
+    let _guard = UPSTREAM_H3_TEST_LOCK.lock().await;
     let origin = TestOrigin::start().await;
     let runtime =
         TestRuntime::start_with_upstream_http3(origin.url(), OriginProtocolPreference::Http3, true)
@@ -964,6 +969,7 @@ async fn upstream_h3_preferred_falls_back_for_replayable_http_origin() {
 #[cfg(feature = "experimental-http3")]
 #[tokio::test]
 async fn upstream_h3_blocks_non_replayable_fallback() {
+    let _guard = UPSTREAM_H3_TEST_LOCK.lock().await;
     let origin = TestOrigin::start().await;
     let runtime =
         TestRuntime::start_with_upstream_http3(origin.url(), OriginProtocolPreference::Http3, true)
@@ -987,6 +993,7 @@ async fn upstream_h3_blocks_non_replayable_fallback() {
 #[cfg(feature = "experimental-http3")]
 #[tokio::test]
 async fn revalidation_can_use_upstream_h3() {
+    let _guard = UPSTREAM_H3_TEST_LOCK.lock().await;
     let origin = TestHttp3Origin::start().await;
     let runtime = TestRuntime::start_with_upstream_http3_auto(origin.url()).await;
 
