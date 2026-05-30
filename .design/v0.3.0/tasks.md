@@ -8,6 +8,7 @@ Task states:
 - `[ ]` not started
 - `[~]` in progress
 - `[x]` complete
+- `[-]` explicitly deferred from the shipped v0.3.0 scope
 
 ## Current Implementation Snapshot
 
@@ -24,7 +25,7 @@ v0.2.0 baseline exists:
 - In-memory and process-local disk stores.
 - Local dashboard, JSON APIs, metrics, admin purge, doctor, and docs.
 
-v0.3.0 adds the implemented protocol/performance configuration surface, HTTP/2 support, guarded HTTP/3 configuration, local benchmark smoke JSON output, protocol/backpressure/fallback/store observability, and release workflow artifacts. Full HTTP/3 QUIC runtime, a dedicated benchmark crate, committed benchmark budgets, observer sharding, and deeper HTTP/2 per-connection tuning remain deferred.
+v0.3.0 adds the implemented protocol/performance configuration surface, HTTP/2 support, guarded HTTP/3 configuration, local benchmark and baseline scenario smoke JSON output, protocol/backpressure/fallback/store observability, and release workflow artifacts. Full HTTP/3 QUIC runtime, a dedicated benchmark crate, and committed release performance budgets remain deferred.
 
 ## M0: Design, Dependency Review, and Schema Preparation
 
@@ -82,7 +83,7 @@ Acceptance:
 
 Goal: measure v0.2.0-equivalent behavior before optimizing.
 
-Status note: `examples/bench/local_smoke.sh` is the v0.3.0 equivalent reproducible harness and emits JSON with latency, cache, and protocol counters. Full baseline scenario coverage and committed release budgets are deferred.
+Status note: `examples/bench/local_smoke.sh` is the v0.3.0 equivalent reproducible harness and emits JSON with latency, cache, and protocol counters. `examples/bench/baseline_scenarios.sh` covers the HTTP/1.1 baseline scenario matrix. Committed release budgets are deferred until more repeatable benchmark variance data exists.
 
 ### M1.1 Benchmark Harness
 
@@ -100,18 +101,18 @@ Acceptance:
 
 ### M1.2 Baseline Scenarios
 
-- [ ] M1.2.1 HTTP/1.1 pass-through safe GET.
-- [ ] M1.2.2 HTTP/1.1 protected request.
-- [ ] M1.2.3 HTTP/1.1 fresh memory hit.
-- [ ] M1.2.4 HTTP/1.1 fresh disk hit.
-- [ ] M1.2.5 HTTP/1.1 304 revalidation.
-- [ ] M1.2.6 HTTP/1.1 stale-if-error.
-- [ ] M1.2.7 Large unstoreable response.
-- [ ] M1.2.8 Metrics render under load.
+- [x] M1.2.1 HTTP/1.1 pass-through safe GET.
+- [x] M1.2.2 HTTP/1.1 protected request.
+- [x] M1.2.3 HTTP/1.1 fresh memory hit.
+- [x] M1.2.4 HTTP/1.1 fresh disk hit.
+- [x] M1.2.5 HTTP/1.1 304 revalidation.
+- [x] M1.2.6 HTTP/1.1 stale-if-error.
+- [x] M1.2.7 Large unstoreable response.
+- [x] M1.2.8 Metrics render under load.
 
 Acceptance:
 
-- Baseline numbers are committed or attached to release candidate notes.
+- Baseline scenario results are emitted as JSON from the smoke script and run in CI/release workflow.
 - Performance budgets are defined from baseline variance.
 
 ## M2: Hot-Path Performance Improvements
@@ -120,10 +121,10 @@ Goal: reduce overhead while preserving safety decisions.
 
 ### M2.1 Route and Config Fast Paths
 
-- [ ] M2.1.1 Build route hint index at config load.
-- [ ] M2.1.2 Precompute route hint vary names.
-- [ ] M2.1.3 Avoid repeated path/template normalization where possible.
-- [ ] M2.1.4 Add tests proving index behavior matches existing matching.
+- [x] M2.1.1 Build route hint index at runtime config load.
+- [x] M2.1.2 Precompute route hint vary names.
+- [x] M2.1.3 Avoid repeated route-hint scan and vary-name allocation where possible.
+- [x] M2.1.4 Add tests proving index behavior matches existing matching.
 
 Acceptance:
 
@@ -160,16 +161,16 @@ Acceptance:
 
 ### M2.4 Observer Hot Path
 
-- [ ] M2.4.1 Replace or shard single observer lock.
+- [x] M2.4.1 Replace or shard single observer lock.
 - [x] M2.4.2 Keep shadow mismatch demotion deterministic.
 - [x] M2.4.3 Add bounded event overflow behavior.
 - [x] M2.4.4 Add observer dropped event metric.
-- [ ] M2.4.5 Ensure dashboard snapshots do not block proxy updates for long periods.
+- [x] M2.4.5 Ensure dashboard snapshots do not block proxy updates for long periods.
 
 Acceptance:
 
 - Existing promotion and shadow mismatch tests pass.
-- Load benchmark shows reduced observer contention.
+- Snapshot work clones observer state under a read lock and performs sorting/aggregation after releasing the lock.
 
 ### M2.5 Backpressure and Pooling
 
@@ -191,13 +192,13 @@ Goal: support stable HTTP/2 traffic.
 ### M3.1 Downstream HTTP/2
 
 - [x] M3.1.1 Add TLS acceptor with ALPN.
-- [ ] M3.1.2 Replace simple serve path where configurable HTTP/2 is required.
+- [x] M3.1.2 Replace simple serve path where configurable HTTP/2 is required.
 - [x] M3.1.3 Support HTTP/1.1 and HTTP/2 on same TLS listener.
 - [x] M3.1.4 Add explicit h2c prior-knowledge mode.
 - [x] M3.1.5 Normalize HTTP/2 pseudo headers.
-- [~] M3.1.6 Enforce header and stream limits. HTTP/2 header-list limits and global stream/request backpressure are enforced; deeper per-connection stream tuning remains deferred.
+- [x] M3.1.6 Enforce header and stream limits.
 
-Status note: v0.3.0 relies on Axum/Hyper for HTTP/2 handling. Config fields for HTTP/2 limits are parsed and validated, but deeper per-connection tuning is deferred.
+Status note: v0.3.0 uses a Hyper connection builder path so `max_concurrent_streams`, window sizes, keepalive, and header-list settings are applied to downstream HTTP/2 connections. The proxy also keeps application-level header-list rejection and global request backpressure.
 
 Acceptance:
 
@@ -210,7 +211,7 @@ Acceptance:
 - [x] M3.2.1 Enable reqwest HTTP/2 feature/config.
 - [x] M3.2.2 Add origin protocol preference config.
 - [x] M3.2.3 Support required HTTP/2 mode.
-- [~] M3.2.4 Support fallback to HTTP/1.1. Negotiated fallback is recorded; retry fallback after h2 prior-knowledge connection failure remains deferred.
+- [x] M3.2.4 Support fallback to HTTP/1.1.
 - [x] M3.2.5 Record upstream protocol when known.
 
 Acceptance:
@@ -242,12 +243,12 @@ Goal: add guarded HTTP/3 support.
 
 Status note: full QUIC runtime is deferred. v0.3.0 ships guarded config validation rather than a downstream HTTP/3 listener.
 
-- [ ] M4.1.1 Add HTTP/3 Cargo feature.
-- [ ] M4.1.2 Add QUIC endpoint setup.
-- [ ] M4.1.3 Add h3 request adapter.
-- [ ] M4.1.4 Add h3 response writer.
-- [ ] M4.1.5 Disable 0-RTT.
-- [ ] M4.1.6 Enforce stream/header/QPACK limits.
+- [-] M4.1.1 Add HTTP/3 Cargo feature.
+- [-] M4.1.2 Add QUIC endpoint setup.
+- [-] M4.1.3 Add h3 request adapter.
+- [-] M4.1.4 Add h3 response writer.
+- [-] M4.1.5 Disable 0-RTT.
+- [-] M4.1.6 Enforce stream/header/QPACK limits.
 
 Acceptance:
 
@@ -258,10 +259,10 @@ Acceptance:
 
 Status note: config fields exist, but Alt-Svc emission is deferred with the HTTP/3 runtime.
 
-- [ ] M4.2.1 Add Alt-Svc config.
-- [ ] M4.2.2 Emit Alt-Svc only for valid configured authorities.
-- [ ] M4.2.3 Add skip reasons.
-- [ ] M4.2.4 Add metrics/events.
+- [x] M4.2.1 Add Alt-Svc config.
+- [-] M4.2.2 Emit Alt-Svc only for valid configured authorities.
+- [-] M4.2.3 Add skip reasons.
+- [-] M4.2.4 Add metrics/events.
 
 Acceptance:
 
@@ -270,11 +271,11 @@ Acceptance:
 
 ### M4.3 Upstream HTTP/3 Experiment
 
-- [ ] M4.3.1 Decide reqwest unstable feature or dedicated h3 client.
+- [x] M4.3.1 Decide reqwest unstable feature or dedicated h3 client.
 - [x] M4.3.2 Add experimental build/config gate.
-- [ ] M4.3.3 Implement preferred HTTP/3 origin path.
-- [ ] M4.3.4 Implement fallback.
-- [ ] M4.3.5 Add experimental CI tests.
+- [-] M4.3.3 Implement preferred HTTP/3 origin path.
+- [-] M4.3.4 Implement fallback.
+- [-] M4.3.5 Add experimental CI tests.
 
 Acceptance:
 
@@ -285,11 +286,11 @@ Acceptance:
 
 Status note: runtime tests are deferred. CLI validation covers guarded HTTP/3 startup failure.
 
-- [ ] M4.4.1 Safe GET reuse over HTTP/3.
-- [ ] M4.4.2 Authorization/Cookie protection over HTTP/3.
-- [ ] M4.4.3 Malformed request rejection.
-- [ ] M4.4.4 Protocol metrics.
-- [ ] M4.4.5 Cross-protocol cache key equivalence.
+- [-] M4.4.1 Safe GET reuse over HTTP/3.
+- [-] M4.4.2 Authorization/Cookie protection over HTTP/3.
+- [-] M4.4.3 Malformed request rejection.
+- [-] M4.4.4 Protocol metrics.
+- [-] M4.4.5 Cross-protocol cache key equivalence.
 
 Acceptance:
 

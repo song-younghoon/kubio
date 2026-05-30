@@ -8,7 +8,7 @@ Core philosophy: **preserve safety, reduce overhead, support modern HTTP transpo
 
 ---
 
-Implementation status: v0.3.0 landed the protocol/performance configuration surface, stable HTTP/2 downstream and upstream support, TLS ALPN, h2c prior knowledge, request backpressure, origin pool tuning, guarded HTTP/3 config validation, protocol/store/backpressure/fallback observability, and local benchmark smoke JSON output. The full HTTP/3 QUIC runtime, dedicated benchmark crate, release budgets, observer sharding, and deeper HTTP/2 connection tuning are deferred to a later release.
+Implementation status: v0.3.0 landed the protocol/performance configuration surface, stable HTTP/2 downstream and upstream support, TLS ALPN, h2c prior knowledge, configurable HTTP/2 connection settings, request backpressure, origin pool tuning, guarded HTTP/3 config validation, route-hint fast paths, protocol/store/backpressure/fallback observability, and local benchmark/baseline smoke JSON output. The full HTTP/3 QUIC runtime, dedicated benchmark crate, and committed release budgets are deferred to a later release.
 
 ## 1. Product Summary
 
@@ -34,7 +34,7 @@ v0.2.0 can safely reuse, revalidate, persist, and explain public GET/HEAD respon
 - The observer and store paths are simple and safe but can add lock contention under high request rates.
 - Disk store operations use blocking filesystem calls from async store methods.
 - Protected and unstoreable responses should stream with minimal buffering wherever possible.
-- The proxy uses the simple Axum serve path and is effectively HTTP/1.1 for edge use.
+- Before v0.3.0, the proxy used the simple Axum serve path and was effectively HTTP/1.1 for edge use.
 - The upstream reqwest client is configured for HTTP/1.1 with rustls and streaming, but not explicitly for HTTP/2.
 - HTTP/3 requires a different transport model over QUIC and should not be bolted directly into the HTTP/1.1 path without clear boundaries.
 

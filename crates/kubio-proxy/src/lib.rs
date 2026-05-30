@@ -8,12 +8,15 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use http::header;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder as HyperServerBuilder;
+use hyper_util::service::TowerToHyperService;
 use kubio_core::{
-    body_hash, build_cache_key_with_query_config, is_hop_by_hop_header, is_sensitive_query_param,
-    matching_route_hint, query_pattern_matches, short_hash, stable_header_hash, CacheKeyHash,
-    Decision, DecisionReason, EffectiveConfig, HttpProtocol, Mode, OriginProtocolPreference,
-    ResponseFingerprint, RouteHintConfig, RouteId, StaleIfErrorMode, StoredCacheControl, TlsConfig,
-    Validators,
+    body_hash, build_cache_key_with_query_names, is_hop_by_hop_header, is_sensitive_query_param,
+    query_pattern_matches, short_hash, stable_header_hash, CacheKeyHash, Decision, DecisionReason,
+    EffectiveConfig, HttpProtocol, Mode, OriginProtocolPreference, ResponseFingerprint,
+    RouteHintConfig, RouteId, StaleIfErrorMode, StoredCacheControl, TlsConfig, Validators,
 };
 use kubio_observe::{
     EventType, ObservationRecord, Observer, QueryParamRecord, RevalidationOutcome,
@@ -21,6 +24,7 @@ use kubio_observe::{
 use kubio_policy::PolicyEngine;
 use kubio_store::{CacheEntry, CacheStore, PurgeSelector};
 use reqwest::Client;
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -29,12 +33,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
-use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use tower::util::ServiceExt;
 use tracing::{debug, warn};
 use url::{form_urlencoded, Url};
 
@@ -47,6 +52,8 @@ pub struct ProxyState {
     pub observer: Arc<Observer>,
     pub store: Arc<dyn CacheStore>,
     pub client: Client,
+    pub fallback_client: Client,
+    route_hints: Arc<RouteHintLookup>,
     in_flight: Arc<Semaphore>,
     panic_switch_was_active: Arc<AtomicBool>,
 }
@@ -58,11 +65,11 @@ impl ProxyState {
         observer: Arc<Observer>,
         store: Arc<dyn CacheStore>,
     ) -> anyhow::Result<Self> {
-        let mut client = Client::builder()
-            .timeout(config.server.origin_timeout)
-            .connect_timeout(config.server.origin_timeout.min(Duration::from_secs(5)))
-            .pool_max_idle_per_host(config.performance.origin_pool_max_idle_per_host)
-            .pool_idle_timeout(config.performance.origin_pool_idle_timeout);
+        let client_builder = origin_client_builder(&config);
+        let fallback_client = origin_client_builder(&config)
+            .build()
+            .context("build fallback origin HTTP client")?;
+        let mut client = client_builder;
         if config.origin_protocol.http2_prior_knowledge
             || (config.origin_protocol.preferred == OriginProtocolPreference::Http2
                 && config.origin.scheme() == "http")
@@ -71,6 +78,7 @@ impl ProxyState {
         }
         let client = client.build().context("build origin HTTP client")?;
         let max_in_flight_requests = config.performance.max_in_flight_requests;
+        let route_hints = Arc::new(RouteHintLookup::new(&config.routes));
         observer.record_in_flight(0, max_in_flight_requests);
         Ok(Self {
             config,
@@ -78,10 +86,96 @@ impl ProxyState {
             observer,
             store,
             client,
+            fallback_client,
+            route_hints,
             in_flight: Arc::new(Semaphore::new(max_in_flight_requests)),
             panic_switch_was_active: Arc::new(AtomicBool::new(false)),
         })
     }
+}
+
+fn origin_client_builder(config: &EffectiveConfig) -> reqwest::ClientBuilder {
+    let mut builder = Client::builder()
+        .timeout(config.server.origin_timeout)
+        .connect_timeout(config.server.origin_timeout.min(Duration::from_secs(5)))
+        .pool_max_idle_per_host(config.performance.origin_pool_max_idle_per_host)
+        .pool_idle_timeout(config.performance.origin_pool_idle_timeout)
+        .http2_initial_stream_window_size(config.server.http2.initial_stream_window_size)
+        .http2_initial_connection_window_size(config.server.http2.initial_connection_window_size)
+        .http2_max_header_list_size(
+            config
+                .server
+                .http2
+                .max_header_list_size
+                .min(u64::from(u32::MAX)) as u32,
+        )
+        .http2_keep_alive_timeout(config.server.http2.keepalive_timeout)
+        .http2_keep_alive_while_idle(true);
+    if let Some(interval) = config.server.http2.keepalive_interval {
+        builder = builder.http2_keep_alive_interval(interval);
+    }
+    builder
+}
+
+#[derive(Debug)]
+struct RouteHintLookup {
+    by_route: HashMap<RouteId, PreparedRouteHint>,
+    default_vary_names: Vec<String>,
+}
+
+impl RouteHintLookup {
+    fn new(hints: &[RouteHintConfig]) -> Self {
+        let mut by_route = HashMap::with_capacity(hints.len());
+        for hint in hints {
+            let route_id = RouteId::new(
+                hint.route_match.method.to_ascii_uppercase(),
+                hint.route_match.path.clone(),
+            );
+            by_route
+                .entry(route_id)
+                .or_insert_with(|| PreparedRouteHint {
+                    hint: hint.clone(),
+                    vary_names: prepared_vary_names(hint),
+                });
+        }
+        Self {
+            by_route,
+            default_vary_names: DEFAULT_VARY_HEADERS
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        }
+    }
+
+    fn get(&self, route_id: &RouteId) -> Option<&PreparedRouteHint> {
+        self.by_route.get(route_id)
+    }
+
+    fn default_vary_names(&self) -> &[String] {
+        &self.default_vary_names
+    }
+}
+
+#[derive(Debug)]
+struct PreparedRouteHint {
+    hint: RouteHintConfig,
+    vary_names: Vec<String>,
+}
+
+fn prepared_vary_names(hint: &RouteHintConfig) -> Vec<String> {
+    let names = if hint.vary.allow.is_empty() {
+        DEFAULT_VARY_HEADERS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    } else {
+        hint.vary
+            .allow
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect()
+    };
+    names
 }
 
 pub fn router(state: ProxyState) -> Router {
@@ -96,50 +190,132 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let listener = TcpListener::bind(state.config.server.listen).await?;
-    if let Some(tls) = state.config.server.tls.as_ref() {
-        let acceptor = tls_acceptor(tls, &state.config)?;
-        let listener = TlsListener { listener, acceptor };
-        axum::serve(listener, router(state))
-            .with_graceful_shutdown(shutdown)
-            .await?;
+    let config = state.config.clone();
+    let app = router(state);
+    if let Some(tls) = config.server.tls.as_ref() {
+        let acceptor = tls_acceptor(tls, &config)?;
+        accept_tls_loop(listener, acceptor, app, config, shutdown).await;
     } else {
-        axum::serve(listener, router(state))
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        accept_plain_loop(listener, app, config, shutdown).await;
     }
     Ok(())
 }
 
-struct TlsListener {
+async fn accept_plain_loop<F>(
     listener: TcpListener,
-    acceptor: TlsAcceptor,
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = TlsStream<tokio::net::TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            match self.listener.accept().await {
-                Ok((stream, addr)) => match self.acceptor.accept(stream).await {
-                    Ok(tls) => return (tls, addr),
+    app: Router,
+    config: Arc<EffectiveConfig>,
+    shutdown: F,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, addr)) => spawn_proxy_connection(stream, addr, app.clone(), config.clone()),
+                    Err(err) if is_connection_accept_error(&err) => {}
                     Err(err) => {
-                        warn!(error = %err, "TLS handshake failed");
+                        warn!(error = %err, "proxy accept failed");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-                },
-                Err(err) if is_connection_accept_error(&err) => {}
-                Err(err) => {
-                    warn!(error = %err, "proxy accept failed");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
     }
+}
 
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.listener.local_addr()
+async fn accept_tls_loop<F>(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    app: Router,
+    config: Arc<EffectiveConfig>,
+    shutdown: F,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, addr)) => {
+                        let acceptor = acceptor.clone();
+                        let app = app.clone();
+                        let config = config.clone();
+                        tokio::spawn(async move {
+                            match acceptor.accept(stream).await {
+                                Ok(tls) => spawn_proxy_connection(tls, addr, app, config),
+                                Err(err) => warn!(error = %err, "TLS handshake failed"),
+                            }
+                        });
+                    }
+                    Err(err) if is_connection_accept_error(&err) => {}
+                    Err(err) => {
+                        warn!(error = %err, "proxy accept failed");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
     }
+}
+
+fn spawn_proxy_connection<I>(io: I, addr: SocketAddr, app: Router, config: Arc<EffectiveConfig>)
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(err) = serve_proxy_connection(io, app, &config).await {
+            debug!(remote = %addr, error = %err, "proxy connection closed with error");
+        }
+    });
+}
+
+async fn serve_proxy_connection<I>(
+    io: I,
+    app: Router,
+    config: &EffectiveConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(io);
+    let tower_service = app.map_request(|request: Request<Incoming>| request.map(Body::new));
+    let hyper_service = TowerToHyperService::new(tower_service);
+    let builder = http_server_builder(config);
+    builder
+        .serve_connection_with_upgrades(io, hyper_service)
+        .await
+}
+
+fn http_server_builder(config: &EffectiveConfig) -> HyperServerBuilder<TokioExecutor> {
+    let mut builder = HyperServerBuilder::new(TokioExecutor::new());
+    if config.server.protocols.http1 && !config.server.protocols.http2 {
+        builder = builder.http1_only();
+    } else if config.server.protocols.http2 && !config.server.protocols.http1 {
+        builder = builder.http2_only();
+    }
+
+    builder
+        .http2()
+        .max_concurrent_streams(config.server.http2.max_concurrent_streams)
+        .initial_stream_window_size(config.server.http2.initial_stream_window_size)
+        .initial_connection_window_size(config.server.http2.initial_connection_window_size)
+        .keep_alive_interval(config.server.http2.keepalive_interval)
+        .keep_alive_timeout(config.server.http2.keepalive_timeout)
+        .max_header_list_size(transport_header_list_limit(
+            config.server.http2.max_header_list_size,
+        ))
+        .timer(TokioTimer::new());
+    builder
+}
+
+fn transport_header_list_limit(configured: u64) -> u32 {
+    configured.saturating_add(1024).min(u64::from(u32::MAX)) as u32
 }
 
 fn tls_acceptor(tls: &TlsConfig, config: &EffectiveConfig) -> anyhow::Result<TlsAcceptor> {
@@ -254,7 +430,8 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
     state
         .observer
         .record_downstream_protocol(route_id.clone(), downstream_protocol);
-    let route_hint = matching_route_hint(&route_id, &state.config.routes);
+    let route_hint_entry = state.route_hints.get(&route_id);
+    let route_hint = route_hint_entry.map(|entry| &entry.hint);
     let panic_active = panic_switch_active(state.config.panic_file.as_deref());
     record_panic_switch_transition(&state, panic_active, &route_id, None);
 
@@ -325,16 +502,18 @@ async fn proxy_handler(State(state): State<ProxyState>, request: Request<Body>) 
                 Some(&hint.query)
             }
         });
-        let vary_names = route_hint_vary_names(route_hint);
+        let vary_names = route_hint_entry
+            .map(|entry| entry.vary_names.as_slice())
+            .unwrap_or_else(|| state.route_hints.default_vary_names());
         Some(
-            build_cache_key_with_query_config(
+            build_cache_key_with_query_names(
                 &method,
                 state.config.origin.scheme(),
                 &origin_authority(&state.config.origin),
                 &path,
                 query.as_deref(),
                 &headers,
-                &vary_names,
+                vary_names.iter().map(String::as_str),
                 query_config,
             )
             .hash(),
@@ -923,10 +1102,57 @@ async fn send_origin_with_validators(
     route_id: &RouteId,
     validators: Option<&Validators>,
 ) -> Result<reqwest::Response, OriginError> {
+    if origin_protocol_retry_is_possible(state, method, headers) {
+        let body = axum::body::to_bytes(body, state.config.policy.max_request_body_size)
+            .await
+            .map_err(|err| OriginError::BodyRead(err.to_string()))?;
+        match send_origin_bytes(
+            &state.client,
+            state,
+            method,
+            uri,
+            headers,
+            body.clone(),
+            validators,
+        )
+        .await
+        {
+            Ok(response) => return validate_origin_protocol(state, route_id, response),
+            Err(OriginError::Request(err)) if origin_protocol_retry_error(&err) => {
+                let response = send_origin_bytes(
+                    &state.fallback_client,
+                    state,
+                    method,
+                    uri,
+                    headers,
+                    body,
+                    validators,
+                )
+                .await?;
+                return validate_origin_protocol(state, route_id, response);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let response =
+        send_origin_stream(&state.client, state, method, uri, headers, body, validators).await?;
+    validate_origin_protocol(state, route_id, response)
+}
+
+async fn send_origin_stream(
+    client: &Client,
+    state: &ProxyState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Body,
+    validators: Option<&Validators>,
+) -> Result<reqwest::Response, OriginError> {
     let url = origin_url(&state.config.origin, uri);
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut request = state.client.request(req_method, url);
+    let mut request = client.request(req_method, url);
     let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
         if name == header::HOST
@@ -944,11 +1170,55 @@ async fn send_origin_with_validators(
             request = request.header(header::IF_MODIFIED_SINCE.as_str(), last_modified);
         }
     }
-    let response = request
+    request
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
         .send()
         .await
-        .map_err(OriginError::Request)?;
+        .map_err(OriginError::Request)
+}
+
+async fn send_origin_bytes(
+    client: &Client,
+    state: &ProxyState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: bytes::Bytes,
+    validators: Option<&Validators>,
+) -> Result<reqwest::Response, OriginError> {
+    let url = origin_url(&state.config.origin, uri);
+    let req_method =
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut request = client.request(req_method, url);
+    let connection_named_headers = connection_header_names(headers);
+    for (name, value) in headers {
+        if name == header::HOST
+            || is_hop_by_hop_header_named(name.as_str(), &connection_named_headers)
+        {
+            continue;
+        }
+        request = request.header(name.as_str(), value.as_bytes());
+    }
+    if let Some(validators) = validators {
+        if let Some(etag) = validators.etag.as_deref() {
+            request = request.header(header::IF_NONE_MATCH.as_str(), etag);
+        }
+        if let Some(last_modified) = validators.last_modified.as_deref() {
+            request = request.header(header::IF_MODIFIED_SINCE.as_str(), last_modified);
+        }
+    }
+    request
+        .body(body)
+        .send()
+        .await
+        .map_err(OriginError::Request)
+}
+
+fn validate_origin_protocol(
+    state: &ProxyState,
+    route_id: &RouteId,
+    response: reqwest::Response,
+) -> Result<reqwest::Response, OriginError> {
     let actual_protocol = http_protocol_from_version(response.version());
     state
         .observer
@@ -974,9 +1244,32 @@ async fn send_origin_with_validators(
     Ok(response)
 }
 
+fn origin_protocol_retry_is_possible(
+    state: &ProxyState,
+    method: &Method,
+    headers: &HeaderMap,
+) -> bool {
+    state.config.origin_protocol.fallback
+        && origin_uses_http2_prior_knowledge(state)
+        && matches!(method, &Method::GET | &Method::HEAD)
+        && declared_request_body_len(headers) == 0
+        && !headers.contains_key(header::TRANSFER_ENCODING)
+}
+
+fn origin_uses_http2_prior_knowledge(state: &ProxyState) -> bool {
+    state.config.origin_protocol.http2_prior_knowledge
+        || (state.config.origin_protocol.preferred == OriginProtocolPreference::Http2
+            && state.config.origin.scheme() == "http")
+}
+
+fn origin_protocol_retry_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_request()
+}
+
 #[derive(Debug)]
 enum OriginError {
     Request(reqwest::Error),
+    BodyRead(String),
     RequiredProtocol {
         expected: HttpProtocol,
         actual: HttpProtocol,
@@ -993,6 +1286,7 @@ impl fmt::Display for OriginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Request(err) => err.fmt(f),
+            Self::BodyRead(err) => write!(f, "origin request body read failed: {err}"),
             Self::RequiredProtocol { expected, actual } => {
                 write!(
                     f,
@@ -1210,6 +1504,9 @@ fn refresh_entry_after_304(
     let sanitized = sanitized_response_headers(headers);
     for (name, value) in sanitized {
         if let Some(name) = name {
+            if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
+                continue;
+            }
             entry.headers.insert(name, value);
         }
     }
@@ -1234,13 +1531,6 @@ fn refresh_entry_after_304(
 fn revalidation_metadata_is_safe(state: &ProxyState, headers: &HeaderMap) -> bool {
     let signals = state.policy.response_signals(StatusCode::OK, headers);
     state.policy.response_hard_deny_reasons(&signals).is_empty()
-}
-
-fn route_hint_vary_names(route_hint: Option<&RouteHintConfig>) -> Vec<&str> {
-    route_hint
-        .filter(|hint| !hint.vary.allow.is_empty())
-        .map(|hint| hint.vary.allow.iter().map(String::as_str).collect())
-        .unwrap_or_else(|| DEFAULT_VARY_HEADERS.to_vec())
 }
 
 fn record_hint_observations(
@@ -1518,5 +1808,53 @@ mod tests {
         assert!(!cloned.contains_key(header::CONNECTION));
         assert!(!cloned.contains_key("x-stream-id"));
         assert_eq!(cloned.get("content-type").unwrap(), "text/plain");
+    }
+
+    #[test]
+    fn route_hint_lookup_matches_case_insensitively_and_keeps_first_hint() {
+        let first = route_hint("get", "/api/products", Some("first"), &["accept-language"]);
+        let duplicate = route_hint("GET", "/api/products", Some("second"), &["x-variant"]);
+        let lookup = RouteHintLookup::new(&[first, duplicate]);
+
+        let prepared = lookup
+            .get(&RouteId::new("GET", "/api/products"))
+            .expect("route hint should be indexed");
+
+        assert_eq!(prepared.hint.display_name(), "first");
+        assert_eq!(prepared.vary_names, vec!["accept-language"]);
+        assert!(lookup.get(&RouteId::new("POST", "/api/products")).is_none());
+    }
+
+    #[test]
+    fn http_server_builder_respects_enabled_protocols() {
+        let mut config = EffectiveConfig::default();
+        config.server.protocols.http1 = true;
+        config.server.protocols.http2 = false;
+        let builder = http_server_builder(&config);
+        assert!(builder.is_http1_available());
+        assert!(!builder.is_http2_available());
+
+        config.server.protocols.http1 = false;
+        config.server.protocols.http2 = true;
+        let builder = http_server_builder(&config);
+        assert!(!builder.is_http1_available());
+        assert!(builder.is_http2_available());
+    }
+
+    fn route_hint(method: &str, path: &str, name: Option<&str>, vary: &[&str]) -> RouteHintConfig {
+        RouteHintConfig {
+            name: name.map(ToOwned::to_owned),
+            route_match: kubio_core::RouteMatchConfig {
+                method: method.to_string(),
+                path: path.to_string(),
+            },
+            freshness: Default::default(),
+            query: Default::default(),
+            vary: kubio_core::RouteVaryConfig {
+                allow: vary.iter().map(|name| (*name).to_string()).collect(),
+            },
+            stale_if_error: Default::default(),
+            safety: Default::default(),
+        }
     }
 }

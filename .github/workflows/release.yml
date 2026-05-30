@@ -16,6 +16,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
+      - run: bash examples/bench/baseline_scenarios.sh
       - run: cargo build --release -p kubio-cli
       - run: KUBIO_BIN=target/release/kubio bash examples/bench/release_smoke.sh
       - run: mkdir -p dist

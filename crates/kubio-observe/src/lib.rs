@@ -4,7 +4,7 @@ use kubio_core::{
     CacheKeyHash, Decision, DecisionReason, HttpProtocol, LatencyBucketSnapshot, LatencySnapshot,
     Mode, ResponseFingerprint, RouteId, RouteState, StatusClass, StatusClassCounts,
 };
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime};
@@ -14,7 +14,7 @@ const QUERY_SUGGESTION_MIN_FINGERPRINTS: u64 = 2;
 
 #[derive(Debug)]
 pub struct Observer {
-    inner: Mutex<ObserverInner>,
+    inner: RwLock<ObserverInner>,
     max_routes: usize,
     max_keys: usize,
     max_events: usize,
@@ -33,7 +33,7 @@ impl Observer {
         min_shadow_validations: u64,
     ) -> Self {
         Self {
-            inner: Mutex::new(ObserverInner::default()),
+            inner: RwLock::new(ObserverInner::default()),
             max_routes,
             max_keys,
             max_events,
@@ -44,7 +44,7 @@ impl Observer {
     }
 
     pub fn record(&self, record: ObservationRecord) -> ObservationOutcome {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         if inner.routes.len() >= self.max_routes && !inner.routes.contains_key(&record.route_id) {
             self.push_event_locked(
                 &mut inner,
@@ -193,7 +193,7 @@ impl Observer {
         cache_key_hash: Option<CacheKeyHash>,
         outcome: RevalidationOutcome,
     ) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         let route = inner
             .routes
             .entry(route_id.clone())
@@ -247,7 +247,7 @@ impl Observer {
         served: bool,
         reason: DecisionReason,
     ) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         let route = inner
             .routes
             .entry(route_id.clone())
@@ -279,7 +279,7 @@ impl Observer {
         if params.is_empty() {
             return;
         }
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         let route = inner
             .routes
             .entry(route_id.clone())
@@ -303,7 +303,7 @@ impl Observer {
             return;
         }
 
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         let mut suggestions = Vec::new();
         {
             let route = inner
@@ -348,7 +348,7 @@ impl Observer {
         applied: bool,
         reason: DecisionReason,
     ) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         let route = inner
             .routes
             .entry(route_id.clone())
@@ -378,7 +378,7 @@ impl Observer {
     }
 
     pub fn record_query_hint(&self, route_id: RouteId, applied: bool, reason: DecisionReason) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         let route = inner
             .routes
             .entry(route_id.clone())
@@ -407,7 +407,7 @@ impl Observer {
     }
 
     pub fn record_downstream_protocol(&self, route_id: RouteId, protocol: HttpProtocol) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         inner.downstream_protocols.increment(protocol);
         let route = inner
             .routes
@@ -417,7 +417,7 @@ impl Observer {
     }
 
     pub fn record_upstream_protocol(&self, route_id: RouteId, protocol: HttpProtocol) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         inner.upstream_protocols.increment(protocol);
         let route = inner
             .routes
@@ -427,7 +427,7 @@ impl Observer {
     }
 
     pub fn record_backpressure_rejection(&self, route_id: RouteId, protocol: HttpProtocol) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         inner.backpressure_rejections += 1;
         inner.downstream_protocols.increment(protocol);
         let route = inner
@@ -446,7 +446,7 @@ impl Observer {
     }
 
     pub fn record_in_flight(&self, current: usize, max: usize) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         inner.in_flight_requests = current as u64;
         inner.max_in_flight_requests = max as u64;
     }
@@ -457,7 +457,7 @@ impl Observer {
         preferred: HttpProtocol,
         actual: HttpProtocol,
     ) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         inner.protocol_fallbacks += 1;
         self.push_event_locked(
             &mut inner,
@@ -470,7 +470,7 @@ impl Observer {
     }
 
     pub fn record_header_limit_rejection(&self, route_id: RouteId, protocol: HttpProtocol) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         inner.downstream_protocols.increment(protocol);
         let route = inner
             .routes
@@ -489,7 +489,7 @@ impl Observer {
 
     pub fn route_state(&self, route_id: &RouteId) -> RouteState {
         self.inner
-            .lock()
+            .read()
             .routes
             .get(route_id)
             .map(|route| route.state)
@@ -497,7 +497,7 @@ impl Observer {
     }
 
     pub fn is_auto_eligible(&self, route_id: &RouteId, key_hash: &CacheKeyHash) -> bool {
-        let inner = self.inner.lock();
+        let inner = self.inner.read();
         let route_ok = inner
             .routes
             .get(route_id)
@@ -516,7 +516,7 @@ impl Observer {
     }
 
     pub fn snapshot(&self) -> ObserverSnapshot {
-        let inner = self.inner.lock();
+        let inner = self.inner.read().clone();
         let mut routes = inner
             .routes
             .values()
@@ -545,13 +545,13 @@ impl Observer {
         ObserverSnapshot {
             overview,
             routes,
-            events: inner.events.iter().cloned().collect(),
+            events: inner.events.into_iter().collect(),
         }
     }
 
     pub fn route_by_hash(&self, route_hash: &str) -> Option<RouteSnapshot> {
         self.inner
-            .lock()
+            .read()
             .routes
             .values()
             .find(|route| route.route_id.hash() == route_hash)
@@ -726,7 +726,7 @@ impl Observer {
         reasons: Vec<DecisionReason>,
         message: impl Into<String>,
     ) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.write();
         self.push_event_locked(
             &mut inner,
             event_type,
@@ -738,7 +738,7 @@ impl Observer {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct ObserverInner {
     routes: HashMap<RouteId, RouteStats>,
     keys: HashMap<CacheKeyHash, KeyObservation>,
@@ -1570,7 +1570,7 @@ mod tests {
             observer.record_query_fingerprint(route.clone(), &[param], &fp);
         }
 
-        let inner = observer.inner.lock();
+        let inner = observer.inner.read();
         let param = inner
             .routes
             .get(&route)

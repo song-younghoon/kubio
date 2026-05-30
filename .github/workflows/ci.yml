@@ -16,6 +16,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: REQUESTS=10 MODE=auto bash examples/bench/local_smoke.sh
+      - run: bash examples/bench/baseline_scenarios.sh
 
   supply-chain:
     runs-on: ubuntu-latest

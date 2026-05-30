@@ -13,8 +13,9 @@ Implemented status:
 - `cargo test --workspace` passes.
 - `cargo clippy --all-targets --all-features -- -D warnings` passes.
 - CLI validation tests cover HTTP/2 h2c/TLS constraints and guarded HTTP/3 startup failure.
-- Proxy integration coverage includes h2c prior-knowledge forwarding, safe reuse, protected requests, response hard-denies, revalidation, stale-if-error, cross-protocol cache-key equivalence, backpressure rejection behavior, HTTP/2 header-limit rejection, large protected response streaming behavior, oversized no-partial-store behavior, and origin protocol fallback/fail-closed behavior.
+- Proxy integration coverage includes h2c prior-knowledge forwarding, safe reuse, protected requests, response hard-denies, revalidation, stale-if-error, cross-protocol cache-key equivalence, backpressure rejection behavior, HTTP/2 header-limit rejection, large protected response streaming behavior, oversized no-partial-store behavior, origin protocol fallback/fail-closed behavior, and retry fallback after HTTP/2 prior-knowledge connection failure.
 - `examples/bench/local_smoke.sh` emits JSON with latency, cache, and protocol counters.
+- `examples/bench/baseline_scenarios.sh` emits JSON for the HTTP/1.1 baseline scenario matrix and runs in CI/release workflow.
 
 Deferred status:
 

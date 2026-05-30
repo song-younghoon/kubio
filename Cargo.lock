@@ -792,6 +792,8 @@ dependencies = [
  "bytes",
  "http",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "kubio-core",
  "kubio-observe",
  "kubio-policy",
@@ -801,6 +803,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "tower",
  "tracing",
  "url",
 ]

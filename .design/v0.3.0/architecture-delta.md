@@ -11,15 +11,15 @@ Implemented status:
 
 - `kubio-core` includes protocol, TLS, origin protocol, HTTP/2, HTTP/3, and performance config types.
 - `kubio-cli` parses and validates v0.3.0 protocol and performance config.
-- `kubio-proxy` supports HTTP/2 through Axum/Hyper, h2c prior knowledge, TLS ALPN, reqwest upstream HTTP/2, origin pool tuning, and global request backpressure.
-- `kubio-observe`, `kubio-dashboard`, and `kubio-telemetry` expose protocol mix, fallback, in-flight, store operation, store saturation, and observer event-drop signals with bounded labels/events.
+- `kubio-proxy` supports HTTP/2 through a configurable Hyper connection builder, h2c prior knowledge, TLS ALPN, reqwest upstream HTTP/2, origin pool tuning, route-hint derived state, and global request backpressure.
+- `kubio-observe`, `kubio-dashboard`, and `kubio-telemetry` expose protocol mix, fallback, in-flight, store operation, store saturation, and observer event-drop signals with bounded labels/events. Observer snapshots clone state under a read lock and do sorting/aggregation outside the update path.
 - HTTP/3 config is present and fails clearly when enabled because the default v0.3.0 build does not include the QUIC runtime.
 
 Deferred status:
 
 - Dedicated transport crate or full protocol abstraction.
 - QUIC listener, h3 adapters, Alt-Svc emission, and upstream HTTP/3 runtime.
-- Deeper HTTP/2 flow-control application and observer sharding.
+- Further observer sharding beyond the read/write lock split.
 
 The main architectural change is a transport boundary:
 

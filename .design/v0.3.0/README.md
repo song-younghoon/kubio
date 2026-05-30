@@ -4,7 +4,7 @@ Status: implemented scope documented; HTTP/3 runtime deferred
 Source: v0.2.0 implementation baseline and `docs/roadmap.md`
 Target release: `v0.3.0`
 
-This directory defines the v0.3.0 design for kubio. v0.2.0 made safe response reuse more practical with revalidation, bounded stale-if-error, route hints, query intelligence, and process-local disk persistence. The implemented v0.3.0 scope keeps that safety model while adding protocol and performance configuration, downstream and upstream HTTP/2 support, TLS ALPN, h2c prior knowledge, backpressure, protocol/store observability, local benchmark smoke output, and guarded HTTP/3 configuration.
+This directory defines the v0.3.0 design for kubio. v0.2.0 made safe response reuse more practical with revalidation, bounded stale-if-error, route hints, query intelligence, and process-local disk persistence. The implemented v0.3.0 scope keeps that safety model while adding protocol and performance configuration, downstream and upstream HTTP/2 support, TLS ALPN, h2c prior knowledge, backpressure, route-hint fast paths, observer snapshot contention reduction, protocol/store observability, local benchmark smoke output, baseline scenario smoke output, and guarded HTTP/3 configuration.
 
 The release theme is:
 
@@ -18,18 +18,19 @@ Implemented in the v0.3.0 codebase:
 
 - Workspace version, config schema, docs, examples, and release notes for v0.3.0.
 - HTTP/2 downstream support through TLS ALPN or explicit h2c prior knowledge.
-- HTTP/2 upstream support through reqwest, including optional prior knowledge for trusted origins.
+- HTTP/2 downstream connection settings applied through Hyper.
+- HTTP/2 upstream support through reqwest, including optional prior knowledge for trusted origins and HTTP/1.1 retry fallback for replayable safe requests.
 - TLS listener configuration with ALPN derived from enabled HTTP/1.1 and HTTP/2 protocols.
 - Performance knobs for in-flight request limiting, bounded response buffering, unstoreable response streaming, and origin pool tuning.
 - Protocol fallback events/metrics, live in-flight gauges, store operation metrics, observer event-drop metrics, and dashboard protocol summaries.
-- Local benchmark smoke script that emits JSON latency, cache, and protocol counters.
+- Route-hint indexed lookup, precomputed vary names, and observer snapshot work moved outside the write path.
+- Local benchmark and baseline scenario smoke scripts that emit JSON latency, cache, protocol, and scenario counters.
 - HTTP/3 configuration parsing and validation that fails startup clearly when QUIC runtime support is requested.
 
 Deferred beyond the implemented v0.3.0 slice:
 
 - Full HTTP/3 QUIC downstream and upstream runtime.
 - Dedicated benchmark crate and release performance budgets.
-- Deeper HTTP/2 per-connection flow-control tuning.
 
 ## Original Release Definition
 

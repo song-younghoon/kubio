@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use url::Url;
@@ -608,6 +609,34 @@ async fn origin_protocol_fallback_is_recorded_when_preference_is_not_met() {
 }
 
 #[tokio::test]
+async fn h2_prior_knowledge_retries_http1_when_fallback_is_enabled() {
+    let origin = TestHttp1OnlyOrigin::start().await;
+    let runtime = TestRuntime::start_with_origin_protocol(
+        origin.url(),
+        OriginProtocolPreference::Http2,
+        true,
+    )
+    .await;
+
+    let response = reqwest::get(format!("{}/stable", runtime.proxy_url()))
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    assert_eq!(response.text().await.unwrap(), "h1-only");
+    assert_eq!(origin.successful_hits(), 1);
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.protocol_fallbacks, 1);
+    assert_eq!(snapshot.overview.upstream_http1_requests, 1);
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::ProtocolFallback));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
 async fn required_origin_protocol_mismatch_fails_closed() {
     let origin = TestOrigin::start().await;
     let runtime = TestRuntime::start_with_origin_protocol(
@@ -1103,6 +1132,74 @@ impl TestOrigin {
 
     fn url(&self) -> Url {
         Url::parse(&format!("http://{}", self.addr)).unwrap()
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+struct TestHttp1OnlyOrigin {
+    addr: SocketAddr,
+    hits: Arc<AtomicUsize>,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl TestHttp1OnlyOrigin {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let task_hits = hits.clone();
+        let (tx, mut rx) = oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut rx => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut stream, _)) = accepted else {
+                            continue;
+                        };
+                        let hits = task_hits.clone();
+                        tokio::spawn(async move {
+                            let mut buffer = [0; 1024];
+                            let Ok(read) = stream.read(&mut buffer).await else {
+                                return;
+                            };
+                            if buffer[..read].starts_with(b"PRI * HTTP/2.0") {
+                                return;
+                            }
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            let response = concat!(
+                                "HTTP/1.1 200 OK\r\n",
+                                "content-length: 7\r\n",
+                                "cache-control: public, max-age=60\r\n",
+                                "connection: close\r\n",
+                                "\r\n",
+                                "h1-only",
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Self {
+            addr,
+            hits,
+            shutdown: Some(tx),
+        }
+    }
+
+    fn url(&self) -> Url {
+        Url::parse(&format!("http://{}", self.addr)).unwrap()
+    }
+
+    fn successful_hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
     }
 
     async fn shutdown(mut self) {

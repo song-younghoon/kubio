@@ -58,12 +58,12 @@ server:
     max_header_list_size: "64KiB"
 
 origin_protocol:
-  preferred: "auto" # auto | http1 | http2
+  preferred: "auto" # auto | http1 | http2 | http3
   fallback: true
   http2_prior_knowledge: false
 ```
 
-When `origin_protocol.fallback` is false, kubio fails closed with a gateway error if the origin response does not use the required protocol. Negotiated fallback is recorded in metrics and events when fallback is enabled.
+HTTP/2 server settings are applied to downstream connections through Hyper's connection builder. When `origin_protocol.fallback` is false, kubio fails closed with a gateway error if the origin response does not use the required protocol. Negotiated fallback is recorded in metrics and events when fallback is enabled, including retry fallback from HTTP/2 prior-knowledge connection failures to HTTP/1.1 for replayable safe requests.
 
 For local cleartext HTTP/2 prior knowledge:
 

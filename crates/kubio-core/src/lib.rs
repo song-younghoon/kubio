@@ -720,11 +720,37 @@ pub fn build_cache_key_with_query_config(
     vary_names: &[&str],
     query_config: Option<&RouteQueryConfig>,
 ) -> CacheKey {
+    build_cache_key_with_query_names(
+        method,
+        scheme,
+        authority,
+        path,
+        query,
+        request_headers,
+        vary_names.iter().copied(),
+        query_config,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_cache_key_with_query_names<'a, I>(
+    method: &Method,
+    scheme: &str,
+    authority: &str,
+    path: &str,
+    query: Option<&str>,
+    request_headers: &HeaderMap,
+    vary_names: I,
+    query_config: Option<&RouteQueryConfig>,
+) -> CacheKey
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut vary_headers = vary_names
-        .iter()
+        .into_iter()
         .map(|name| {
             let value = request_headers
-                .get(*name)
+                .get(name)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("")
                 .to_string();

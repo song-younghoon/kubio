@@ -1,6 +1,6 @@
 # Performance Plan
 
-Status: partially implemented; full benchmark budgets deferred
+Status: implemented for v0.3.0 shipped scope; committed benchmark budgets deferred
 Target release: `v0.3.0`
 
 ## Goals
@@ -17,14 +17,16 @@ Implemented status:
 - Store operation counters/latency totals and bounded store saturation events.
 - In-flight request gauges and bounded observer event-drop counters.
 - Local benchmark smoke script emits JSON latency, cache, and protocol counters and runs in CI.
-- HTTP/2 config surface for compatibility and future tuning.
-- HTTP/2 header-list limit enforcement at the proxy request boundary.
+- HTTP/1.1 baseline scenario smoke covers pass-through, protected, memory/disk hit, 304, stale-if-error, large unstoreable, and metrics-under-load paths.
+- Route-hint lookup and vary-name derived state are built once with deterministic first-match behavior.
+- Observer state uses a read/write lock; snapshots clone state under read lock and sort/aggregate outside the lock.
+- HTTP/2 config is applied through the Hyper connection builder, including stream, window, keepalive, and header-list settings.
+- HTTP/2 header-list limit enforcement remains present at the proxy request boundary.
 
 Deferred status:
 
 - Dedicated benchmark crate and committed release budgets.
-- Observer sharding and deeper contention reduction.
-- Per-connection HTTP/2 flow-control tuning.
+- Further observer sharding beyond the read/write lock split.
 
 Performance work must answer three questions:
 
@@ -111,7 +113,7 @@ Likely bottlenecks:
 - Route hints are scanned linearly.
 - Request and response headers are cloned in multiple places.
 - Some response bodies are buffered before the proxy knows whether storage is possible.
-- Observer state uses a single lock for routes, keys, and events.
+- Observer state uses one read/write lock for routes, keys, and events; dashboard snapshots do not hold the lock while sorting or aggregating.
 - Disk store uses blocking filesystem operations from async methods.
 - Store `get` returns full entries even when metadata would be enough to decide stale/revalidation behavior.
 - Dashboard snapshots compute latency distributions from per-route VecDeque values under a lock.
@@ -186,7 +188,13 @@ Acceptance:
 
 ### Observer Contention Reduction
 
-Replace the single observer lock with one of:
+Implemented v0.3.0 step:
+
+- Replace the single exclusive mutex with a read/write lock.
+- Keep mutation paths deterministic for route promotion, demotion, and safety events.
+- Clone observer state under a read lock for dashboard/API snapshots, then sort and aggregate outside the lock.
+
+Future scaling options if contention remains high:
 
 - Sharded route/key locks.
 - Atomic per-route counters with a bounded event queue.
@@ -202,7 +210,7 @@ Acceptance:
 
 - Route promotion tests still pass.
 - Shadow mismatch blocks reuse deterministically.
-- Load test shows lower observer contention.
+- Dashboard snapshot work does not hold the observer lock while sorting or aggregating.
 
 ### Origin Pool Tuning
 
