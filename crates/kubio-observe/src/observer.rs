@@ -1,7 +1,8 @@
 use kubio_core::{
     query_pattern_matches, short_hash, AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash,
-    Decision, DecisionReason, HttpProtocol, Mode, PathObservation, ResponseFingerprint, ReuseClass,
-    RouteId, RouteQueryConfig, RouteState, StatusClass,
+    Decision, DecisionReason, HttpProtocol, Mode, PathObservation, ResponseFingerprint,
+    ResponseHeaderEquivalenceConfig, ResponseHeaderObservation, ReuseClass, RouteId,
+    RouteQueryConfig, RouteResponseHeadersConfig, RouteState, StatusClass,
 };
 use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
@@ -12,6 +13,7 @@ use crate::query::{response_fingerprint_hash, QueryParamStats};
 use crate::records::{
     KeyObservation, ObservationOutcome, ObservationRecord, QueryParamRecord, RevalidationOutcome,
 };
+use crate::response_headers::ResponseHeaderStats;
 use crate::snapshot::{state_sort_key, ObserverSnapshot, OverviewSnapshot, RouteSnapshot};
 use crate::state::{ObserverInner, RouteStats};
 
@@ -25,6 +27,7 @@ pub struct Observer {
     min_key_repeats: u64,
     min_shadow_validations: u64,
     adaptive_reuse: AdaptiveReuseConfig,
+    response_header_equivalence: ResponseHeaderEquivalenceConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +98,31 @@ impl Observer {
             min_key_repeats,
             min_shadow_validations,
             adaptive_reuse,
+            response_header_equivalence: ResponseHeaderEquivalenceConfig::default(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_policy_config(
+        max_routes: usize,
+        max_keys: usize,
+        max_events: usize,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        adaptive_reuse: AdaptiveReuseConfig,
+        response_header_equivalence: ResponseHeaderEquivalenceConfig,
+    ) -> Self {
+        Self {
+            inner: RwLock::new(ObserverInner::default()),
+            max_routes,
+            max_keys,
+            max_events,
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            adaptive_reuse,
+            response_header_equivalence,
         }
     }
 
@@ -527,6 +555,51 @@ impl Observer {
         }
     }
 
+    pub fn record_response_header_observations(
+        &self,
+        route_id: RouteId,
+        observations: &[ResponseHeaderObservation],
+    ) {
+        if observations.is_empty() {
+            return;
+        }
+
+        let mut inner = self.inner.write();
+        let mut verified = Vec::new();
+        {
+            let route = inner
+                .routes
+                .entry(route_id.clone())
+                .or_insert_with(|| RouteStats::new(route_id.clone()));
+            for observation in observations {
+                let stats = route
+                    .response_headers
+                    .entry(observation.name.clone())
+                    .or_insert_with(|| ResponseHeaderStats::new(observation.name.clone()));
+                let was_verified = stats.verified_candidate(&self.response_header_equivalence);
+                stats.record(observation);
+                if !was_verified
+                    && stats.verified_candidate(&self.response_header_equivalence)
+                    && !stats.verified_event_emitted
+                {
+                    stats.verified_event_emitted = true;
+                    verified.push(stats.name.clone());
+                }
+            }
+        }
+
+        for name in verified {
+            self.push_event_locked(
+                &mut inner,
+                EventType::ResponseHeaderCandidateVerified,
+                Some(route_id.clone()),
+                None,
+                vec![DecisionReason::ReusableAndFresh],
+                format!("response header `{name}` has matching evidence for volatile ignore"),
+            );
+        }
+    }
+
     pub fn record_route_hint(
         &self,
         route_id: RouteId,
@@ -688,6 +761,65 @@ impl Observer {
         }
         compacted.sort();
         compacted
+    }
+
+    pub fn verified_response_header_ignores(
+        &self,
+        route_id: &RouteId,
+        route_headers: Option<&RouteResponseHeadersConfig>,
+    ) -> Vec<String> {
+        let config = &self.response_header_equivalence;
+        if !config.enabled || !config.verified_ignore.enabled {
+            return Vec::new();
+        }
+        let route_enabled = route_headers
+            .map(|headers| headers.verified_ignore.enabled)
+            .unwrap_or(false);
+        let allow_patterns = route_headers
+            .map(|headers| headers.verified_ignore.allow.as_slice())
+            .unwrap_or(&[]);
+        if !route_enabled && !config.verified_ignore.auto_apply_unknown {
+            return Vec::new();
+        }
+
+        let mut ignored = Vec::new();
+        let mut inner = self.inner.write();
+        let mut events = Vec::new();
+        if let Some(route) = inner.routes.get_mut(route_id) {
+            for stats in route.response_headers.values_mut() {
+                if !stats.verified_candidate(config) {
+                    continue;
+                }
+                let allowed_by_route = route_enabled
+                    && allow_patterns.iter().any(|pattern| {
+                        kubio_core::response_header_pattern_matches(pattern, &stats.name)
+                    });
+                let allowed_by_auto = config.verified_ignore.auto_apply_unknown;
+                if allowed_by_route || allowed_by_auto {
+                    ignored.push(stats.name.clone());
+                    stats.ignored_count += 1;
+                    stats.source = if allowed_by_route {
+                        kubio_core::HeaderEquivalenceSource::RouteHint
+                    } else {
+                        kubio_core::HeaderEquivalenceSource::VerifiedEvidence
+                    };
+                    events.push(stats.name.clone());
+                }
+            }
+        }
+        ignored.sort();
+        ignored.dedup();
+        for name in events {
+            self.push_event_locked(
+                &mut inner,
+                EventType::ResponseHeaderIgnoreApplied,
+                Some(route_id.clone()),
+                None,
+                vec![DecisionReason::ReusableAndFresh],
+                format!("response header `{name}` is ignored after verified volatile evidence"),
+            );
+        }
+        ignored
     }
 
     pub fn should_canary_validate(&self, route_id: &RouteId, key_hash: &CacheKeyHash) -> bool {
@@ -1012,7 +1144,13 @@ impl Observer {
         let mut routes = inner
             .routes
             .values()
-            .map(|route| route.snapshot(&self.adaptive_reuse))
+            .map(|route| {
+                route.snapshot(
+                    &self.adaptive_reuse,
+                    &self.response_header_equivalence,
+                    None,
+                )
+            })
             .collect::<Vec<_>>();
         routes.sort_by(|left, right| {
             state_sort_key(right.state)
@@ -1050,7 +1188,13 @@ impl Observer {
             .routes
             .values()
             .find(|route| route.route_id.hash() == route_hash)
-            .map(|route| route.snapshot(&self.adaptive_reuse))
+            .map(|route| {
+                route.snapshot(
+                    &self.adaptive_reuse,
+                    &self.response_header_equivalence,
+                    None,
+                )
+            })
     }
 
     fn adaptive_eligibility(

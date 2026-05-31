@@ -120,6 +120,18 @@ v0.5.1:
   completed task checklist.
 - Release notes: `docs/release-notes-v0.5.1.md`.
 
+v0.5.2:
+
+- Response-header equivalence for dynamic API metadata such as `x-response-id`,
+  `x-correlation-id`, and trace IDs.
+- Cache-hit sanitization so one-shot response identifiers are not replayed from
+  stored entries.
+- Dashboard, CLI, debug-header, metrics, and benchmark visibility for response
+  header normalization.
+- Design status: `.design/v0.5.2` records the response-header equivalence plan
+  and completed task checklist.
+- Release notes: `docs/release-notes-v0.5.2.md`.
+
 v0.5+ candidates:
 
 - Redis-compatible shared store.

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, Request, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
@@ -11,7 +11,8 @@ use kubio_core::TlsConfig;
 use kubio_core::{
     AdaptiveReuseConfig, DecisionReason, EffectiveConfig, KeyValidationReuseConfig, Mode,
     OriginProtocolPreference, PublicObjectReuseConfig, RouteHintConfig, RouteMatchConfig,
-    RouteQueryConfig, RouteSafetyConfig, RouteState, RouteVerifiedIgnoreConfig,
+    RouteQueryConfig, RouteResponseHeadersConfig, RouteSafetyConfig, RouteState,
+    RouteVerifiedIgnoreConfig,
 };
 use kubio_observe::{EventType, Observer};
 use kubio_policy::PolicyEngine;
@@ -486,6 +487,13 @@ async fn sensitive_header_values_do_not_appear_in_snapshots_or_metrics() {
     let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
     let client = reqwest::Client::new();
 
+    let dynamic = client
+        .get(format!("{}/dynamic-response-id", runtime.proxy_url()))
+        .send()
+        .await
+        .unwrap();
+    assert!(dynamic.headers().contains_key("x-response-id"));
+
     let response = client
         .get(format!("{}/auth", runtime.proxy_url()))
         .header("authorization", "Bearer raw-secret-token")
@@ -504,6 +512,8 @@ async fn sensitive_header_values_do_not_appear_in_snapshots_or_metrics() {
         assert!(!output.contains("raw-cookie-secret"));
         assert!(!output.contains("Bearer"));
         assert!(!output.contains("session="));
+        assert!(!output.contains("res-0"));
+        assert!(!output.contains("corr-0"));
     }
 
     runtime.shutdown().await;
@@ -690,6 +700,140 @@ async fn origin_public_fast_path_reuses_notice_id_after_first_safe_response() {
         .unwrap();
     assert_eq!(route.origin_public_responses, 1);
     assert_eq!(route.reuse_class.to_string(), "origin_public");
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn dynamic_response_metadata_headers_do_not_block_reuse_or_replay_on_hits() {
+    let origin = TestOrigin::start().await;
+    let runtime = TestRuntime::start(origin.url(), Mode::Auto, 1, 1, 1).await;
+
+    let first = reqwest::get(format!("{}/dynamic-response-id", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert!(first.headers().contains_key("x-response-id"));
+    assert_eq!(first.text().await.unwrap(), "dynamic-response-id");
+
+    let second = reqwest::get(format!("{}/dynamic-response-id", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert!(!second.headers().contains_key("x-response-id"));
+    assert!(second.headers().contains_key("age"));
+    assert_eq!(second.text().await.unwrap(), "dynamic-response-id");
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    let route = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /dynamic-response-id")
+        .unwrap();
+    assert!(route.ignored_response_header_count > 0);
+    assert!(route.suppressed_on_hit_header_count > 0);
+    assert!(route.response_headers.iter().any(|header| {
+        header.name == "x-response-id"
+            && header.class.to_string() == "default_ignored"
+            && header.suppressed_on_hit
+    }));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn debug_headers_explain_response_header_normalization_on_hits() {
+    let origin = TestOrigin::start().await;
+    let defaults = EffectiveConfig::default();
+    let mut policy = defaults.policy.clone();
+    policy.min_route_samples = 1;
+    policy.min_key_repeats = 1;
+    policy.min_shadow_validations = 1;
+    policy.adaptive_reuse.key_validation = KeyValidationReuseConfig {
+        min_observations: 1,
+        min_shadow_matches: 1,
+        max_shadow_mismatches: 0,
+    };
+    let mut server = defaults.server.clone();
+    server.listen = unused_addr().await;
+    let runtime = TestRuntime::start_from_config(EffectiveConfig {
+        origin: origin.url(),
+        mode: Mode::Auto,
+        server,
+        policy,
+        debug_headers: true,
+        ..defaults
+    })
+    .await;
+
+    let _ = reqwest::get(format!("{}/dynamic-response-id", runtime.proxy_url()))
+        .await
+        .unwrap();
+    let second = reqwest::get(format!("{}/dynamic-response-id", runtime.proxy_url()))
+        .await
+        .unwrap();
+
+    assert_eq!(second.headers()["x-kubio-status"], "hit");
+    assert_eq!(second.headers()["x-kubio-header-shape"], "normalized");
+    assert!(second.headers()["x-kubio-response-headers-ignored"]
+        .to_str()
+        .unwrap()
+        .contains("x-response-id"));
+    assert!(second.headers()["x-kubio-response-headers-suppressed"]
+        .to_str()
+        .unwrap()
+        .contains("x-response-id"));
+    runtime.shutdown().await;
+    origin.shutdown().await;
+}
+
+#[tokio::test]
+async fn route_enabled_response_header_ignore_allows_known_vendor_metadata() {
+    let origin = TestOrigin::start().await;
+    let hint = RouteHintConfig {
+        name: Some("vendor response metadata".to_string()),
+        route_match: RouteMatchConfig {
+            method: "GET".to_string(),
+            path: "/vendor-header/{id}".to_string(),
+        },
+        response_headers: RouteResponseHeadersConfig {
+            verified_ignore: RouteVerifiedIgnoreConfig {
+                enabled: true,
+                allow: vec!["x-vendor-execution-id".to_string()],
+            },
+            ..Default::default()
+        },
+        ..route_hint_defaults("GET", "/vendor-header/{id}")
+    };
+    let runtime =
+        TestRuntime::start_with_routes(origin.url(), Mode::Auto, 1, 1, 1, vec![hint]).await;
+
+    let first = reqwest::get(format!("{}/vendor-header/1", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert!(first.headers().contains_key("x-vendor-execution-id"));
+    assert_eq!(first.text().await.unwrap(), "vendor-header-1");
+
+    let second = reqwest::get(format!("{}/vendor-header/1", runtime.proxy_url()))
+        .await
+        .unwrap();
+    assert!(!second.headers().contains_key("x-vendor-execution-id"));
+    assert_eq!(second.text().await.unwrap(), "vendor-header-1");
+
+    let snapshot = runtime.observer.snapshot();
+    assert_eq!(snapshot.overview.origin_requests, 1);
+    assert_eq!(snapshot.overview.reused_responses, 1);
+    let route = snapshot
+        .routes
+        .iter()
+        .find(|route| route.route_id.as_label() == "GET /vendor-header/{id}")
+        .unwrap();
+    assert!(route.response_headers.iter().any(|header| {
+        header.name == "x-vendor-execution-id"
+            && header.class.to_string() == "ignored"
+            && header.operator_enabled
+            && header.suppressed_on_hit
+    }));
     runtime.shutdown().await;
     origin.shutdown().await;
 }
@@ -1972,6 +2116,8 @@ impl TestOrigin {
             .route("/stable", get(|| async { "stable" }))
             .route("/notice/1", get(notice_one))
             .route("/notice/2", get(notice_two))
+            .route("/dynamic-response-id", get(dynamic_response_id))
+            .route("/vendor-header/1", get(vendor_header))
             .route("/user/1", get(user_one))
             .route("/catalog/1", get(|| async { "catalog-1" }))
             .route("/catalog/2", get(|| async { "catalog-2" }))
@@ -2156,6 +2302,29 @@ impl TestHttp3Origin {
 async fn origin_counted(State(hits): State<Arc<AtomicUsize>>) -> String {
     hits.fetch_add(1, Ordering::SeqCst);
     "auth".to_string()
+}
+
+async fn dynamic_response_id(State(hits): State<Arc<AtomicUsize>>) -> impl IntoResponse {
+    let count = hits.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("cache-control", "public, max-age=60")
+        .header("content-type", "text/plain")
+        .header("x-response-id", format!("res-{count}"))
+        .header("x-correlation-id", format!("corr-{count}"))
+        .body(Body::from("dynamic-response-id"))
+        .unwrap()
+}
+
+async fn vendor_header(State(hits): State<Arc<AtomicUsize>>) -> impl IntoResponse {
+    let count = hits.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("cache-control", "public, max-age=60")
+        .header("content-type", "text/plain")
+        .header("x-vendor-execution-id", format!("exec-{count}"))
+        .body(Body::from("vendor-header-1"))
+        .unwrap()
 }
 
 async fn notice_one() -> impl IntoResponse {
@@ -2395,7 +2564,7 @@ impl TestRuntime {
             performance,
             ..defaults
         });
-        let observer = Arc::new(Observer::with_adaptive_config(
+        let observer = Arc::new(Observer::with_policy_config(
             100,
             100,
             100,
@@ -2403,6 +2572,7 @@ impl TestRuntime {
             config.policy.min_key_repeats,
             config.policy.min_shadow_validations,
             config.policy.adaptive_reuse.clone(),
+            config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2473,7 +2643,7 @@ impl TestRuntime {
             policy: policy_config,
             ..defaults
         });
-        let observer = Arc::new(Observer::with_adaptive_config(
+        let observer = Arc::new(Observer::with_policy_config(
             100,
             100,
             100,
@@ -2481,6 +2651,7 @@ impl TestRuntime {
             min_key_repeats,
             min_shadow_validations,
             config.policy.adaptive_reuse.clone(),
+            config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2578,7 +2749,7 @@ impl TestRuntime {
             policy: policy_config,
             ..defaults
         });
-        let observer = Arc::new(Observer::with_adaptive_config(
+        let observer = Arc::new(Observer::with_policy_config(
             100,
             100,
             100,
@@ -2586,6 +2757,7 @@ impl TestRuntime {
             min_key_repeats,
             min_shadow_validations,
             config.policy.adaptive_reuse.clone(),
+            config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2781,7 +2953,7 @@ impl TestRuntime {
         };
 
         let config = Arc::new(config);
-        let observer = Arc::new(Observer::with_adaptive_config(
+        let observer = Arc::new(Observer::with_policy_config(
             100,
             100,
             100,
@@ -2789,6 +2961,7 @@ impl TestRuntime {
             min_key_repeats,
             min_shadow_validations,
             config.policy.adaptive_reuse.clone(),
+            config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2817,7 +2990,7 @@ impl TestRuntime {
         disable_test_canary(&mut config.policy);
         let addr = config.server.listen;
         let config = Arc::new(config);
-        let observer = Arc::new(Observer::with_adaptive_config(
+        let observer = Arc::new(Observer::with_policy_config(
             100,
             100,
             100,
@@ -2825,6 +2998,7 @@ impl TestRuntime {
             config.policy.min_key_repeats,
             config.policy.min_shadow_validations,
             config.policy.adaptive_reuse.clone(),
+            config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));
@@ -2944,5 +3118,6 @@ fn route_hint_defaults(method: &str, path: &str) -> RouteHintConfig {
         vary: Default::default(),
         stale_if_error: Default::default(),
         safety: Default::default(),
+        response_headers: Default::default(),
     }
 }

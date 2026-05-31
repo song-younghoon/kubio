@@ -1,6 +1,7 @@
 use kubio_core::{
-    AdaptiveReuseBlocker, ConfidenceTier, DecisionReason, LatencySnapshot, QueryEquivalenceClass,
-    ReuseClass, RouteId, RouteState, StatusClassCounts,
+    AdaptiveReuseBlocker, ConfidenceTier, DecisionReason, HeaderEquivalenceClass,
+    HeaderEquivalenceSource, LatencySnapshot, QueryEquivalenceClass, ReuseClass, RouteId,
+    RouteState, StatusClassCounts,
 };
 use serde::{Deserialize, Serialize};
 
@@ -134,6 +135,9 @@ pub struct RouteSnapshot {
     pub canary_mismatches: u64,
     pub query_equivalence_candidates: u64,
     pub query_compacted_groups: u64,
+    pub ignored_response_header_count: u64,
+    pub suppressed_on_hit_header_count: u64,
+    pub verified_header_ignore_candidates: u64,
     pub variant_dimensions: u64,
     pub variant_unbounded: bool,
     pub shadow_matches: u64,
@@ -161,6 +165,7 @@ pub struct RouteSnapshot {
     pub explanation: Vec<String>,
     pub route_hint: Option<String>,
     pub query_params: Vec<QueryParamSnapshot>,
+    pub response_headers: Vec<ResponseHeaderSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +182,19 @@ pub struct QueryParamSnapshot {
     pub matching_fingerprint_count: u64,
     pub mismatch_count: u64,
     pub operator_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseHeaderSnapshot {
+    pub name: String,
+    pub class: HeaderEquivalenceClass,
+    pub source: HeaderEquivalenceSource,
+    pub distinct_value_count: u64,
+    pub matching_without_header_count: u64,
+    pub mismatch_count: u64,
+    pub operator_enabled: bool,
+    pub suppressed_on_hit: bool,
+    pub sensitive: bool,
 }
 
 pub(crate) fn state_sort_key(state: RouteState) -> u8 {

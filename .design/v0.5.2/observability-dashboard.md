@@ -1,6 +1,6 @@
 # Observability and Dashboard
 
-Status: proposed
+Status: implemented
 Target release: `v0.5.2`
 
 ## Goals

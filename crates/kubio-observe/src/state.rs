@@ -1,6 +1,7 @@
 use kubio_core::{
     AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash, ConfidenceTier, DecisionReason,
-    ReuseClass, RouteId, RouteState, StatusClassCounts,
+    HeaderEquivalenceSource, ResponseHeaderEquivalenceConfig, ReuseClass, RouteId,
+    RouteResponseHeadersConfig, RouteState, StatusClassCounts,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime};
@@ -10,6 +11,7 @@ use crate::latency::latency_snapshot;
 use crate::protocol::{AltSvcCounts, Http3ServerCounts, ProtocolCounts, UpstreamHttp3Counts};
 use crate::query::QueryParamStats;
 use crate::records::KeyObservation;
+use crate::response_headers::ResponseHeaderStats;
 use crate::snapshot::RouteSnapshot;
 
 #[derive(Debug, Clone, Default)]
@@ -79,6 +81,7 @@ pub(crate) struct RouteStats {
     pub(crate) score: i16,
     pub(crate) reasons: Vec<DecisionReason>,
     pub(crate) query_params: HashMap<String, QueryParamStats>,
+    pub(crate) response_headers: HashMap<String, ResponseHeaderStats>,
 }
 
 impl RouteStats {
@@ -131,6 +134,7 @@ impl RouteStats {
             score: 0,
             reasons: Vec::new(),
             query_params: HashMap::new(),
+            response_headers: HashMap::new(),
         }
     }
 
@@ -323,12 +327,60 @@ impl RouteStats {
         blockers
     }
 
-    pub(crate) fn snapshot(&self, config: &AdaptiveReuseConfig) -> RouteSnapshot {
+    pub(crate) fn snapshot(
+        &self,
+        adaptive_config: &AdaptiveReuseConfig,
+        header_config: &ResponseHeaderEquivalenceConfig,
+        route_response_headers: Option<&RouteResponseHeadersConfig>,
+    ) -> RouteSnapshot {
+        let response_headers = self
+            .response_headers
+            .values()
+            .map(|stats| {
+                let operator_enabled = route_response_headers
+                    .map(|headers| {
+                        headers.verified_ignore.enabled
+                            && headers.verified_ignore.allow.iter().any(|pattern| {
+                                kubio_core::response_header_pattern_matches(pattern, &stats.name)
+                            })
+                    })
+                    .unwrap_or(false)
+                    || (stats.source == HeaderEquivalenceSource::RouteHint
+                        && stats.ignored_count > 0);
+                let force_included = route_response_headers
+                    .map(|headers| {
+                        headers.force_include.iter().any(|pattern| {
+                            kubio_core::response_header_pattern_matches(pattern, &stats.name)
+                        })
+                    })
+                    .unwrap_or(false)
+                    || stats.source == HeaderEquivalenceSource::ForceInclude
+                    || header_config.default_volatile.block.iter().any(|pattern| {
+                        kubio_core::response_header_pattern_matches(pattern, &stats.name)
+                    });
+                stats.snapshot(header_config, operator_enabled, force_included)
+            })
+            .collect::<Vec<_>>();
+        let verified_header_ignore_candidates = self
+            .response_headers
+            .values()
+            .filter(|stats| stats.verified_candidate(header_config))
+            .count() as u64;
+        let ignored_response_header_count = self
+            .response_headers
+            .values()
+            .map(|stats| stats.default_ignored_count + stats.ignored_count)
+            .sum::<u64>();
+        let suppressed_on_hit_header_count = self
+            .response_headers
+            .values()
+            .map(|stats| stats.suppressed_on_hit_count)
+            .sum::<u64>();
         RouteSnapshot {
             route_id: self.route_id.clone(),
             route_hash: self.route_id.hash(),
             state: self.state,
-            reuse_class: self.reuse_class(config),
+            reuse_class: self.reuse_class(adaptive_config),
             request_count: self.request_count,
             origin_count: self.origin_count,
             reuse_count: self.reuse_count,
@@ -340,10 +392,10 @@ impl RouteStats {
             dynamic_value_count: self.dynamic_value_count(),
             slug_value_count: self.slug_value_count(),
             store_safe_rate: self.store_safe_rate(),
-            adaptive_blockers: self.eligibility_blockers(config),
-            confidence_tier: self.confidence_tier(config),
+            adaptive_blockers: self.eligibility_blockers(adaptive_config),
+            confidence_tier: self.confidence_tier(adaptive_config),
             evidence_window_age_seconds: self.evidence_age_seconds(),
-            stale_evidence: self.stale_evidence(config),
+            stale_evidence: self.stale_evidence(adaptive_config),
             cooldown_remaining_seconds: self.cooldown_remaining_seconds(),
             canary_matches: self.canary_matches,
             canary_mismatches: self.canary_mismatches,
@@ -351,12 +403,15 @@ impl RouteStats {
                 .query_params
                 .values()
                 .filter(|stats| {
-                    stats.verified_ignore_candidate(&config.precision.query_equivalence)
+                    stats.verified_ignore_candidate(&adaptive_config.precision.query_equivalence)
                 })
                 .count() as u64,
             query_compacted_groups: self.query_compacted_groups.len() as u64,
+            ignored_response_header_count,
+            suppressed_on_hit_header_count,
+            verified_header_ignore_candidates,
             variant_dimensions: self.variant_dimension_count(),
-            variant_unbounded: self.variant_unbounded(config),
+            variant_unbounded: self.variant_unbounded(adaptive_config),
             shadow_matches: self.shadow_matches,
             shadow_mismatches: self.shadow_mismatches,
             revalidation_attempts: self.revalidation_attempts,
@@ -394,11 +449,12 @@ impl RouteStats {
                 .values()
                 .map(|stats| {
                     stats.snapshot(
-                        &config.precision.query_equivalence,
+                        &adaptive_config.precision.query_equivalence,
                         self.query_compacted_groups.contains(&stats.name),
                     )
                 })
                 .collect(),
+            response_headers,
         }
     }
 }

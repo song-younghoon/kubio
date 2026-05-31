@@ -96,6 +96,7 @@ mod tests {
             },
             stale_if_error: Default::default(),
             safety: Default::default(),
+            response_headers: Default::default(),
         }
     }
 }

@@ -77,6 +77,24 @@ policy:
         require_variant_evidence: true
   max_object_size: "1MiB"
   max_fingerprint_body_size: "2MiB"
+  response_header_equivalence:
+    enabled: true
+    verified_ignore:
+      enabled: true
+      auto_apply_known_metadata: true
+      auto_apply_unknown: false
+      min_distinct_values: 3
+      min_matching_fingerprints: 3
+      max_mismatches: 0
+      cooldown_secs: 600
+    serve:
+      strip_volatile_on_hit: true
+      strip_verified_ignored_on_hit: true
+      add_age: true
+      preserve_date: true
+    default_volatile:
+      add: []
+      block: []
   min_route_samples: 100
   min_key_repeats: 5
   min_shadow_validations: 20

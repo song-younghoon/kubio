@@ -1,8 +1,9 @@
 use anyhow::{bail, Result};
 use kubio_core::{
     parse_duration, KeyValidationReuseConfig, OriginPublicFastPathConfig, PrecisionReuseConfig,
-    PublicObjectReuseConfig, RouteFreshnessConfig, RouteHintConfig, RouteMatchConfig,
-    RouteQueryConfig, RouteSafetyConfig, RouteStaleIfErrorConfig, RouteVaryConfig,
+    PublicObjectReuseConfig, ResponseHeaderEquivalenceConfig, RouteFreshnessConfig,
+    RouteHintConfig, RouteMatchConfig, RouteQueryConfig, RouteResponseHeadersConfig,
+    RouteSafetyConfig, RouteStaleIfErrorConfig, RouteVaryConfig,
 };
 use serde::Deserialize;
 
@@ -107,6 +108,7 @@ pub(crate) struct FilePolicyConfig {
     pub(crate) revalidation: Option<FileRevalidationConfig>,
     pub(crate) stale_if_error: Option<FileStaleIfErrorConfig>,
     pub(crate) query_intelligence: Option<FileQueryIntelligenceConfig>,
+    pub(crate) response_header_equivalence: Option<ResponseHeaderEquivalenceConfig>,
     pub(crate) adaptive_reuse: Option<FileAdaptiveReuseConfig>,
 }
 
@@ -172,6 +174,7 @@ pub(crate) struct FileRouteHintConfig {
     pub(crate) route_match: FileRouteMatchConfig,
     pub(crate) freshness: Option<FileRouteFreshnessConfig>,
     pub(crate) query: Option<RouteQueryConfig>,
+    pub(crate) response_headers: Option<RouteResponseHeadersConfig>,
     pub(crate) vary: Option<RouteVaryConfig>,
     pub(crate) stale_if_error: Option<FileRouteStaleIfErrorConfig>,
     pub(crate) safety: Option<RouteSafetyConfig>,
@@ -230,6 +233,7 @@ impl TryFrom<FileRouteHintConfig> for RouteHintConfig {
             },
             freshness,
             query,
+            response_headers: value.response_headers.unwrap_or_default(),
             vary: value.vary.unwrap_or_default(),
             stale_if_error,
             safety: value.safety.unwrap_or_default(),

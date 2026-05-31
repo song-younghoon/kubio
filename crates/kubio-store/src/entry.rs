@@ -16,6 +16,9 @@ pub struct CacheEntry {
     pub cache_control: StoredCacheControl,
     pub must_revalidate: bool,
     pub fingerprint: ResponseFingerprint,
+    pub ignored_response_headers: Vec<String>,
+    pub suppressed_response_headers: Vec<String>,
+    pub header_policy_version: u16,
     pub route_id: RouteId,
     pub cache_key_hash: CacheKeyHash,
 }

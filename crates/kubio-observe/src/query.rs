@@ -186,9 +186,10 @@ impl QueryParamStats {
 
 pub(crate) fn response_fingerprint_hash(fingerprint: &ResponseFingerprint) -> String {
     format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}",
         fingerprint.status,
         fingerprint.header_hash,
-        fingerprint.body_hash.as_deref().unwrap_or("")
+        fingerprint.body_hash.as_deref().unwrap_or(""),
+        fingerprint.header_policy_version
     )
 }

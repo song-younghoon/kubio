@@ -1,12 +1,17 @@
 # kubio v0.5.2 Design Index
 
-Status: proposed
+Status: implemented
 Source: v0.5.1 precision adaptive reuse implementation
 Target release: `v0.5.2`
 
 v0.5.0 made public object routes useful. v0.5.1 made that reuse more precise
 with query equivalence, slug evidence, evidence decay, and canary validation.
-v0.5.2 should remove another practical hit-rate blocker: response metadata
+Implementation state: response-header equivalence config, policy-aware
+fingerprints, default volatile metadata ignores, route-enabled response header
+ignores, hit-time volatile stripping, observability, benchmarks, docs, and
+release notes are implemented on `main`.
+
+v0.5.2 removes another practical hit-rate blocker: response metadata
 headers that change on every origin response even when the representation is
 the same.
 
@@ -115,9 +120,9 @@ The goal is not to ignore arbitrary headers. The goal is to distinguish:
 ## Milestone Status
 
 - [x] M0: Design, terminology, and schema lock.
-- [ ] M1: Header taxonomy and config.
-- [ ] M2: Fingerprint normalization.
-- [ ] M3: Header equivalence evidence and demotion.
-- [ ] M4: Store and hit-time header sanitization.
-- [ ] M5: Dashboard, metrics, CLI, docs, and examples.
-- [ ] M6: Benchmarks, safety tests, compatibility tests, and release hardening.
+- [x] M1: Header taxonomy and config.
+- [x] M2: Fingerprint normalization.
+- [x] M3: Header equivalence evidence and demotion.
+- [x] M4: Store and hit-time header sanitization.
+- [x] M5: Dashboard, metrics, CLI, docs, and examples.
+- [x] M6: Benchmarks, safety tests, compatibility tests, and release hardening.

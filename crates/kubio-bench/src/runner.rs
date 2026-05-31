@@ -99,6 +99,13 @@ fn scenario_request(scenario: Scenario, index: usize) -> (String, &'static str) 
         }
         Scenario::EvidenceDecay => ("/catalog/1".to_string(), "catalog-1"),
         Scenario::CanaryMismatch => ("/canary/1".to_string(), "canary-"),
+        Scenario::DynamicResponseMetadata => (
+            "/dynamic-response-id/1".to_string(),
+            "dynamic-response-id-1",
+        ),
+        Scenario::VendorHeaderCandidate | Scenario::VendorHeaderRouteEnabled => {
+            ("/vendor-header/1".to_string(), "vendor-header-1")
+        }
         Scenario::PublicObjectSweep => {
             let id = if index < 6 {
                 1 + index / 2

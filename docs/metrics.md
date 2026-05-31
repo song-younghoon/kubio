@@ -34,6 +34,9 @@ Required metrics include:
 - `kubio_precision_confidence_routes`
 - `kubio_precision_canary_total`
 - `kubio_query_equivalence_candidates_total`
+- `kubio_response_header_equivalence_candidates_total`
+- `kubio_response_header_ignored_total`
+- `kubio_response_header_suppressed_on_hit_total`
 - `kubio_variant_groups`
 - `kubio_store_errors_total`
 - `kubio_observer_events_dropped_total`

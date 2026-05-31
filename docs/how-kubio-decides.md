@@ -53,6 +53,17 @@ v0.5.1 adds finer proof:
 Key compaction is never automatic by default. It requires proof and route-level
 enablement or an explicit global auto-compaction setting.
 
+## Response Header Equivalence
+
+v0.5.2 excludes curated per-request response metadata such as `date`,
+`x-request-id`, `x-response-id`, `x-correlation-id`, and trace headers from the
+response fingerprint. Cache-safety headers, validators, and representation
+headers remain fingerprinted.
+
+Ignoring a header for fingerprinting does not mean replaying it from cache is
+correct. kubio strips one-shot volatile metadata from cache-hit responses by
+default and may add `Age`.
+
 ## Shadow Validation
 
 When the same cache key appears again, kubio compares the latest origin response fingerprint with the previous one. Matching fingerprints increase confidence. Any mismatch blocks automatic reuse.

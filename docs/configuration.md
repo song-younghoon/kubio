@@ -196,7 +196,33 @@ policy:
   query_intelligence:
     enabled: true
     auto_ignore: false
+  response_header_equivalence:
+    enabled: true
+    verified_ignore:
+      enabled: true
+      auto_apply_known_metadata: true
+      auto_apply_unknown: false
+      min_distinct_values: 3
+      min_matching_fingerprints: 3
+      max_mismatches: 0
+      cooldown_secs: 600
+    serve:
+      strip_volatile_on_hit: true
+      strip_verified_ignored_on_hit: true
+      add_age: true
+      preserve_date: true
+    default_volatile:
+      add: []
+      block: []
 ```
+
+`response_header_equivalence` ignores curated response metadata such as
+`x-response-id`, `x-correlation-id`, and trace headers for fingerprinting while
+keeping cache-safety, validator, and representation headers fingerprinted.
+Cache-hit responses strip one-shot volatile metadata by default.
+Set `auto_apply_known_metadata: false` to keep the curated volatile metadata set
+inside fingerprints unless a route or explicit `default_volatile.add` entry opts
+it in.
 
 Disk store:
 
@@ -227,6 +253,12 @@ routes:
       verified_ignore:
         enabled: true
         allow: ["utm_*", "gclid", "fbclid"]
+    response_headers:
+      verified_ignore:
+        enabled: true
+        allow: ["x-vendor-execution-id"]
+      force_include: ["etag"]
+      preserve_on_hit: []
     safety:
       public_object: true
 ```
@@ -241,3 +273,9 @@ observe matching fingerprints across different bounded query value hashes. Only
 then will enabled `verified_ignore.allow` patterns compact cache keys. Sensitive
 query names such as `token`, `session`, `jwt`, `api_key`, `secret`, `signature`,
 and `code` are never automatic verified-ignore candidates.
+
+`response_headers.verified_ignore` can opt a route into ignoring known
+non-semantic response metadata such as vendor execution IDs. The name still has
+to be candidate-eligible; hard safety, validator, freshness, representation, and
+sensitive/business-state headers cannot be made ignorable. `force_include` keeps
+a header fingerprinted even if it would otherwise be treated as volatile.

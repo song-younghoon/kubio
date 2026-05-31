@@ -1,6 +1,6 @@
 # Testing and Release Plan
 
-Status: proposed
+Status: implemented local gates passing
 Target release: `v0.5.2`
 
 ## Unit Tests
@@ -143,8 +143,10 @@ Origin changes `x-vendor-execution-id`.
 
 Expected:
 
-- default run reports candidate only;
-- route-enabled run improves hit rate after evidence.
+- `vendor-header-candidate` reports the candidate opportunity without applying
+  it by default;
+- `vendor-header-route-enabled` improves hit rate for operator-approved metadata
+  names.
 
 ### Safety Regression Sweep
 
@@ -201,3 +203,27 @@ Before release:
 - Confirm docs describe header normalization, hit-time stripping, and hard
   safety limits.
 - Add release notes for v0.5.2.
+
+## Local Verification Results
+
+Date: `2026-05-31`
+
+Passed gates:
+
+- `cargo fmt --all --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --workspace`
+- `cargo test --workspace --features experimental-http3`
+
+Benchmark results:
+
+- `dynamic-response-metadata`, 4 requests: 1 origin request, 3 reused
+  responses.
+- `vendor-header-candidate`, 4 requests: 4 origin requests, 0 reused
+  responses, confirming default conservative behavior.
+- `vendor-header-route-enabled`, 4 requests: 2 origin requests, 2 reused
+  responses.
+- Existing adaptive scenarios `exact-key-adaptive`,
+  `origin-public-fast-path`, `public-object-sweep`,
+  `query-noisy-public-object`, `slug-public-object-sweep`, and
+  `sensitive-slug-sweep` passed their local budgets.

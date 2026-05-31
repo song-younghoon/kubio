@@ -40,6 +40,15 @@ explicit enablement. Sensitive query names such as `token`, `session`, `jwt`,
 candidates. Canary or shadow mismatches place the affected route or key group
 in cooldown and purge affected entries.
 
+Response-header equivalence ignores only response metadata that does not define
+the representation, such as `x-response-id` and trace IDs. It does not override
+`Set-Cookie`, `Cache-Control`, `Vary`, validators, representation headers,
+Authorization, Cookie, sensitive paths, panic switch, or mismatch handling.
+Cache hits strip one-shot volatile response identifiers by default.
+
 ## Privacy
 
-kubio does not store Authorization values, Cookie values, Set-Cookie values, request bodies, or raw response bodies in observation metadata. Metrics and dashboard APIs use route templates, counts, flags, and hashes.
+kubio does not store Authorization values, Cookie values, Set-Cookie values,
+volatile response header values, request bodies, or raw response bodies in
+observation metadata. Metrics and dashboard APIs use route templates, counts,
+flags, names, and hashes.

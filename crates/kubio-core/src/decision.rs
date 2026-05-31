@@ -2,19 +2,42 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::time::Duration;
 
+pub const RESPONSE_HEADER_FINGERPRINT_POLICY_VERSION: u16 = 2;
+
+pub fn default_response_header_fingerprint_policy_version() -> u16 {
+    RESPONSE_HEADER_FINGERPRINT_POLICY_VERSION
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseFingerprint {
     pub status: u16,
     pub header_hash: String,
     pub body_hash: Option<String>,
+    #[serde(default = "default_response_header_fingerprint_policy_version")]
+    pub header_policy_version: u16,
 }
 
 impl ResponseFingerprint {
     pub fn new(status: u16, header_hash: String, body_hash: Option<String>) -> Self {
+        Self::new_with_policy(
+            status,
+            header_hash,
+            body_hash,
+            RESPONSE_HEADER_FINGERPRINT_POLICY_VERSION,
+        )
+    }
+
+    pub fn new_with_policy(
+        status: u16,
+        header_hash: String,
+        body_hash: Option<String>,
+        header_policy_version: u16,
+    ) -> Self {
         Self {
             status,
             header_hash,
             body_hash,
+            header_policy_version,
         }
     }
 }
@@ -228,6 +251,58 @@ impl Display for QueryEquivalenceClass {
             Self::Compacted => f.write_str("compacted"),
             Self::SensitiveBlocked => f.write_str("sensitive_blocked"),
             Self::MismatchCooldown => f.write_str("mismatch_cooldown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderEquivalenceClass {
+    #[default]
+    Unknown,
+    DefaultIgnored,
+    CandidateVolatile,
+    VerifiedVolatileCandidate,
+    Ignored,
+    SensitiveBlocked,
+    MismatchCooldown,
+    ForceIncluded,
+}
+
+impl Display for HeaderEquivalenceClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("unknown"),
+            Self::DefaultIgnored => f.write_str("default_ignored"),
+            Self::CandidateVolatile => f.write_str("candidate_volatile"),
+            Self::VerifiedVolatileCandidate => f.write_str("verified_volatile_candidate"),
+            Self::Ignored => f.write_str("ignored"),
+            Self::SensitiveBlocked => f.write_str("sensitive_blocked"),
+            Self::MismatchCooldown => f.write_str("mismatch_cooldown"),
+            Self::ForceIncluded => f.write_str("force_included"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderEquivalenceSource {
+    #[default]
+    DefaultPolicy,
+    RouteHint,
+    VerifiedEvidence,
+    GlobalConfig,
+    ForceInclude,
+}
+
+impl Display for HeaderEquivalenceSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DefaultPolicy => f.write_str("default_policy"),
+            Self::RouteHint => f.write_str("route_hint"),
+            Self::VerifiedEvidence => f.write_str("verified_evidence"),
+            Self::GlobalConfig => f.write_str("global_config"),
+            Self::ForceInclude => f.write_str("force_include"),
         }
     }
 }

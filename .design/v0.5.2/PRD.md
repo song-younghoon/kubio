@@ -1,13 +1,13 @@
 # PRD: kubio v0.5.2
 
-Document status: proposed
+Document status: implemented
 Target release: `v0.5.2`
 Core philosophy: **increase hit rate by separating response metadata from
 representation identity**
 
 ## 1. Product Summary
 
-kubio v0.5.2 should improve practical cache hit rate for stable public API
+kubio v0.5.2 improves practical cache hit rate for stable public API
 responses whose response headers include per-request metadata. Common examples
 are `x-response-id`, `x-correlation-id`, cloud trace IDs, and request tracing
 headers.

@@ -154,6 +154,9 @@ pub(crate) async fn proxy_handler(
     let verified_query_ignores = state
         .observer
         .verified_query_ignores(&route_id, query_config);
+    let verified_response_header_ignores = state
+        .observer
+        .verified_response_header_ignores(&route_id, route_hint.map(|hint| &hint.response_headers));
     let vary_names = route_hint_entry
         .map(|entry| entry.vary_names.as_slice())
         .unwrap_or_else(|| state.route_hints.default_vary_names());
@@ -634,11 +637,24 @@ pub(crate) async fn proxy_handler(
         Some(response_bytes.len() as u64),
     );
 
-    let fingerprint = make_fingerprint(&state.config, status, &origin_headers, &response_bytes);
+    let fingerprint = make_fingerprint(
+        &state.config,
+        route_hint,
+        &verified_response_header_ignores,
+        status,
+        &origin_headers,
+        &response_bytes,
+    );
     if let Some(fingerprint) = fingerprint.as_ref() {
-        state
-            .observer
-            .record_query_fingerprint(route_id.clone(), &query_records, fingerprint);
+        state.observer.record_query_fingerprint(
+            route_id.clone(),
+            &query_records,
+            &fingerprint.fingerprint,
+        );
+        state.observer.record_response_header_observations(
+            route_id.clone(),
+            &fingerprint.header_result.candidate_observations,
+        );
     }
     let response_decision = state.policy.decide_response(
         state.config.mode,
@@ -688,7 +704,9 @@ pub(crate) async fn proxy_handler(
         reused: false,
         protected,
         bypass: request_decision.decision == Decision::Bypass,
-        fingerprint: fingerprint.clone(),
+        fingerprint: fingerprint
+            .as_ref()
+            .map(|fingerprint| fingerprint.fingerprint.clone()),
         shadow_eligible,
         score: response_decision.score,
         mode: state.config.mode,
@@ -696,7 +714,7 @@ pub(crate) async fn proxy_handler(
     if let (Some((canary_key, canary_entry)), Some(fingerprint)) =
         (canary_candidate.as_ref(), fingerprint.as_ref())
     {
-        let matched = &canary_entry.fingerprint == fingerprint;
+        let matched = canary_entry.fingerprint == fingerprint.fingerprint;
         state
             .observer
             .record_canary_validation(route_id.clone(), canary_key.clone(), matched);
@@ -789,6 +807,10 @@ pub(crate) async fn proxy_handler(
                 )
                 .eligible
             {
+                let ignored_response_headers = fingerprint.header_result.ignored_header_names();
+                let suppressed_response_headers =
+                    fingerprint.header_result.suppressed_on_hit_names.clone();
+                let header_policy_version = fingerprint.header_result.policy_version;
                 let freshness = entry_freshness(
                     &state,
                     route_hint,
@@ -798,7 +820,12 @@ pub(crate) async fn proxy_handler(
                 );
                 let entry = CacheEntry {
                     status: status.as_u16(),
-                    headers: sanitized_response_headers(&origin_headers),
+                    headers: sanitized_response_headers(
+                        &state.config,
+                        route_hint,
+                        &origin_headers,
+                        &suppressed_response_headers,
+                    ),
                     body: response_bytes.clone(),
                     created_at: freshness.created_at,
                     expires_at: freshness.expires_at,
@@ -807,7 +834,10 @@ pub(crate) async fn proxy_handler(
                     validators,
                     cache_control: cache_control.clone(),
                     must_revalidate: cache_control.no_cache || cache_control.must_revalidate,
-                    fingerprint,
+                    fingerprint: fingerprint.fingerprint,
+                    ignored_response_headers,
+                    suppressed_response_headers,
+                    header_policy_version,
                     route_id: route_id.clone(),
                     cache_key_hash: key_hash.clone(),
                 };

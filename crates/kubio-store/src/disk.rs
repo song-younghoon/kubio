@@ -332,6 +332,9 @@ mod tests {
                 "h".to_string(),
                 Some(body_hash(body.as_bytes())),
             ),
+            ignored_response_headers: Vec::new(),
+            suppressed_response_headers: Vec::new(),
+            header_policy_version: kubio_core::RESPONSE_HEADER_FINGERPRINT_POLICY_VERSION,
             route_id: RouteId::new("GET", route),
             cache_key_hash: CacheKeyHash(route.to_string()),
         }
@@ -385,6 +388,9 @@ mod tests {
             cache_control: StoredCacheControl::default(),
             must_revalidate: false,
             fingerprint: ResponseFingerprint::new(200, "h".to_string(), Some("b".to_string())),
+            ignored_response_headers: Vec::new(),
+            suppressed_response_headers: Vec::new(),
+            header_policy_version: kubio_core::RESPONSE_HEADER_FINGERPRINT_POLICY_VERSION,
             route_id: RouteId::new("GET", "/disk"),
         };
         let meta_path = entries.join("evil.json");

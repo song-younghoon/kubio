@@ -17,7 +17,7 @@ pub(crate) async fn routes(args: AdminArgs) -> Result<()> {
     }
     for route in snapshot.routes {
         println!(
-            "{}\t{}\tclass={}\tconfidence={}\trequests={}\torigin={}\treused={}\tprotected={}\tkeys={}\tquery_candidates={}\tcompact={}\tvariants={}\tpublic={}\trevalidated={}\tstale={}\tdownstream={}\tupstream={}",
+            "{}\t{}\tclass={}\tconfidence={}\trequests={}\torigin={}\treused={}\tprotected={}\tkeys={}\tquery_candidates={}\tcompact={}\theader_ignored={}\theader_candidates={}\tvariants={}\tpublic={}\trevalidated={}\tstale={}\tdownstream={}\tupstream={}",
             route.route_id.as_label(),
             route.state,
             route.reuse_class,
@@ -29,6 +29,8 @@ pub(crate) async fn routes(args: AdminArgs) -> Result<()> {
             route.distinct_key_count,
             route.query_equivalence_candidates,
             route.query_compacted_groups,
+            route.ignored_response_header_count,
+            route.verified_header_ignore_candidates,
             route.variant_dimensions,
             route.origin_public_responses,
             route.revalidation_attempts,
@@ -67,7 +69,7 @@ pub(crate) async fn explain(args: ExplainArgs) -> Result<()> {
         }
     }
     println!(
-        "\nRequests: {}\nOrigin: {}\nReused: {}\nDistinct keys: {}\nDynamic path values: {}\nSlug values: {}\nStore-safe rate: {:.2}%\nOrigin public responses: {}\nConfidence: {}\nEvidence age: {}s\nCooldown remaining: {}\nCanary: {}/{}\nQuery equivalence candidates: {}\nQuery compacted groups: {}\nVariant dimensions: {}\nVariant unbounded: {}\nAdaptive blockers: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}\nDownstream protocols: {}\nUpstream protocols: {}",
+        "\nRequests: {}\nOrigin: {}\nReused: {}\nDistinct keys: {}\nDynamic path values: {}\nSlug values: {}\nStore-safe rate: {:.2}%\nOrigin public responses: {}\nConfidence: {}\nEvidence age: {}s\nCooldown remaining: {}\nCanary: {}/{}\nQuery equivalence candidates: {}\nQuery compacted groups: {}\nResponse headers ignored: {}\nResponse header candidates: {}\nResponse headers suppressed on hit: {}\nVariant dimensions: {}\nVariant unbounded: {}\nAdaptive blockers: {}\nShadow matches: {}\nShadow mismatches: {}\nRevalidations: {}\nStale served: {}\nDownstream protocols: {}\nUpstream protocols: {}",
         route.request_count,
         route.origin_count,
         route.reuse_count,
@@ -86,6 +88,9 @@ pub(crate) async fn explain(args: ExplainArgs) -> Result<()> {
         route.canary_mismatches,
         route.query_equivalence_candidates,
         route.query_compacted_groups,
+        route.ignored_response_header_count,
+        route.verified_header_ignore_candidates,
+        route.suppressed_on_hit_header_count,
         route.variant_dimensions,
         route.variant_unbounded,
         adaptive_blockers_label(&route),
@@ -96,6 +101,20 @@ pub(crate) async fn explain(args: ExplainArgs) -> Result<()> {
         protocol_counts_label(&route.downstream_protocols),
         protocol_counts_label(&route.upstream_protocols)
     );
+    if !route.response_headers.is_empty() {
+        println!("\nResponse headers:");
+        for header in &route.response_headers {
+            println!(
+                "- {}: {} values={} matches={} mismatches={} suppressed_on_hit={}",
+                header.name,
+                header.class,
+                header.distinct_value_count,
+                header.matching_without_header_count,
+                header.mismatch_count,
+                header.suppressed_on_hit
+            );
+        }
+    }
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 # v0.5.2 Implementation Tasks
 
-Status: proposed
+Status: implemented and verified locally
 Target release: `v0.5.2`
 
 Task states:
@@ -50,14 +50,14 @@ Acceptance:
 
 Goal: add first-class config and types for response-header equivalence.
 
-- [ ] M1.1 Add `ResponseHeaderEquivalenceConfig`.
-- [ ] M1.2 Add `ResponseHeaderServeConfig`.
-- [ ] M1.3 Add route hint fields for `response_headers.verified_ignore`,
+- [x] M1.1 Add `ResponseHeaderEquivalenceConfig`.
+- [x] M1.2 Add `ResponseHeaderServeConfig`.
+- [x] M1.3 Add route hint fields for `response_headers.verified_ignore`,
   `force_include`, and `preserve_on_hit`.
-- [ ] M1.4 Add default volatile metadata header list.
-- [ ] M1.5 Add sensitive/business-state header block patterns.
-- [ ] M1.6 Add config validation for thresholds, patterns, and conflicts.
-- [ ] M1.7 Add config docs and example config updates.
+- [x] M1.4 Add default volatile metadata header list.
+- [x] M1.5 Add sensitive/business-state header block patterns.
+- [x] M1.6 Add config validation for thresholds, patterns, and conflicts.
+- [x] M1.7 Add config docs and example config updates.
 
 Acceptance:
 
@@ -69,13 +69,13 @@ Acceptance:
 
 Goal: replace implicit stable header hashing with policy-aware normalization.
 
-- [ ] M2.1 Add `HeaderFingerprintPolicy`.
-- [ ] M2.2 Add `HeaderFingerprintResult`.
-- [ ] M2.3 Include fingerprint policy version in `ResponseFingerprint`.
-- [ ] M2.4 Exclude default volatile metadata headers from normalized hashes.
-- [ ] M2.5 Keep cache-safety, validator, and representation headers included.
-- [ ] M2.6 Update canary/shadow comparison to use normalized fingerprints.
-- [ ] M2.7 Add unit tests for default volatile, force-include, and semantic
+- [x] M2.1 Add `HeaderFingerprintPolicy`.
+- [x] M2.2 Add `HeaderFingerprintResult`.
+- [x] M2.3 Include fingerprint policy version in `ResponseFingerprint`.
+- [x] M2.4 Exclude default volatile metadata headers from normalized hashes.
+- [x] M2.5 Keep cache-safety, validator, and representation headers included.
+- [x] M2.6 Update canary/shadow comparison to use normalized fingerprints.
+- [x] M2.7 Add unit tests for default volatile, force-include, and semantic
   header changes.
 
 Acceptance:
@@ -89,14 +89,14 @@ Acceptance:
 Goal: detect unknown volatile header candidates without applying them
 automatically by default.
 
-- [ ] M3.1 Add bounded response-header evidence structs.
-- [ ] M3.2 Track value hashes by route/header name.
-- [ ] M3.3 Track matching fingerprint evidence with each candidate excluded.
-- [ ] M3.4 Add `HeaderEquivalenceClass`.
-- [ ] M3.5 Add verified candidate promotion.
-- [ ] M3.6 Add route-enabled verified ignore application.
-- [ ] M3.7 Add mismatch cooldown and scoped purge.
-- [ ] M3.8 Add tests for candidate, verified candidate, enabled ignore, and
+- [x] M3.1 Add bounded response-header evidence structs.
+- [x] M3.2 Track value hashes by route/header name.
+- [x] M3.3 Track matching fingerprint evidence with each candidate excluded.
+- [x] M3.4 Add `HeaderEquivalenceClass`.
+- [x] M3.5 Add verified candidate promotion.
+- [x] M3.6 Add route-enabled verified ignore application.
+- [x] M3.7 Add mismatch cooldown and scoped purge.
+- [x] M3.8 Add tests for candidate, verified candidate, enabled ignore, and
   demotion.
 
 Acceptance:
@@ -109,14 +109,14 @@ Acceptance:
 
 Goal: avoid replaying one-shot metadata headers from cache hits.
 
-- [ ] M4.1 Add stored header policy metadata.
-- [ ] M4.2 Strip default volatile one-shot IDs from stored hit headers.
-- [ ] M4.3 Strip verified ignored headers on hits when configured.
-- [ ] M4.4 Preserve origin miss headers unchanged except existing proxy-managed
+- [x] M4.1 Add stored header policy metadata.
+- [x] M4.2 Strip default volatile one-shot IDs from stored hit headers.
+- [x] M4.3 Strip verified ignored headers on hits when configured.
+- [x] M4.4 Preserve origin miss headers unchanged except existing proxy-managed
   headers.
-- [ ] M4.5 Add or update `Age` on cache hits when configured.
-- [ ] M4.6 Handle legacy disk entries without header policy metadata.
-- [ ] M4.7 Add integration tests proving hits do not replay `x-response-id`.
+- [x] M4.5 Add or update `Age` on cache hits when configured.
+- [x] M4.6 Handle legacy disk entries without header policy metadata.
+- [x] M4.7 Add integration tests proving hits do not replay `x-response-id`.
 
 Acceptance:
 
@@ -128,15 +128,15 @@ Acceptance:
 
 Goal: make header normalization explainable and private.
 
-- [ ] M5.1 Extend route snapshots with header-equivalence counts and blockers.
-- [ ] M5.2 Add header candidate snapshots.
-- [ ] M5.3 Update dashboard route list and route detail.
-- [ ] M5.4 Update `kubio routes`.
-- [ ] M5.5 Update `kubio explain`.
-- [ ] M5.6 Add debug headers for header shape, ignored names, and suppressed
+- [x] M5.1 Extend route snapshots with header-equivalence counts and blockers.
+- [x] M5.2 Add header candidate snapshots.
+- [x] M5.3 Update dashboard route list and route detail.
+- [x] M5.4 Update `kubio routes`.
+- [x] M5.5 Update `kubio explain`.
+- [x] M5.6 Add debug headers for header shape, ignored names, and suppressed
   names.
-- [ ] M5.7 Add metrics and events.
-- [ ] M5.8 Update README, configuration, how-decides, safety model, metrics,
+- [x] M5.7 Add metrics and events.
+- [x] M5.8 Update README, configuration, how-decides, safety model, metrics,
   examples, roadmap, and release notes.
 
 Acceptance:
@@ -149,15 +149,15 @@ Acceptance:
 
 Goal: prove v0.5.2 improves dynamic-header public routes without regressions.
 
-- [ ] M6.1 Add dynamic response metadata public object benchmark.
-- [ ] M6.2 Add vendor header candidate benchmark.
-- [ ] M6.3 Add safety regression sweep with dynamic metadata headers.
-- [ ] M6.4 Add privacy regression tests for raw header values.
-- [ ] M6.5 Run full workspace tests.
-- [ ] M6.6 Run HTTP/3 feature tests.
-- [ ] M6.7 Compare v0.5.2 dynamic-header hit rates against v0.5.1 baseline.
-- [ ] M6.8 Bump workspace version to `0.5.2`.
-- [ ] M6.9 Add release notes.
+- [x] M6.1 Add dynamic response metadata public object benchmark.
+- [x] M6.2 Add vendor header candidate benchmark.
+- [x] M6.3 Add safety regression sweep with dynamic metadata headers.
+- [x] M6.4 Add privacy regression tests for raw header values.
+- [x] M6.5 Run full workspace tests.
+- [x] M6.6 Run HTTP/3 feature tests.
+- [x] M6.7 Compare v0.5.2 dynamic-header hit rates against v0.5.1 baseline.
+- [x] M6.8 Bump workspace version to `0.5.2`.
+- [x] M6.9 Add release notes.
 
 Acceptance:
 

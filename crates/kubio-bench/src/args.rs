@@ -30,6 +30,9 @@ pub(crate) enum Scenario {
     SensitiveSlugSweep,
     EvidenceDecay,
     CanaryMismatch,
+    DynamicResponseMetadata,
+    VendorHeaderCandidate,
+    VendorHeaderRouteEnabled,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, PartialEq, Eq)]

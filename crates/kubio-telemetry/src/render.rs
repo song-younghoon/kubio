@@ -363,6 +363,54 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
     );
     line(
         &mut out,
+        "kubio_response_header_equivalence_candidates_total",
+        "Verified response header volatile candidates.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_response_header_equivalence_candidates_total",
+        &[("class", "verified_volatile_candidate")],
+        snapshot
+            .routes
+            .iter()
+            .map(|route| route.verified_header_ignore_candidates)
+            .sum::<u64>(),
+    );
+    line(
+        &mut out,
+        "kubio_response_header_ignored_total",
+        "Response headers ignored for fingerprint normalization.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_response_header_ignored_total",
+        &[("source", "all")],
+        snapshot
+            .routes
+            .iter()
+            .map(|route| route.ignored_response_header_count)
+            .sum::<u64>(),
+    );
+    line(
+        &mut out,
+        "kubio_response_header_suppressed_on_hit_total",
+        "Response headers suppressed from cache-hit responses.",
+        "counter",
+    );
+    metric(
+        &mut out,
+        "kubio_response_header_suppressed_on_hit_total",
+        &[("source", "all")],
+        snapshot
+            .routes
+            .iter()
+            .map(|route| route.suppressed_on_hit_header_count)
+            .sum::<u64>(),
+    );
+    line(
+        &mut out,
         "kubio_variant_groups",
         "Configured variant dimensions observed for precision reuse.",
         "gauge",
@@ -885,6 +933,9 @@ mod tests {
                 canary_mismatches: 0,
                 query_equivalence_candidates: 0,
                 query_compacted_groups: 0,
+                ignored_response_header_count: 0,
+                suppressed_on_hit_header_count: 0,
+                verified_header_ignore_candidates: 0,
                 variant_dimensions: 0,
                 variant_unbounded: false,
                 shadow_matches: 0,
@@ -922,6 +973,7 @@ mod tests {
                 explanation: vec![],
                 route_hint: None,
                 query_params: vec![],
+                response_headers: vec![],
             }],
             events: vec![],
         };
@@ -951,6 +1003,9 @@ mod tests {
         assert!(metrics.contains("kubio_precision_confidence_routes"));
         assert!(metrics.contains("kubio_precision_canary_total"));
         assert!(metrics.contains("kubio_query_equivalence_candidates_total"));
+        assert!(metrics.contains("kubio_response_header_equivalence_candidates_total"));
+        assert!(metrics.contains("kubio_response_header_ignored_total"));
+        assert!(metrics.contains("kubio_response_header_suppressed_on_hit_total"));
         assert!(metrics.contains("kubio_variant_groups"));
         assert!(metrics.contains("kubio_store_errors_total"));
         assert!(metrics.contains("kubio_store_operations_total"));

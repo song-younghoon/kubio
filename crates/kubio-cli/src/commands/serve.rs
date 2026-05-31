@@ -16,7 +16,7 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     let config = Arc::new(load_config_for_serve(&args)?);
     validate_config(&config)?;
 
-    let observer = Arc::new(Observer::with_adaptive_config(
+    let observer = Arc::new(Observer::with_policy_config(
         config.observability.max_routes,
         config.observability.max_keys,
         config.observability.max_events,
@@ -24,6 +24,7 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         config.policy.min_key_repeats,
         config.policy.min_shadow_validations,
         config.policy.adaptive_reuse.clone(),
+        config.policy.response_header_equivalence.clone(),
     ));
     let store: Arc<dyn CacheStore> = match config.storage.kind.as_str() {
         "memory" => Arc::new(MemoryStore::new(&config.storage)),

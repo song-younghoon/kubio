@@ -79,7 +79,7 @@ pub(crate) async fn routes_page(State(state): State<DashboardState>) -> Html<Str
         .iter()
         .map(|route| {
             format!(
-                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{class}</td><td>{confidence}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td><td>{keys}</td><td>{query}</td><td>{downstream}</td><td>{upstream}</td></tr>",
+                "<tr><td><a href=\"/routes/{hash}\">{label}</a></td><td>{state}</td><td>{class}</td><td>{confidence}</td><td>{requests}</td><td>{origin}</td><td>{reuse}</td><td>{protected}</td><td>{keys}</td><td>{query}</td><td>{headers}</td><td>{downstream}</td><td>{upstream}</td></tr>",
                 hash = route.route_hash,
                 label = escape_html(&route.route_id.as_label()),
                 state = route.state,
@@ -91,6 +91,7 @@ pub(crate) async fn routes_page(State(state): State<DashboardState>) -> Html<Str
                 protected = route.protected_count,
                 keys = route.distinct_key_count,
                 query = route.query_equivalence_candidates,
+                headers = route.ignored_response_header_count,
                 downstream = protocol_counts_html(&route.downstream_protocols),
                 upstream = protocol_counts_html(&route.upstream_protocols),
             )
@@ -99,7 +100,7 @@ pub(crate) async fn routes_page(State(state): State<DashboardState>) -> Html<Str
     Html(layout(
         "Routes",
         &format!(
-            "<table><thead><tr><th>Route</th><th>Status</th><th>Reuse class</th><th>Confidence</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th><th>Keys</th><th>Query candidates</th><th>Downstream</th><th>Upstream</th></tr></thead><tbody>{rows}</tbody></table>"
+            "<table><thead><tr><th>Route</th><th>Status</th><th>Reuse class</th><th>Confidence</th><th>Requests</th><th>Origin</th><th>Reused</th><th>Protected</th><th>Keys</th><th>Query candidates</th><th>Header ignored</th><th>Downstream</th><th>Upstream</th></tr></thead><tbody>{rows}</tbody></table>"
         ),
     ))
 }
@@ -152,6 +153,21 @@ pub(crate) async fn route_page(
             )
         })
         .collect::<String>();
+    let response_headers = route
+        .response_headers
+        .iter()
+        .map(|header| {
+            format!(
+                "<li>{}: {} values={} matches={} mismatches={} suppressed_on_hit={}</li>",
+                escape_html(&header.name),
+                header.class,
+                header.distinct_value_count,
+                header.matching_without_header_count,
+                header.mismatch_count,
+                header.suppressed_on_hit,
+            )
+        })
+        .collect::<String>();
     Html(layout(
         &route.route_id.as_label(),
         &format!(
@@ -177,6 +193,9 @@ pub(crate) async fn route_page(
     <dt>Canary</dt><dd>match {} / mismatch {}</dd>
     <dt>Query equivalence candidates</dt><dd>{}</dd>
     <dt>Query compacted groups</dt><dd>{}</dd>
+    <dt>Response headers ignored</dt><dd>{}</dd>
+    <dt>Response header candidates</dt><dd>{}</dd>
+    <dt>Response headers suppressed on hit</dt><dd>{}</dd>
     <dt>Variant dimensions</dt><dd>{}</dd>
     <dt>Variant unbounded</dt><dd>{}</dd>
     <dt>Adaptive blockers</dt><dd>{}</dd>
@@ -189,6 +208,8 @@ pub(crate) async fn route_page(
     <dt>p95 latency</dt><dd>{:.2} ms</dd>
   </dl>
   <h3>Query equivalence</h3>
+  <ul>{}</ul>
+  <h3>Response header equivalence</h3>
   <ul>{}</ul>
   <h3>Recent bounded events</h3>
   <ul>{}</ul>
@@ -218,6 +239,9 @@ pub(crate) async fn route_page(
             route.canary_mismatches,
             route.query_equivalence_candidates,
             route.query_compacted_groups,
+            route.ignored_response_header_count,
+            route.verified_header_ignore_candidates,
+            route.suppressed_on_hit_header_count,
             route.variant_dimensions,
             route.variant_unbounded,
             escape_html(if blockers.is_empty() {
@@ -233,6 +257,7 @@ pub(crate) async fn route_page(
             protocol_counts_html(&route.upstream_protocols),
             route.latency.p95_ms,
             query_params,
+            response_headers,
             events,
         ),
     ))

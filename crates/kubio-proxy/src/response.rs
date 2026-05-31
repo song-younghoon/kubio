@@ -2,8 +2,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
 use kubio_core::{
-    body_hash, stable_header_hash, CacheKeyHash, DecisionReason, EffectiveConfig,
-    ResponseFingerprint, RouteId,
+    body_hash, stable_header_fingerprint, CacheKeyHash, DecisionReason, EffectiveConfig,
+    HeaderFingerprintResult, ResponseFingerprint, RouteHintConfig, RouteId,
 };
 use kubio_observe::EventType;
 
@@ -11,20 +11,39 @@ use crate::alt_svc::{add_alt_svc_header, ALT_SVC_HEADER};
 use crate::headers::{connection_header_names, is_hop_by_hop_header_named};
 use crate::state::ProxyState;
 
+#[derive(Debug, Clone)]
+pub(crate) struct FingerprintComputation {
+    pub(crate) fingerprint: ResponseFingerprint,
+    pub(crate) header_result: HeaderFingerprintResult,
+}
+
 pub(crate) fn make_fingerprint(
     config: &EffectiveConfig,
+    route_hint: Option<&RouteHintConfig>,
+    verified_response_header_ignores: &[String],
     status: StatusCode,
     headers: &HeaderMap,
     body: &[u8],
-) -> Option<ResponseFingerprint> {
+) -> Option<FingerprintComputation> {
     if body.len() as u64 > config.policy.max_fingerprint_body_size {
         return None;
     }
-    Some(ResponseFingerprint::new(
+    let header_result = stable_header_fingerprint(
+        headers,
+        &config.policy.response_header_equivalence,
+        route_hint.map(|hint| &hint.response_headers),
+        verified_response_header_ignores,
+    );
+    let fingerprint = ResponseFingerprint::new_with_policy(
         status.as_u16(),
-        stable_header_hash(headers),
+        header_result.hash.clone(),
         Some(body_hash(body)),
-    ))
+        header_result.policy_version,
+    );
+    Some(FingerprintComputation {
+        fingerprint,
+        header_result,
+    })
 }
 
 pub(crate) fn response_from_origin_stream(

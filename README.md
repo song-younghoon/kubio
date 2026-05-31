@@ -136,6 +136,12 @@ explicitly enables that behavior. Public slug routes such as
 `/articles/{slug}` can collect public-object evidence, while sensitive slug
 routes such as `/users/jane-doe` remain protected.
 
+v0.5.2 adds response-header equivalence. Per-request metadata headers such as
+`x-response-id`, `x-correlation-id`, and trace IDs no longer block reuse when
+status, body, and semantic response headers match. Those one-shot identifiers
+are stripped from cache-hit responses by default so cached hits do not replay an
+old origin request ID.
+
 Configure `--panic-file /path/to/file` to immediately disable reuse while
 keeping origin pass-through active.
 
@@ -178,6 +184,8 @@ kubio remains local-first and process-local:
   routes.
 - Precision adaptive reuse for verified query equivalence, evidence decay,
   canary validation, bounded variants, and public slug routes.
+- Response-header equivalence for volatile metadata headers such as
+  `x-response-id` without weakening cache safety headers.
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
@@ -191,6 +199,8 @@ kubio remains local-first and process-local:
 - [Metrics](docs/metrics.md)
 - [Safety Model](docs/safety-model.md)
 - [Roadmap](docs/roadmap.md)
+- [v0.5.2 Release Notes](docs/release-notes-v0.5.2.md)
+- [v0.5.2 Design](.design/v0.5.2)
 - [v0.5.1 Release Notes](docs/release-notes-v0.5.1.md)
 - [v0.5.1 Design](.design/v0.5.1)
 - [v0.5.0 Release Notes](docs/release-notes-v0.5.0.md)

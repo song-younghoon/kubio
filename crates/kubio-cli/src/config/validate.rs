@@ -74,6 +74,7 @@ pub(crate) fn validate_config(config: &EffectiveConfig) -> Result<()> {
     if config.policy.revalidation.max_validator_length == 0 {
         bail!("policy.revalidation.max_validator_length must be greater than zero");
     }
+    validate_response_header_equivalence_config(config)?;
     if config.policy.stale_if_error.max_stale.is_zero() {
         bail!("policy.stale_if_error.max_stale must be greater than zero");
     }
@@ -126,6 +127,29 @@ fn validate_adaptive_reuse_config(config: &EffectiveConfig) -> Result<()> {
         || !(0.0..=1.0).contains(&public_object.min_store_safe_rate)
     {
         bail!("policy.adaptive_reuse.public_object.min_store_safe_rate must be between 0 and 1");
+    }
+    Ok(())
+}
+
+fn validate_response_header_equivalence_config(config: &EffectiveConfig) -> Result<()> {
+    let header = &config.policy.response_header_equivalence;
+    if header.verified_ignore.min_distinct_values == 0
+        || header.verified_ignore.min_matching_fingerprints == 0
+    {
+        bail!("policy.response_header_equivalence.verified_ignore thresholds must be greater than zero");
+    }
+    if header.verified_ignore.cooldown_secs == 0 {
+        bail!("policy.response_header_equivalence.verified_ignore.cooldown_secs must be greater than zero");
+    }
+    for name in header
+        .default_volatile
+        .add
+        .iter()
+        .chain(header.default_volatile.block.iter())
+    {
+        if name.trim().is_empty() {
+            bail!("policy.response_header_equivalence.default_volatile names must not be empty");
+        }
     }
     Ok(())
 }
@@ -620,6 +644,7 @@ routes:
             vary: RouteVaryConfig::default(),
             stale_if_error: RouteStaleIfErrorConfig::default(),
             safety: RouteSafetyConfig::default(),
+            response_headers: Default::default(),
         }
     }
 }

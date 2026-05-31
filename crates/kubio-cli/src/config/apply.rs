@@ -363,6 +363,9 @@ fn apply_policy_config(config: &mut PolicyConfig, policy: FilePolicyConfig) -> R
             config.query_intelligence.auto_ignore = auto_ignore;
         }
     }
+    if let Some(response_header_equivalence) = policy.response_header_equivalence {
+        config.response_header_equivalence = response_header_equivalence;
+    }
     if let Some(adaptive_reuse) = policy.adaptive_reuse {
         if let Some(enabled) = adaptive_reuse.enabled {
             config.adaptive_reuse.enabled = enabled;

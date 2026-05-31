@@ -1,6 +1,6 @@
 # Response Header Equivalence
 
-Status: proposed
+Status: implemented
 Target release: `v0.5.2`
 
 ## Goals
@@ -247,7 +247,8 @@ Default behavior:
 
 - curated default volatile metadata headers are ignored immediately;
 - unknown verified candidates are shown in observability but not applied;
-- route hints can apply verified candidates by name or bounded pattern.
+- route hints can apply operator-approved, candidate-eligible metadata names by
+  name or bounded pattern.
 
 Example:
 
@@ -269,6 +270,8 @@ Rules:
 - `force_include` wins over default volatile and verified ignore.
 - `preserve_on_hit` affects response replay only, not fingerprinting.
 - route hints cannot make hard safety headers ignorable.
+- route hints also cannot make validator, freshness, representation, or
+  sensitive/business-state headers ignorable.
 - a mismatch demotes the header-equivalence group and purges affected entries.
 
 ## Demotion and Purge

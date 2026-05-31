@@ -239,6 +239,7 @@ pub struct PolicyConfig {
     pub revalidation: RevalidationConfig,
     pub stale_if_error: StaleIfErrorConfig,
     pub query_intelligence: QueryIntelligenceConfig,
+    pub response_header_equivalence: ResponseHeaderEquivalenceConfig,
     pub adaptive_reuse: AdaptiveReuseConfig,
 }
 
@@ -259,6 +260,7 @@ impl Default for PolicyConfig {
             revalidation: RevalidationConfig::default(),
             stale_if_error: StaleIfErrorConfig::default(),
             query_intelligence: QueryIntelligenceConfig::default(),
+            response_header_equivalence: ResponseHeaderEquivalenceConfig::default(),
             adaptive_reuse: AdaptiveReuseConfig::default(),
         }
     }
@@ -429,6 +431,77 @@ impl Default for VariantPrecisionConfig {
             require_variant_evidence: true,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseHeaderEquivalenceConfig {
+    pub enabled: bool,
+    pub verified_ignore: ResponseHeaderVerifiedIgnoreConfig,
+    pub serve: ResponseHeaderServeConfig,
+    pub default_volatile: ResponseHeaderDefaultVolatileConfig,
+}
+
+impl Default for ResponseHeaderEquivalenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            verified_ignore: ResponseHeaderVerifiedIgnoreConfig::default(),
+            serve: ResponseHeaderServeConfig::default(),
+            default_volatile: ResponseHeaderDefaultVolatileConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseHeaderVerifiedIgnoreConfig {
+    pub enabled: bool,
+    pub auto_apply_known_metadata: bool,
+    pub auto_apply_unknown: bool,
+    pub min_distinct_values: u64,
+    pub min_matching_fingerprints: u64,
+    pub max_mismatches: u64,
+    pub cooldown_secs: u64,
+}
+
+impl Default for ResponseHeaderVerifiedIgnoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_apply_known_metadata: true,
+            auto_apply_unknown: false,
+            min_distinct_values: 3,
+            min_matching_fingerprints: 3,
+            max_mismatches: 0,
+            cooldown_secs: 10 * 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseHeaderServeConfig {
+    pub strip_volatile_on_hit: bool,
+    pub strip_verified_ignored_on_hit: bool,
+    pub add_age: bool,
+    pub preserve_date: bool,
+}
+
+impl Default for ResponseHeaderServeConfig {
+    fn default() -> Self {
+        Self {
+            strip_volatile_on_hit: true,
+            strip_verified_ignored_on_hit: true,
+            add_age: true,
+            preserve_date: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseHeaderDefaultVolatileConfig {
+    #[serde(default)]
+    pub add: Vec<String>,
+    #[serde(default)]
+    pub block: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,6 +695,8 @@ pub struct RouteHintConfig {
     pub stale_if_error: RouteStaleIfErrorConfig,
     #[serde(default)]
     pub safety: RouteSafetyConfig,
+    #[serde(default)]
+    pub response_headers: RouteResponseHeadersConfig,
 }
 
 impl RouteHintConfig {
@@ -677,6 +752,24 @@ pub struct RouteVerifiedIgnoreConfig {
 impl RouteVerifiedIgnoreConfig {
     pub fn is_empty(&self) -> bool {
         !self.enabled && self.allow.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteResponseHeadersConfig {
+    #[serde(default)]
+    pub verified_ignore: RouteVerifiedIgnoreConfig,
+    #[serde(default)]
+    pub force_include: Vec<String>,
+    #[serde(default)]
+    pub preserve_on_hit: Vec<String>,
+}
+
+impl RouteResponseHeadersConfig {
+    pub fn is_empty(&self) -> bool {
+        self.verified_ignore.is_empty()
+            && self.force_include.is_empty()
+            && self.preserve_on_hit.is_empty()
     }
 }
 

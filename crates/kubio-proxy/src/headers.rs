@@ -1,6 +1,9 @@
 use axum::http::{HeaderMap, HeaderValue};
 use http::header;
-use kubio_core::{is_hop_by_hop_header, Validators};
+use kubio_core::{
+    is_hop_by_hop_header, should_suppress_response_header_on_hit, EffectiveConfig, RouteHintConfig,
+    Validators,
+};
 
 pub(crate) fn origin_request_headers(
     headers: &HeaderMap,
@@ -42,7 +45,12 @@ pub(crate) fn clone_response_headers(headers: &HeaderMap) -> HeaderMap {
     cloned
 }
 
-pub(crate) fn sanitized_response_headers(headers: &HeaderMap) -> HeaderMap {
+pub(crate) fn sanitized_response_headers(
+    config: &EffectiveConfig,
+    route_hint: Option<&RouteHintConfig>,
+    headers: &HeaderMap,
+    suppressed_names: &[String],
+) -> HeaderMap {
     let mut sanitized = HeaderMap::new();
     let connection_named_headers = connection_header_names(headers);
     for (name, value) in headers {
@@ -50,6 +58,12 @@ pub(crate) fn sanitized_response_headers(headers: &HeaderMap) -> HeaderMap {
         if is_hop_by_hop_header_named(&lower, &connection_named_headers)
             || lower == "set-cookie"
             || lower.starts_with("x-kubio-")
+            || should_suppress_response_header_on_hit(
+                &config.policy.response_header_equivalence,
+                route_hint.map(|hint| &hint.response_headers),
+                &lower,
+                suppressed_names,
+            )
         {
             continue;
         }
@@ -115,5 +129,18 @@ mod tests {
         assert!(!cloned.contains_key(header::CONNECTION));
         assert!(!cloned.contains_key("x-stream-id"));
         assert_eq!(cloned.get("content-type").unwrap(), "text/plain");
+    }
+
+    #[test]
+    fn volatile_response_ids_are_removed_from_stored_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-response-id", "raw-id".parse().unwrap());
+        headers.insert("content-type", "text/plain".parse().unwrap());
+
+        let sanitized =
+            sanitized_response_headers(&EffectiveConfig::default(), None, &headers, &[]);
+
+        assert!(!sanitized.contains_key("x-response-id"));
+        assert_eq!(sanitized.get("content-type").unwrap(), "text/plain");
     }
 }

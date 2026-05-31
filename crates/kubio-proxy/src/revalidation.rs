@@ -108,7 +108,12 @@ pub(crate) fn refresh_entry_after_304(
     mut entry: CacheEntry,
     headers: &HeaderMap,
 ) -> CacheEntry {
-    let sanitized = sanitized_response_headers(headers);
+    let sanitized = sanitized_response_headers(
+        &state.config,
+        route_hint,
+        headers,
+        &entry.suppressed_response_headers,
+    );
     for (name, value) in sanitized {
         if let Some(name) = name {
             if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {

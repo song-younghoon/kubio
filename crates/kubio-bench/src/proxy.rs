@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use kubio_core::TlsConfig;
 use kubio_core::{
     EffectiveConfig, Mode, RouteHintConfig, RouteMatchConfig, RouteQueryConfig,
-    RouteVerifiedIgnoreConfig,
+    RouteResponseHeadersConfig, RouteVerifiedIgnoreConfig,
 };
 use kubio_observe::Observer;
 use kubio_policy::PolicyEngine;
@@ -74,28 +74,51 @@ impl ManagedProxy {
         if matches!(scenario, crate::args::Scenario::EvidenceDecay) {
             policy.adaptive_reuse.precision.confidence.fresh_window_secs = 0;
         }
-        let routes = if matches!(scenario, crate::args::Scenario::QueryNoisyPublicObject) {
-            vec![RouteHintConfig {
-                name: Some("bench verified query ignore".to_string()),
-                route_match: RouteMatchConfig {
-                    method: "GET".to_string(),
-                    path: "/query-intel".to_string(),
-                },
-                freshness: Default::default(),
-                query: RouteQueryConfig {
-                    include: Vec::new(),
-                    ignore: Vec::new(),
-                    verified_ignore: RouteVerifiedIgnoreConfig {
-                        enabled: true,
-                        allow: vec!["utm_*".to_string(), "gclid".to_string()],
+        let routes = match scenario {
+            crate::args::Scenario::QueryNoisyPublicObject => {
+                vec![RouteHintConfig {
+                    name: Some("bench verified query ignore".to_string()),
+                    route_match: RouteMatchConfig {
+                        method: "GET".to_string(),
+                        path: "/query-intel".to_string(),
                     },
-                },
-                vary: Default::default(),
-                stale_if_error: Default::default(),
-                safety: Default::default(),
-            }]
-        } else {
-            Vec::new()
+                    freshness: Default::default(),
+                    query: RouteQueryConfig {
+                        include: Vec::new(),
+                        ignore: Vec::new(),
+                        verified_ignore: RouteVerifiedIgnoreConfig {
+                            enabled: true,
+                            allow: vec!["utm_*".to_string(), "gclid".to_string()],
+                        },
+                    },
+                    vary: Default::default(),
+                    stale_if_error: Default::default(),
+                    safety: Default::default(),
+                    response_headers: Default::default(),
+                }]
+            }
+            crate::args::Scenario::VendorHeaderRouteEnabled => {
+                vec![RouteHintConfig {
+                    name: Some("bench vendor response metadata".to_string()),
+                    route_match: RouteMatchConfig {
+                        method: "GET".to_string(),
+                        path: "/vendor-header/{id}".to_string(),
+                    },
+                    freshness: Default::default(),
+                    query: Default::default(),
+                    vary: Default::default(),
+                    stale_if_error: Default::default(),
+                    safety: Default::default(),
+                    response_headers: RouteResponseHeadersConfig {
+                        verified_ignore: RouteVerifiedIgnoreConfig {
+                            enabled: true,
+                            allow: vec!["x-vendor-execution-id".to_string()],
+                        },
+                        ..Default::default()
+                    },
+                }]
+            }
+            _ => Vec::new(),
         };
         let config = Arc::new(EffectiveConfig {
             origin,
@@ -105,7 +128,7 @@ impl ManagedProxy {
             routes,
             ..defaults
         });
-        let observer = Arc::new(Observer::with_adaptive_config(
+        let observer = Arc::new(Observer::with_policy_config(
             100,
             100,
             100,
@@ -113,6 +136,7 @@ impl ManagedProxy {
             2,
             1,
             config.policy.adaptive_reuse.clone(),
+            config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
         let policy = Arc::new(PolicyEngine::new(&config));

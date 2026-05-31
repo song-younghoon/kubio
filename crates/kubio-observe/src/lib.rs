@@ -6,6 +6,7 @@ mod observer;
 mod protocol;
 mod query;
 mod records;
+mod response_headers;
 mod snapshot;
 mod state;
 

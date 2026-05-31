@@ -25,6 +25,12 @@ pub(crate) struct DiskEntryMetadata {
     pub(crate) cache_control: StoredCacheControl,
     pub(crate) must_revalidate: bool,
     pub(crate) fingerprint: ResponseFingerprint,
+    #[serde(default)]
+    pub(crate) ignored_response_headers: Vec<String>,
+    #[serde(default)]
+    pub(crate) suppressed_response_headers: Vec<String>,
+    #[serde(default)]
+    pub(crate) header_policy_version: u16,
     pub(crate) route_id: RouteId,
 }
 
@@ -44,6 +50,9 @@ impl DiskEntryMetadata {
             cache_control: entry.cache_control.clone(),
             must_revalidate: entry.must_revalidate,
             fingerprint: entry.fingerprint.clone(),
+            ignored_response_headers: entry.ignored_response_headers.clone(),
+            suppressed_response_headers: entry.suppressed_response_headers.clone(),
+            header_policy_version: entry.header_policy_version,
             route_id: entry.route_id.clone(),
         }
     }
@@ -96,6 +105,9 @@ pub(crate) fn read_disk_entry(meta_path: &Path) -> Result<(CacheKeyHash, CacheEn
             cache_control: metadata.cache_control,
             must_revalidate: metadata.must_revalidate,
             fingerprint: metadata.fingerprint,
+            ignored_response_headers: metadata.ignored_response_headers,
+            suppressed_response_headers: metadata.suppressed_response_headers,
+            header_policy_version: metadata.header_policy_version,
             route_id: metadata.route_id,
             cache_key_hash: key,
         },

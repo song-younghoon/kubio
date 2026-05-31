@@ -1,5 +1,7 @@
 use anyhow::Result;
+use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::http::{Response, StatusCode};
 use axum::routing::get;
 use axum::Router;
 use std::net::SocketAddr;
@@ -28,6 +30,8 @@ impl ManagedOrigin {
             .route("/catalog/{id}", get(public_catalog))
             .route("/user/{id}", get(public_user))
             .route("/query-intel", get(|| async { "query-intel" }))
+            .route("/dynamic-response-id/{id}", get(dynamic_response_id))
+            .route("/vendor-header/{id}", get(vendor_header))
             .route("/articles/{slug}", get(public_article))
             .route("/users/{slug}", get(public_user_slug))
             .route("/canary/1", get(canary_changing))
@@ -67,6 +71,34 @@ async fn public_user(Path(id): Path<String>) -> impl axum::response::IntoRespons
         [("cache-control", "public, max-age=60")],
         format!("user-{id}"),
     )
+}
+
+async fn dynamic_response_id(
+    Path(id): Path<String>,
+    State(hits): State<Arc<AtomicUsize>>,
+) -> impl axum::response::IntoResponse {
+    let hit = hits.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("cache-control", "public, max-age=60")
+        .header("content-type", "text/plain")
+        .header("x-response-id", format!("res-{hit}"))
+        .header("x-correlation-id", format!("corr-{hit}"))
+        .body(Body::from(format!("dynamic-response-id-{id}")))
+        .expect("valid response")
+}
+
+async fn vendor_header(
+    Path(id): Path<String>,
+    State(hits): State<Arc<AtomicUsize>>,
+) -> impl axum::response::IntoResponse {
+    let hit = hits.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/plain")
+        .header("x-vendor-execution-id", format!("exec-{hit}"))
+        .body(Body::from(format!("vendor-header-{id}")))
+        .expect("valid response")
 }
 
 async fn public_article(Path(slug): Path<String>) -> String {
