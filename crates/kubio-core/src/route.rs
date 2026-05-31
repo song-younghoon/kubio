@@ -3,7 +3,7 @@ use http::Method;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RouteId {
     pub method: String,
     pub template: String,

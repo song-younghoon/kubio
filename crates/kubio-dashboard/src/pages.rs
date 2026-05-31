@@ -7,6 +7,8 @@ use crate::state::DashboardState;
 
 pub(crate) async fn index(State(state): State<DashboardState>) -> Html<String> {
     let snapshot = state.observer.snapshot();
+    let active = state.active_config();
+    let reload = state.reload_status();
     Html(layout(
         "Overview",
         &format!(
@@ -16,6 +18,8 @@ pub(crate) async fn index(State(state): State<DashboardState>) -> Html<String> {
   <dl>
     <dt>Mode</dt><dd>{}</dd>
     <dt>Origin</dt><dd>{}</dd>
+    <dt>Config generation</dt><dd>{}</dd>
+    <dt>Last reload</dt><dd>{}</dd>
     <dt>Observed requests</dt><dd>{}</dd>
     <dt>Origin requests</dt><dd>{}</dd>
     <dt>Reused responses</dt><dd>{}</dd>
@@ -38,8 +42,13 @@ pub(crate) async fn index(State(state): State<DashboardState>) -> Html<String> {
   </dl>
 </section>
 "#,
-            state.config.mode,
-            state.config.origin,
+            active.config.mode,
+            active.config.origin,
+            active.generation,
+            reload
+                .last_status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "none".to_string()),
             snapshot.overview.observed_requests,
             snapshot.overview.origin_requests,
             snapshot.overview.reused_responses,
@@ -168,6 +177,16 @@ pub(crate) async fn route_page(
             )
         })
         .collect::<String>();
+    let reload_action = route
+        .reload
+        .last_reload_action
+        .map(|action| action.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let reload_reason = route
+        .reload
+        .last_reload_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
     Html(layout(
         &route.route_id.as_label(),
         &format!(
@@ -206,6 +225,8 @@ pub(crate) async fn route_page(
     <dt>Downstream protocols</dt><dd>{}</dd>
     <dt>Upstream protocols</dt><dd>{}</dd>
     <dt>p95 latency</dt><dd>{:.2} ms</dd>
+    <dt>Reload action</dt><dd>{}</dd>
+    <dt>Reload reason</dt><dd>{}</dd>
   </dl>
   <h3>Query equivalence</h3>
   <ul>{}</ul>
@@ -256,6 +277,8 @@ pub(crate) async fn route_page(
             protocol_counts_html(&route.downstream_protocols),
             protocol_counts_html(&route.upstream_protocols),
             route.latency.p95_ms,
+            escape_html(&reload_action),
+            escape_html(&reload_reason),
             query_params,
             response_headers,
             events,
@@ -288,10 +311,41 @@ pub(crate) async fn events_page(State(state): State<DashboardState>) -> Html<Str
 }
 
 pub(crate) async fn config_page(State(state): State<DashboardState>) -> Html<String> {
-    let body = serde_json::to_string_pretty(&state.config.redacted()).unwrap_or_default();
+    let active = state.active_config();
+    let reload = state.reload_status();
+    let body = serde_json::to_string_pretty(&active).unwrap_or_default();
     Html(layout(
         "Config",
-        &format!("<pre>{}</pre>", escape_html(&body)),
+        &format!(
+            r#"
+<section>
+  <h2>Config</h2>
+  <dl>
+    <dt>Active generation</dt><dd>{}</dd>
+    <dt>Config source</dt><dd>{}</dd>
+    <dt>Last reload</dt><dd>{}</dd>
+    <dt>Reloadable changes</dt><dd>{}</dd>
+    <dt>Restart-required changes</dt><dd>{}</dd>
+    <dt>Routes demoted</dt><dd>{}</dd>
+    <dt>Cache entries purged</dt><dd>{}</dd>
+  </dl>
+  <pre>{}</pre>
+</section>
+"#,
+            active.generation,
+            escape_html(reload.config_source.as_deref().unwrap_or("none")),
+            escape_html(
+                &reload
+                    .last_status
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+            reload.last_reloadable_change_count,
+            reload.last_restart_required_count,
+            reload.last_routes_demoted,
+            reload.last_cache_entries_purged,
+            escape_html(&body)
+        ),
     ))
 }
 

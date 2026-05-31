@@ -13,6 +13,7 @@ use std::fmt;
 use url::Url;
 
 use crate::headers::{declared_request_body_len, origin_request_headers};
+use crate::runtime::ActiveRuntime;
 use crate::state::ProxyState;
 
 pub(crate) enum OriginResponse {
@@ -65,17 +66,19 @@ impl OriginResponse {
 
 pub(crate) async fn send_origin(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: Body,
     route_id: &RouteId,
 ) -> Result<OriginResponse, OriginError> {
-    send_origin_with_validators(state, method, uri, headers, body, route_id, None).await
+    send_origin_with_validators(state, runtime, method, uri, headers, body, route_id, None).await
 }
 
 pub(crate) async fn send_conditional_origin(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
@@ -84,6 +87,7 @@ pub(crate) async fn send_conditional_origin(
 ) -> Result<OriginResponse, OriginError> {
     send_origin_with_validators(
         state,
+        runtime,
         method,
         uri,
         headers,
@@ -94,8 +98,10 @@ pub(crate) async fn send_conditional_origin(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_origin_with_validators(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
@@ -104,20 +110,21 @@ async fn send_origin_with_validators(
     validators: Option<&Validators>,
 ) -> Result<OriginResponse, OriginError> {
     #[cfg(feature = "experimental-http3")]
-    if origin_http3_attempt_enabled(state) {
+    if origin_http3_attempt_enabled(runtime) {
         return send_origin_http3_with_fallback(
-            state, method, uri, headers, body, route_id, validators,
+            state, runtime, method, uri, headers, body, route_id, validators,
         )
         .await;
     }
 
-    if origin_protocol_retry_is_possible(state, method, headers) {
-        let body = axum::body::to_bytes(body, state.config.policy.max_request_body_size)
+    if origin_protocol_retry_is_possible(runtime, method, headers) {
+        let body = axum::body::to_bytes(body, runtime.config.policy.max_request_body_size)
             .await
             .map_err(|err| OriginError::BodyRead(err.to_string()))?;
         match send_origin_bytes(
             &state.client,
             state,
+            runtime,
             method,
             uri,
             headers,
@@ -126,11 +133,12 @@ async fn send_origin_with_validators(
         )
         .await
         {
-            Ok(response) => return validate_origin_protocol(state, route_id, response),
+            Ok(response) => return validate_origin_protocol(state, runtime, route_id, response),
             Err(OriginError::Request(err)) if origin_protocol_retry_error(&err) => {
                 let response = send_origin_bytes(
                     &state.fallback_client,
                     state,
+                    runtime,
                     method,
                     uri,
                     headers,
@@ -138,20 +146,31 @@ async fn send_origin_with_validators(
                     validators,
                 )
                 .await?;
-                return validate_origin_protocol(state, route_id, response);
+                return validate_origin_protocol(state, runtime, route_id, response);
             }
             Err(err) => return Err(err),
         }
     }
 
-    let response =
-        send_origin_stream(&state.client, state, method, uri, headers, body, validators).await?;
-    validate_origin_protocol(state, route_id, response)
+    let response = send_origin_stream(
+        &state.client,
+        state,
+        runtime,
+        method,
+        uri,
+        headers,
+        body,
+        validators,
+    )
+    .await?;
+    validate_origin_protocol(state, runtime, route_id, response)
 }
 
 #[cfg(feature = "experimental-http3")]
+#[allow(clippy::too_many_arguments)]
 async fn send_origin_http3_with_fallback(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
@@ -159,18 +178,18 @@ async fn send_origin_http3_with_fallback(
     route_id: &RouteId,
     validators: Option<&Validators>,
 ) -> Result<OriginResponse, OriginError> {
-    if state.config.origin.scheme() != "https" {
+    if runtime.config.origin.scheme() != "https" {
         state
             .observer
             .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::SkippedNotHttps);
         return send_origin_after_http3_skip(
-            state, method, uri, headers, body, route_id, validators,
+            state, runtime, method, uri, headers, body, route_id, validators,
         )
         .await;
     }
 
     let replayable = request_is_replayable_for_protocol_fallback(method, headers);
-    if state.config.origin_protocol.fallback && !replayable {
+    if runtime.config.origin_protocol.fallback && !replayable {
         state.observer.record_upstream_http3_event(
             route_id.clone(),
             UpstreamHttp3Event::SkippedNonReplayable,
@@ -178,20 +197,30 @@ async fn send_origin_http3_with_fallback(
         return Err(OriginError::NonReplayableHttp3FallbackBlocked);
     }
 
-    let body = axum::body::to_bytes(body, state.config.policy.max_request_body_size)
+    let body = axum::body::to_bytes(body, runtime.config.policy.max_request_body_size)
         .await
         .map_err(|err| OriginError::BodyRead(err.to_string()))?;
     state
         .observer
         .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Attempt);
-    match send_origin_http3_bytes(state, method, uri, headers, body.clone(), validators).await {
+    match send_origin_http3_bytes(
+        state,
+        runtime,
+        method,
+        uri,
+        headers,
+        body.clone(),
+        validators,
+    )
+    .await
+    {
         Ok(response) => {
             state
                 .observer
                 .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Success);
-            validate_origin_protocol(state, route_id, OriginResponse::Http3(response))
+            validate_origin_protocol(state, runtime, route_id, OriginResponse::Http3(response))
         }
-        Err(err) if state.config.origin_protocol.fallback && replayable => {
+        Err(err) if runtime.config.origin_protocol.fallback && replayable => {
             warn_origin_http3_fallback(&err);
             state
                 .observer
@@ -202,6 +231,7 @@ async fn send_origin_http3_with_fallback(
             let response = send_origin_bytes(
                 &state.fallback_client,
                 state,
+                runtime,
                 method,
                 uri,
                 headers,
@@ -209,7 +239,7 @@ async fn send_origin_http3_with_fallback(
                 validators,
             )
             .await?;
-            validate_origin_protocol(state, route_id, response)
+            validate_origin_protocol(state, runtime, route_id, response)
         }
         Err(err) => {
             tracing::warn!(error = %err, "required upstream HTTP/3 attempt failed");
@@ -230,8 +260,10 @@ fn warn_origin_http3_fallback(err: &anyhow::Error) {
 }
 
 #[cfg(feature = "experimental-http3")]
+#[allow(clippy::too_many_arguments)]
 async fn send_origin_after_http3_skip(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
@@ -239,15 +271,16 @@ async fn send_origin_after_http3_skip(
     route_id: &RouteId,
     validators: Option<&Validators>,
 ) -> Result<OriginResponse, OriginError> {
-    if state.config.origin_protocol.fallback
+    if runtime.config.origin_protocol.fallback
         && request_is_replayable_for_protocol_fallback(method, headers)
     {
-        let body = axum::body::to_bytes(body, state.config.policy.max_request_body_size)
+        let body = axum::body::to_bytes(body, runtime.config.policy.max_request_body_size)
             .await
             .map_err(|err| OriginError::BodyRead(err.to_string()))?;
         let response = send_origin_bytes(
             &state.fallback_client,
             state,
+            runtime,
             method,
             uri,
             headers,
@@ -258,9 +291,9 @@ async fn send_origin_after_http3_skip(
         state
             .observer
             .record_upstream_http3_event(route_id.clone(), UpstreamHttp3Event::Fallback);
-        validate_origin_protocol(state, route_id, response)
+        validate_origin_protocol(state, runtime, route_id, response)
     } else {
-        if state.config.origin_protocol.fallback {
+        if runtime.config.origin_protocol.fallback {
             state.observer.record_upstream_http3_event(
                 route_id.clone(),
                 UpstreamHttp3Event::SkippedNonReplayable,
@@ -279,6 +312,7 @@ async fn send_origin_after_http3_skip(
 #[cfg(feature = "experimental-http3")]
 async fn send_origin_http3_bytes(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
@@ -289,14 +323,14 @@ async fn send_origin_http3_bytes(
         .http3_origin_client
         .as_ref()
         .context("origin HTTP/3 client is not configured")?;
-    let url = origin_url(&state.config.origin, uri);
+    let url = origin_url(&runtime.config.origin, uri);
     let headers = origin_request_headers(headers, validators);
     let max_response_body_size = state
         .config
         .performance
         .max_buffered_response_size
-        .max(state.config.storage.max_object_size)
-        .max(state.config.policy.max_fingerprint_body_size)
+        .max(runtime.config.storage.max_object_size)
+        .max(runtime.config.policy.max_fingerprint_body_size)
         .min(usize::MAX as u64) as usize;
     client
         .send(method, &url, &headers, body, max_response_body_size)
@@ -304,21 +338,23 @@ async fn send_origin_http3_bytes(
 }
 
 #[cfg(feature = "experimental-http3")]
-fn origin_http3_attempt_enabled(state: &ProxyState) -> bool {
-    state.config.origin_protocol.http3_experimental
-        && state.config.origin_protocol.preferred == OriginProtocolPreference::Http3
+fn origin_http3_attempt_enabled(runtime: &ActiveRuntime) -> bool {
+    runtime.config.origin_protocol.http3_experimental
+        && runtime.config.origin_protocol.preferred == OriginProtocolPreference::Http3
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_origin_stream(
     client: &Client,
-    state: &ProxyState,
+    _state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: Body,
     validators: Option<&Validators>,
 ) -> Result<OriginResponse, OriginError> {
-    let url = origin_url(&state.config.origin, uri);
+    let url = origin_url(&runtime.config.origin, uri);
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = client.request(req_method, url);
@@ -334,16 +370,18 @@ async fn send_origin_stream(
         .map(OriginResponse::Reqwest)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_origin_bytes(
     client: &Client,
-    state: &ProxyState,
+    _state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: bytes::Bytes,
     validators: Option<&Validators>,
 ) -> Result<OriginResponse, OriginError> {
-    let url = origin_url(&state.config.origin, uri);
+    let url = origin_url(&runtime.config.origin, uri);
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = client.request(req_method, url);
@@ -361,6 +399,7 @@ async fn send_origin_bytes(
 
 fn validate_origin_protocol(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     route_id: &RouteId,
     response: OriginResponse,
 ) -> Result<OriginResponse, OriginError> {
@@ -369,10 +408,10 @@ fn validate_origin_protocol(
         .observer
         .record_upstream_protocol(route_id.clone(), actual_protocol);
     if let Some(expected_protocol) =
-        expected_origin_protocol(state.config.origin_protocol.preferred)
+        expected_origin_protocol(runtime.config.origin_protocol.preferred)
     {
         if actual_protocol != expected_protocol {
-            if state.config.origin_protocol.fallback {
+            if runtime.config.origin_protocol.fallback {
                 state.observer.record_protocol_fallback(
                     route_id.clone(),
                     expected_protocol,
@@ -390,12 +429,12 @@ fn validate_origin_protocol(
 }
 
 fn origin_protocol_retry_is_possible(
-    state: &ProxyState,
+    runtime: &ActiveRuntime,
     method: &Method,
     headers: &HeaderMap,
 ) -> bool {
-    state.config.origin_protocol.fallback
-        && origin_uses_http2_prior_knowledge(&state.config)
+    runtime.config.origin_protocol.fallback
+        && origin_uses_http2_prior_knowledge(&runtime.config)
         && request_is_replayable_for_protocol_fallback(method, headers)
 }
 

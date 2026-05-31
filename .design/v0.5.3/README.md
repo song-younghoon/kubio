@@ -1,6 +1,6 @@
 # kubio v0.5.3 Design Index
 
-Status: planned
+Status: implemented
 Source: v0.5.2 response-header equivalence implementation
 Target release: `v0.5.3`
 
@@ -9,7 +9,7 @@ also added operator-controlled route, query, and response-header hints. Today,
 applying those controls requires restarting the proxy, which resets process
 state and can interrupt local development or small production deployments.
 
-v0.5.3 should make the control loop shorter without broadening cache safety:
+v0.5.3 makes the control loop shorter without broadening cache safety:
 operators can validate and apply safe config changes while kubio is running,
 and kubio keeps serving with the previous good config if a reload fails.
 
@@ -35,9 +35,33 @@ The current runtime shape makes that workflow clumsy:
 - in-flight requests may be interrupted;
 - a bad config edit can turn a small tuning change into downtime.
 
-v0.5.3 should add runtime config reload for the parts of config that are safe to
+v0.5.3 adds runtime config reload for the parts of config that are safe to
 swap inside a running process. Listener sockets, TLS identity, store backend,
 origin endpoint, and protocol topology stay restart-required in this release.
+
+## Implementation Snapshot
+
+The shipped implementation adds a process-local active runtime generation,
+admin API reload/check/status endpoints, CLI `kubio config` commands, Unix
+SIGHUP reload, dashboard visibility, bounded metrics, bounded events, and
+documentation/examples. Reload attempts are serialized. Successful reloads swap
+the active config, policy engine, and route hint lookup together; failed reloads
+leave the active generation unchanged.
+
+State reconciliation is conservative:
+
+- changed or removed route hints purge cache entries for those routes and
+  demote matching observer state;
+- global policy compatibility changes purge the cache and demote all observed
+  routes;
+- purge or reconciliation failure rejects the reload before publishing the new
+  generation.
+
+Items intentionally deferred from v0.5.3 are recorded in
+[Testing and Release](testing-release.md) and [Implementation Tasks](tasks.md):
+reload duration histogram metrics, a route-heavy diff benchmark, and broader
+reload stress/privacy test suites beyond the shipped unit, router, workspace,
+HTTP/3, and reload-smoke coverage.
 
 ## Design Documents
 
@@ -58,7 +82,7 @@ origin endpoint, and protocol topology stay restart-required in this release.
 
 ## In Scope
 
-- Add runtime reload for safe behavioral config:
+- Runtime reload for safe behavioral config:
   - mode;
   - freshness profile;
   - policy thresholds and adaptive reuse settings;
@@ -68,16 +92,17 @@ origin endpoint, and protocol topology stay restart-required in this release.
   - debug headers;
   - panic file path;
   - selected observability display settings that do not require rerouting.
-- Add config validation before applying any reload.
+- Config validation before applying any reload.
 - Keep the previous active config when parse, validation, compatibility, or
   apply checks fail.
-- Add an admin API endpoint and CLI command for explicit reload.
-- Add SIGHUP reload on Unix platforms when a config file was used at startup.
-- Add config generation IDs and redacted active config visibility.
-- Preserve compatible observer evidence across safe reloads.
+- Admin API endpoint and CLI command for explicit reload.
+- SIGHUP reload on Unix platforms.
+- Config generation IDs and redacted active config visibility.
+- Compatible observer evidence is preserved unless route or global policy
+  compatibility changes require demotion.
 - Demote or purge affected evidence and cache entries when route or policy
   changes invalidate prior proof.
-- Add dashboard, CLI, debug-header, metrics, and event explanations for reload
+- Dashboard, CLI, debug-header, metrics, and event explanations for reload
   success, failure, and restart-required changes.
 
 ## Out of Scope
@@ -113,9 +138,9 @@ origin endpoint, and protocol topology stay restart-required in this release.
 ## Milestone Status
 
 - [x] M0: Design, terminology, and reload contract.
-- [ ] M1: Config source, diff, validation, and generation model.
-- [ ] M2: Runtime config handle and atomic apply.
-- [ ] M3: Policy, observer, route hint, and cache state reconciliation.
-- [ ] M4: Admin API, CLI command, SIGHUP, dashboard, and metrics.
-- [ ] M5: Observability, dashboard, docs, and examples.
-- [ ] M6: Tests, compatibility checks, benchmarks, and release hardening.
+- [x] M1: Config source, diff, validation, and generation model.
+- [x] M2: Runtime config handle and atomic apply.
+- [x] M3: Policy, observer, route hint, and cache state reconciliation.
+- [x] M4: Admin API, CLI command, SIGHUP, dashboard, and metrics.
+- [x] M5: Observability, dashboard, docs, and examples.
+- [x] M6: Tests, compatibility checks, benchmarks, and release hardening.

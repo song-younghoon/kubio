@@ -1,8 +1,9 @@
 use kubio_core::{
     query_pattern_matches, short_hash, AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash,
-    Decision, DecisionReason, HttpProtocol, Mode, PathObservation, ResponseFingerprint,
-    ResponseHeaderEquivalenceConfig, ResponseHeaderObservation, ReuseClass, RouteId,
-    RouteQueryConfig, RouteResponseHeadersConfig, RouteState, StatusClass,
+    ConfigReloadResult, Decision, DecisionReason, HttpProtocol, Mode, PathObservation,
+    ResponseFingerprint, ResponseHeaderEquivalenceConfig, ResponseHeaderObservation, ReuseClass,
+    RouteId, RouteQueryConfig, RouteReloadAction, RouteResponseHeadersConfig, RouteState,
+    StatusClass,
 };
 use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
@@ -23,6 +24,11 @@ pub struct Observer {
     max_routes: usize,
     max_keys: usize,
     max_events: usize,
+    policy_config: RwLock<ObserverPolicyConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct ObserverPolicyConfig {
     min_route_samples: u64,
     min_key_repeats: u64,
     min_shadow_validations: u64,
@@ -56,6 +62,10 @@ impl ReuseEligibility {
 }
 
 impl Observer {
+    fn policy_config(&self) -> ObserverPolicyConfig {
+        self.policy_config.read().clone()
+    }
+
     pub fn new(
         max_routes: usize,
         max_keys: usize,
@@ -90,15 +100,17 @@ impl Observer {
         adaptive_reuse: AdaptiveReuseConfig,
     ) -> Self {
         Self {
-            inner: RwLock::new(ObserverInner::default()),
+            inner: RwLock::new(startup_inner()),
             max_routes,
             max_keys,
             max_events,
-            min_route_samples,
-            min_key_repeats,
-            min_shadow_validations,
-            adaptive_reuse,
-            response_header_equivalence: ResponseHeaderEquivalenceConfig::default(),
+            policy_config: RwLock::new(ObserverPolicyConfig {
+                min_route_samples,
+                min_key_repeats,
+                min_shadow_validations,
+                adaptive_reuse,
+                response_header_equivalence: ResponseHeaderEquivalenceConfig::default(),
+            }),
         }
     }
 
@@ -114,15 +126,17 @@ impl Observer {
         response_header_equivalence: ResponseHeaderEquivalenceConfig,
     ) -> Self {
         Self {
-            inner: RwLock::new(ObserverInner::default()),
+            inner: RwLock::new(startup_inner()),
             max_routes,
             max_keys,
             max_events,
-            min_route_samples,
-            min_key_repeats,
-            min_shadow_validations,
-            adaptive_reuse,
-            response_header_equivalence,
+            policy_config: RwLock::new(ObserverPolicyConfig {
+                min_route_samples,
+                min_key_repeats,
+                min_shadow_validations,
+                adaptive_reuse,
+                response_header_equivalence,
+            }),
         }
     }
 
@@ -240,16 +254,17 @@ impl Observer {
                         route.shadow_matches += 1;
                     }
                     if outcome.shadow_mismatch {
+                        let policy = self.policy_config();
                         route.shadow_mismatches += 1;
                         route.precision_negative_samples += 1;
                         let now = SystemTime::now();
                         route.last_evidence_at = Some(now);
-                        let cooldown = self
+                        let cooldown = policy
                             .adaptive_reuse
                             .precision
                             .confidence
                             .cooldown_secs
-                            .min(self.adaptive_reuse.precision.confidence.max_cooldown_secs);
+                            .min(policy.adaptive_reuse.precision.confidence.max_cooldown_secs);
                         route.cooldown_until = Some(now + Duration::from_secs(cooldown));
                         route.state = RouteState::Protected;
                         route.reasons = vec![DecisionReason::ShadowMismatch];
@@ -322,6 +337,7 @@ impl Observer {
         mode: Mode,
     ) {
         let mut inner = self.inner.write();
+        let policy = self.policy_config();
         let mut event = None;
         {
             let route = inner
@@ -329,8 +345,8 @@ impl Observer {
                 .entry(route_id.clone())
                 .or_insert_with(|| RouteStats::new(route_id.clone()));
             route.origin_public_responses += 1;
-            if self.adaptive_reuse.enabled
-                && self.adaptive_reuse.origin_public_fast_path.enabled
+            if policy.adaptive_reuse.enabled
+                && policy.adaptive_reuse.origin_public_fast_path.enabled
                 && route.state != RouteState::Protected
                 && route.shadow_mismatches == 0
                 && mode == Mode::Auto
@@ -499,6 +515,7 @@ impl Observer {
         }
 
         let mut inner = self.inner.write();
+        let policy = self.policy_config();
         let mut suggestions = Vec::new();
         let mut verified = Vec::new();
         {
@@ -514,7 +531,7 @@ impl Observer {
                     .or_insert_with(|| QueryParamStats::new(param.name.clone()));
                 let had_suggestion = stats.suggestion().is_some();
                 let was_verified = stats
-                    .verified_ignore_candidate(&self.adaptive_reuse.precision.query_equivalence);
+                    .verified_ignore_candidate(&policy.adaptive_reuse.precision.query_equivalence);
                 stats.record_fingerprint(param, &fingerprint_hash);
                 if !had_suggestion
                     && stats.suggestion().is_some()
@@ -525,8 +542,9 @@ impl Observer {
                     route.query_param_suggestions += 1;
                 }
                 if !was_verified
-                    && stats
-                        .verified_ignore_candidate(&self.adaptive_reuse.precision.query_equivalence)
+                    && stats.verified_ignore_candidate(
+                        &policy.adaptive_reuse.precision.query_equivalence,
+                    )
                 {
                     verified.push(stats.name.clone());
                 }
@@ -565,6 +583,7 @@ impl Observer {
         }
 
         let mut inner = self.inner.write();
+        let policy = self.policy_config();
         let mut verified = Vec::new();
         {
             let route = inner
@@ -576,10 +595,10 @@ impl Observer {
                     .response_headers
                     .entry(observation.name.clone())
                     .or_insert_with(|| ResponseHeaderStats::new(observation.name.clone()));
-                let was_verified = stats.verified_candidate(&self.response_header_equivalence);
+                let was_verified = stats.verified_candidate(&policy.response_header_equivalence);
                 stats.record(observation);
                 if !was_verified
-                    && stats.verified_candidate(&self.response_header_equivalence)
+                    && stats.verified_candidate(&policy.response_header_equivalence)
                     && !stats.verified_event_emitted
                 {
                     stats.verified_event_emitted = true;
@@ -669,6 +688,7 @@ impl Observer {
         if variants.is_empty() {
             return;
         }
+        let policy = self.policy_config();
         let mut inner = self.inner.write();
         let mut unbounded = false;
         {
@@ -682,7 +702,7 @@ impl Observer {
                     values.insert(value_hash);
                 }
                 if values.len() as u64
-                    > self
+                    > policy
                         .adaptive_reuse
                         .precision
                         .variants
@@ -709,9 +729,10 @@ impl Observer {
         route_id: &RouteId,
         query_config: Option<&RouteQueryConfig>,
     ) -> Vec<String> {
-        if !self.adaptive_reuse.enabled
-            || !self.adaptive_reuse.precision.enabled
-            || !self.adaptive_reuse.precision.query_equivalence.enabled
+        let policy = self.policy_config();
+        if !policy.adaptive_reuse.enabled
+            || !policy.adaptive_reuse.precision.enabled
+            || !policy.adaptive_reuse.precision.query_equivalence.enabled
         {
             return Vec::new();
         }
@@ -721,7 +742,11 @@ impl Observer {
         let allow_patterns = query_config
             .map(|config| config.verified_ignore.allow.as_slice())
             .unwrap_or(&[]);
-        let auto_compact = self.adaptive_reuse.precision.query_equivalence.auto_compact;
+        let auto_compact = policy
+            .adaptive_reuse
+            .precision
+            .query_equivalence
+            .auto_compact;
         if !route_enabled && !auto_compact {
             return Vec::new();
         }
@@ -732,7 +757,7 @@ impl Observer {
         if let Some(route) = inner.routes.get_mut(route_id) {
             for stats in route.query_params.values() {
                 if !stats
-                    .verified_ignore_candidate(&self.adaptive_reuse.precision.query_equivalence)
+                    .verified_ignore_candidate(&policy.adaptive_reuse.precision.query_equivalence)
                 {
                     continue;
                 }
@@ -768,7 +793,8 @@ impl Observer {
         route_id: &RouteId,
         route_headers: Option<&RouteResponseHeadersConfig>,
     ) -> Vec<String> {
-        let config = &self.response_header_equivalence;
+        let policy = self.policy_config();
+        let config = &policy.response_header_equivalence;
         if !config.enabled || !config.verified_ignore.enabled {
             return Vec::new();
         }
@@ -823,9 +849,10 @@ impl Observer {
     }
 
     pub fn should_canary_validate(&self, route_id: &RouteId, key_hash: &CacheKeyHash) -> bool {
-        if !self.adaptive_reuse.enabled
-            || !self.adaptive_reuse.precision.enabled
-            || !self.adaptive_reuse.precision.canary.enabled
+        let policy = self.policy_config();
+        if !policy.adaptive_reuse.enabled
+            || !policy.adaptive_reuse.precision.enabled
+            || !policy.adaptive_reuse.precision.canary.enabled
         {
             return false;
         }
@@ -833,15 +860,17 @@ impl Observer {
         let Some(route) = inner.routes.get_mut(route_id) else {
             return false;
         };
-        let tier = route.confidence_tier(&self.adaptive_reuse);
+        let tier = route.confidence_tier(&policy.adaptive_reuse);
         let rate = match tier {
             kubio_core::ConfidenceTier::Probation => {
-                self.adaptive_reuse.precision.canary.probation_rate
+                policy.adaptive_reuse.precision.canary.probation_rate
             }
             kubio_core::ConfidenceTier::Validated => {
-                self.adaptive_reuse.precision.canary.validated_rate
+                policy.adaptive_reuse.precision.canary.validated_rate
             }
-            kubio_core::ConfidenceTier::Strong => self.adaptive_reuse.precision.canary.strong_rate,
+            kubio_core::ConfidenceTier::Strong => {
+                policy.adaptive_reuse.precision.canary.strong_rate
+            }
             _ => return false,
         };
         if rate <= 0.0 {
@@ -852,7 +881,7 @@ impl Observer {
             .last_canary_at
             .and_then(|last| now.duration_since(last).ok())
             .map(|elapsed| {
-                elapsed.as_secs() < self.adaptive_reuse.precision.canary.min_interval_secs
+                elapsed.as_secs() < policy.adaptive_reuse.precision.canary.min_interval_secs
             })
             .unwrap_or(false)
         {
@@ -874,6 +903,7 @@ impl Observer {
         matched: bool,
     ) {
         let mut inner = self.inner.write();
+        let policy = self.policy_config();
         let mut cooldown_event = false;
         {
             let route = inner
@@ -894,11 +924,11 @@ impl Observer {
                 route.shadow_mismatches += 1;
                 route.state = RouteState::Protected;
                 route.reasons = vec![DecisionReason::ShadowMismatch];
-                let base = self.adaptive_reuse.precision.confidence.cooldown_secs;
-                let max = self.adaptive_reuse.precision.confidence.max_cooldown_secs;
+                let base = policy.adaptive_reuse.precision.confidence.cooldown_secs;
+                let max = policy.adaptive_reuse.precision.confidence.max_cooldown_secs;
                 let exponent = route.cooldown_count.min(8) as i32;
                 let backed_off = (base as f64
-                    * self
+                    * policy
                         .adaptive_reuse
                         .precision
                         .confidence
@@ -986,6 +1016,108 @@ impl Observer {
         let mut inner = self.inner.write();
         inner.in_flight_requests = current as u64;
         inner.max_in_flight_requests = max as u64;
+    }
+
+    pub fn apply_policy_config(
+        &self,
+        min_route_samples: u64,
+        min_key_repeats: u64,
+        min_shadow_validations: u64,
+        adaptive_reuse: AdaptiveReuseConfig,
+        response_header_equivalence: ResponseHeaderEquivalenceConfig,
+    ) {
+        let mut inner = self.inner.write();
+        inner.config_generation = inner.config_generation.max(1);
+        drop(inner);
+        *self.policy_config.write() = ObserverPolicyConfig {
+            min_route_samples,
+            min_key_repeats,
+            min_shadow_validations,
+            adaptive_reuse,
+            response_header_equivalence,
+        };
+    }
+
+    pub fn demote_routes_for_reload(
+        &self,
+        routes: &[RouteId],
+        generation: u64,
+        action: RouteReloadAction,
+        reason: &str,
+    ) -> u64 {
+        let mut inner = self.inner.write();
+        inner.config_generation = generation;
+        let route_set = routes
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        inner
+            .keys
+            .retain(|_, key| !route_set.contains(&key.route_id));
+        let mut demoted = 0;
+        for route_id in routes {
+            if let Some(route) = inner.routes.get_mut(route_id) {
+                route.demote_for_reload(generation, action, reason);
+                demoted += 1;
+                self.push_event_locked(
+                    &mut inner,
+                    EventType::ConfigReloadRouteDemoted,
+                    Some(route_id.clone()),
+                    None,
+                    vec![DecisionReason::RouteHintApplied],
+                    reason,
+                );
+            }
+        }
+        demoted
+    }
+
+    pub fn demote_all_routes_for_reload(
+        &self,
+        generation: u64,
+        action: RouteReloadAction,
+        reason: &str,
+    ) -> u64 {
+        let routes = self.inner.read().routes.keys().cloned().collect::<Vec<_>>();
+        self.demote_routes_for_reload(&routes, generation, action, reason)
+    }
+
+    pub fn record_config_reload_started(&self, attempt_id: u64) {
+        let mut inner = self.inner.write();
+        self.push_event_locked(
+            &mut inner,
+            EventType::ConfigReloadStarted,
+            None,
+            None,
+            vec![DecisionReason::PolicyError],
+            format!("config reload attempt {attempt_id} started"),
+        );
+    }
+
+    pub fn record_config_reload_result(&self, result: &ConfigReloadResult) {
+        let mut inner = self.inner.write();
+        inner.config_generation = result.active_generation;
+        inner.config_reload_attempts.increment(result.status);
+        inner.config_reload_reloadable_changes = result.reloadable_changes;
+        inner.config_reload_restart_required_changes = result.restart_required.len() as u64;
+        inner.config_reload_routes_added = result.routes_added;
+        inner.config_reload_routes_changed = result.routes_changed;
+        inner.config_reload_routes_removed = result.routes_removed;
+        inner.config_reload_routes_demoted = result.routes_demoted;
+        inner.config_reload_cache_entries_purged = result.cache_entries_purged;
+        let event_type = if result.status == kubio_core::ReloadStatus::Applied {
+            EventType::ConfigReloadApplied
+        } else {
+            EventType::ConfigReloadRejected
+        };
+        self.push_event_locked(
+            &mut inner,
+            event_type,
+            None,
+            None,
+            vec![DecisionReason::PolicyError],
+            format!("config reload {}: {}", result.status, result.message),
+        );
     }
 
     pub fn record_protocol_fallback(
@@ -1141,13 +1273,14 @@ impl Observer {
 
     pub fn snapshot(&self) -> ObserverSnapshot {
         let inner = self.inner.read().clone();
+        let policy = self.policy_config();
         let mut routes = inner
             .routes
             .values()
             .map(|route| {
                 route.snapshot(
-                    &self.adaptive_reuse,
-                    &self.response_header_equivalence,
+                    &policy.adaptive_reuse,
+                    &policy.response_header_equivalence,
                     None,
                 )
             })
@@ -1175,6 +1308,16 @@ impl Observer {
         overview.alt_svc = inner.alt_svc.clone();
         overview.http3_server = inner.http3_server.clone();
         overview.upstream_http3 = inner.upstream_http3.clone();
+        overview.config_generation = inner.config_generation;
+        overview.config_reload_attempts = inner.config_reload_attempts.clone();
+        overview.config_reload_reloadable_changes = inner.config_reload_reloadable_changes;
+        overview.config_reload_restart_required_changes =
+            inner.config_reload_restart_required_changes;
+        overview.config_reload_routes_added = inner.config_reload_routes_added;
+        overview.config_reload_routes_changed = inner.config_reload_routes_changed;
+        overview.config_reload_routes_removed = inner.config_reload_routes_removed;
+        overview.config_reload_routes_demoted = inner.config_reload_routes_demoted;
+        overview.config_reload_cache_entries_purged = inner.config_reload_cache_entries_purged;
         ObserverSnapshot {
             overview,
             routes,
@@ -1183,6 +1326,7 @@ impl Observer {
     }
 
     pub fn route_by_hash(&self, route_hash: &str) -> Option<RouteSnapshot> {
+        let policy = self.policy_config();
         self.inner
             .read()
             .routes
@@ -1190,8 +1334,8 @@ impl Observer {
             .find(|route| route.route_id.hash() == route_hash)
             .map(|route| {
                 route.snapshot(
-                    &self.adaptive_reuse,
-                    &self.response_header_equivalence,
+                    &policy.adaptive_reuse,
+                    &policy.response_header_equivalence,
                     None,
                 )
             })
@@ -1206,7 +1350,8 @@ impl Observer {
         origin_public_response: bool,
     ) -> ReuseEligibility {
         let inner = self.inner.read();
-        if !self.adaptive_reuse.enabled {
+        let policy = self.policy_config();
+        if !policy.adaptive_reuse.enabled {
             return self.legacy_eligibility_locked(&inner, route_id, key_hash);
         }
         if !request_reuse_safe {
@@ -1235,13 +1380,13 @@ impl Observer {
                 vec![AdaptiveReuseBlocker::ProtectedRoute],
             );
         }
-        if route.stale_evidence(&self.adaptive_reuse) {
+        if route.stale_evidence(&policy.adaptive_reuse) {
             return ReuseEligibility::blocked(
-                route.reuse_class(&self.adaptive_reuse),
+                route.reuse_class(&policy.adaptive_reuse),
                 vec![AdaptiveReuseBlocker::StaleEvidence],
             );
         }
-        if route.shadow_mismatches > self.adaptive_reuse.public_object.max_shadow_mismatches {
+        if route.shadow_mismatches > policy.adaptive_reuse.public_object.max_shadow_mismatches {
             return ReuseEligibility::blocked(
                 ReuseClass::HardProtected,
                 vec![AdaptiveReuseBlocker::ShadowMismatch],
@@ -1252,7 +1397,7 @@ impl Observer {
             return ReuseEligibility::eligible(ReuseClass::KeyValidated);
         }
 
-        if self.adaptive_reuse.origin_public_fast_path.enabled
+        if policy.adaptive_reuse.origin_public_fast_path.enabled
             && (origin_public_response || route.origin_public_responses > 0)
         {
             return ReuseEligibility::eligible(ReuseClass::OriginPublic);
@@ -1262,20 +1407,20 @@ impl Observer {
             return ReuseEligibility::eligible(ReuseClass::PublicObject);
         }
 
-        if route.public_object_ready(&self.adaptive_reuse) {
+        if route.public_object_ready(&policy.adaptive_reuse) {
             return ReuseEligibility::eligible(ReuseClass::PublicObject);
         }
 
         let key_blockers = self.key_blockers_locked(&inner, key_hash);
         let mut blockers = if key_blockers.is_empty() {
-            route.eligibility_blockers(&self.adaptive_reuse)
+            route.eligibility_blockers(&policy.adaptive_reuse)
         } else {
             key_blockers
         };
         if blockers.is_empty() {
             blockers.push(AdaptiveReuseBlocker::InsufficientShadowMatches);
         }
-        ReuseEligibility::blocked(route.reuse_class(&self.adaptive_reuse), blockers)
+        ReuseEligibility::blocked(route.reuse_class(&policy.adaptive_reuse), blockers)
     }
 
     fn legacy_eligibility_locked(
@@ -1293,8 +1438,9 @@ impl Observer {
             .keys
             .get(key_hash)
             .map(|key| {
-                key.seen_count >= self.min_key_repeats
-                    && (key.recent_shadow_matches as u64) >= self.min_shadow_validations
+                let policy = self.policy_config();
+                key.seen_count >= policy.min_key_repeats
+                    && (key.recent_shadow_matches as u64) >= policy.min_shadow_validations
                     && key.recent_shadow_mismatches == 0
             })
             .unwrap_or(false);
@@ -1306,7 +1452,8 @@ impl Observer {
     }
 
     fn key_validated_locked(&self, inner: &ObserverInner, key_hash: &CacheKeyHash) -> bool {
-        let key_validation = &self.adaptive_reuse.key_validation;
+        let policy = self.policy_config();
+        let key_validation = &policy.adaptive_reuse.key_validation;
         inner
             .keys
             .get(key_hash)
@@ -1323,7 +1470,8 @@ impl Observer {
         inner: &ObserverInner,
         key_hash: &CacheKeyHash,
     ) -> Vec<AdaptiveReuseBlocker> {
-        let key_validation = &self.adaptive_reuse.key_validation;
+        let policy = self.policy_config();
+        let key_validation = &policy.adaptive_reuse.key_validation;
         let Some(key) = inner.keys.get(key_hash) else {
             return vec![AdaptiveReuseBlocker::InsufficientKeyObservations];
         };
@@ -1346,6 +1494,7 @@ impl Observer {
         record: &ObservationRecord,
         outcome: &mut ObservationOutcome,
     ) {
+        let policy = self.policy_config();
         let mut event = None;
         let mut skip_legacy_promotion = false;
         {
@@ -1361,7 +1510,7 @@ impl Observer {
                 return;
             }
 
-            if self.adaptive_reuse.enabled && route.public_object_ready(&self.adaptive_reuse) {
+            if policy.adaptive_reuse.enabled && route.public_object_ready(&policy.adaptive_reuse) {
                 if record.mode == Mode::Auto {
                     if route.state != RouteState::Auto {
                         route.state = RouteState::Auto;
@@ -1385,7 +1534,7 @@ impl Observer {
 
             if !skip_legacy_promotion {
                 let high_repeat = route.repeat_rate() >= 0.2;
-                if route.request_count >= self.min_route_samples
+                if route.request_count >= policy.min_route_samples
                     && high_repeat
                     && route.score >= 50
                     && route.state == RouteState::Watching
@@ -1399,9 +1548,9 @@ impl Observer {
                     ));
                 }
 
-                if route.shadow_matches >= self.min_shadow_validations
+                if route.shadow_matches >= policy.min_shadow_validations
                     && route.shadow_mismatches == 0
-                    && route.request_count >= self.min_route_samples
+                    && route.request_count >= policy.min_route_samples
                 {
                     if record.mode == Mode::Auto {
                         if route.state != RouteState::Auto {
@@ -1559,6 +1708,13 @@ fn deterministic_sample(route_id: &RouteId, key_hash: &CacheKeyHash) -> f64 {
         })
     });
     (value % 10_000) as f64 / 10_000.0
+}
+
+fn startup_inner() -> ObserverInner {
+    ObserverInner {
+        config_generation: 1,
+        ..ObserverInner::default()
+    }
 }
 
 #[cfg(test)]

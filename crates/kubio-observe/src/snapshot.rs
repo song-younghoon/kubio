@@ -1,7 +1,7 @@
 use kubio_core::{
     AdaptiveReuseBlocker, ConfidenceTier, DecisionReason, HeaderEquivalenceClass,
-    HeaderEquivalenceSource, LatencySnapshot, QueryEquivalenceClass, ReuseClass, RouteId,
-    RouteState, StatusClassCounts,
+    HeaderEquivalenceSource, LatencySnapshot, QueryEquivalenceClass, ReloadStatus, ReuseClass,
+    RouteId, RouteReloadSnapshot, RouteState, StatusClassCounts,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +57,15 @@ pub struct OverviewSnapshot {
     pub upstream_http3: UpstreamHttp3Counts,
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
+    pub config_generation: u64,
+    pub config_reload_attempts: ConfigReloadStatusCounts,
+    pub config_reload_reloadable_changes: u64,
+    pub config_reload_restart_required_changes: u64,
+    pub config_reload_routes_added: u64,
+    pub config_reload_routes_changed: u64,
+    pub config_reload_routes_removed: u64,
+    pub config_reload_routes_demoted: u64,
+    pub config_reload_cache_entries_purged: u64,
 }
 
 impl OverviewSnapshot {
@@ -106,6 +115,52 @@ impl OverviewSnapshot {
             overview.p95_latency_ms = percentile(&latencies, 0.95);
         }
         overview
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigReloadStatusCounts {
+    pub applied: u64,
+    pub dry_run_ok: u64,
+    pub parse_failed: u64,
+    pub validation_failed: u64,
+    pub restart_required: u64,
+    pub state_reconciliation_failed: u64,
+    pub no_config_source: u64,
+    pub unauthorized: u64,
+    pub internal_error: u64,
+}
+
+impl ConfigReloadStatusCounts {
+    pub(crate) fn increment(&mut self, status: ReloadStatus) {
+        match status {
+            ReloadStatus::Applied => self.applied += 1,
+            ReloadStatus::DryRunOk => self.dry_run_ok += 1,
+            ReloadStatus::ParseFailed => self.parse_failed += 1,
+            ReloadStatus::ValidationFailed => self.validation_failed += 1,
+            ReloadStatus::RestartRequired => self.restart_required += 1,
+            ReloadStatus::StateReconciliationFailed => self.state_reconciliation_failed += 1,
+            ReloadStatus::NoConfigSource => self.no_config_source += 1,
+            ReloadStatus::Unauthorized => self.unauthorized += 1,
+            ReloadStatus::InternalError => self.internal_error += 1,
+        }
+    }
+
+    pub fn iter(&self) -> [(ReloadStatus, u64); 9] {
+        [
+            (ReloadStatus::Applied, self.applied),
+            (ReloadStatus::DryRunOk, self.dry_run_ok),
+            (ReloadStatus::ParseFailed, self.parse_failed),
+            (ReloadStatus::ValidationFailed, self.validation_failed),
+            (ReloadStatus::RestartRequired, self.restart_required),
+            (
+                ReloadStatus::StateReconciliationFailed,
+                self.state_reconciliation_failed,
+            ),
+            (ReloadStatus::NoConfigSource, self.no_config_source),
+            (ReloadStatus::Unauthorized, self.unauthorized),
+            (ReloadStatus::InternalError, self.internal_error),
+        ]
     }
 }
 
@@ -166,6 +221,7 @@ pub struct RouteSnapshot {
     pub route_hint: Option<String>,
     pub query_params: Vec<QueryParamSnapshot>,
     pub response_headers: Vec<ResponseHeaderSnapshot>,
+    pub reload: RouteReloadSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

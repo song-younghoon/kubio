@@ -76,3 +76,19 @@ route promotion. A mismatch protects the route and prevents future hits.
 When a verified cache entry becomes stale, kubio uses `If-None-Match` or `If-Modified-Since` to ask the origin whether the response changed. A `304 Not Modified` response refreshes the stored entry. A `200 OK` response replaces it if the response is still safe.
 
 kubio serves stale during origin errors only when `Cache-Control: stale-if-error` or a route hint explicitly allows it, and only within the configured stale window.
+
+## Runtime Reload
+
+v0.5.3 publishes config generations atomically. Each request captures one
+generation at request start and uses that generation's config, policy engine,
+and route hints through completion. New requests use the latest applied
+generation.
+
+Reloads can change mode, freshness, policy, route hints, debug headers, and the
+panic-file path. Structural changes such as listeners, origin, storage,
+dashboard binding, metrics path, performance limits, and admin token are
+reported as restart-required and do not partially apply.
+
+When route hints or global policy compatibility changes, kubio purges affected
+cache entries and demotes affected route/key evidence before publishing the new
+generation. If that reconciliation fails, the old generation remains active.

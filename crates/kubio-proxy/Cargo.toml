@@ -22,6 +22,7 @@ kubio-observe.workspace = true
 kubio-policy.workspace = true
 kubio-store.workspace = true
 kubio-transport.workspace = true
+parking_lot.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tower.workspace = true

@@ -1,12 +1,11 @@
 # Observability and Dashboard
 
-Status: planned
+Status: implemented
 Target release: `v0.5.3`
 
 ## Goals
 
-v0.5.3 observability should make reload behavior auditable. Operators should be
-able to answer:
+v0.5.3 observability makes reload behavior auditable. Operators can answer:
 
 - Which config generation is active?
 - When did the last reload happen?
@@ -27,6 +26,7 @@ pub struct ConfigReloadSnapshot {
     pub last_attempt_id: Option<u64>,
     pub last_attempt_at_unix_ms: Option<u64>,
     pub last_status: Option<ReloadStatus>,
+    pub last_message: Option<String>,
     pub last_reloadable_change_count: u64,
     pub last_restart_required_count: u64,
     pub last_routes_added: u64,
@@ -51,7 +51,7 @@ unauthorized
 internal_error
 ```
 
-Add per-route reload metadata where useful:
+Per-route reload metadata ships in route snapshots:
 
 ```rust
 pub struct RouteReloadSnapshot {
@@ -75,7 +75,9 @@ requires_revalidation
 
 ## Dashboard
 
-The config page should show:
+The config page shows active generation, source, last status, change counts,
+route demotion count, purge count, and the active redacted config. The intended
+shape is:
 
 ```text
 Active generation: 4
@@ -95,7 +97,7 @@ Active generation: 4
 Attempt: 5
 ```
 
-The route detail page should show when a route was demoted by reload:
+The route detail page shows when a route was demoted by reload:
 
 ```text
 Config reload:
@@ -104,10 +106,8 @@ Config reload:
   reason: response header force_include changed
 ```
 
-Dashboard actions may include a reload button only when `admin_api` is enabled.
-If `admin_token` is configured, the UI should follow the existing admin auth
-pattern. If no authenticated UI pattern exists, the button can be deferred and
-the API/CLI can ship first.
+Dashboard reload buttons are deferred because the dashboard does not yet have
+an authenticated write UI. The API and CLI are the shipped write surfaces.
 
 ## CLI
 
@@ -115,6 +115,7 @@ Add concise commands:
 
 ```bash
 kubio config reload
+kubio config reload --dry-run
 kubio config check --config ./kubio.yml
 kubio config diff --config ./kubio.yml
 kubio config status
@@ -126,7 +127,6 @@ Example `status`:
 active_generation=4
 config_source=/etc/kubio/kubio.yml
 last_reload=applied
-last_attempt=2026-05-31T10:42:16Z
 reloadable_changes=5
 restart_required=0
 routes_demoted=1
@@ -142,6 +142,10 @@ restart_required:
   server.listen
 ```
 
+The shipped `reload` and `diff` output use key/value lines plus grouped
+`reloadable:` and `restart_required:` sections. A non-applied reload exits with
+an error after printing the structured result.
+
 ## Debug Headers
 
 When debug headers are enabled, add:
@@ -151,7 +155,7 @@ x-kubio-config-generation: 4
 ```
 
 Do not add reload failure details to proxied responses. Reload failures are
-control-plane state and should be visible through dashboard/API/CLI/events.
+control-plane state and are visible through dashboard/API/CLI/events.
 
 ## Metrics
 
@@ -163,11 +167,14 @@ kubio_config_reload_attempts_total{status}
 kubio_config_reload_changes_total{class}
 kubio_config_reload_routes_total{action}
 kubio_config_reload_cache_entries_purged_total
-kubio_config_reload_duration_seconds_bucket
 ```
 
 Labels must stay bounded. Do not label metrics by file path, route template,
 header name, query parameter name, or secret field.
+
+`kubio_config_reload_duration_seconds_bucket` was deferred from v0.5.3 because
+the reload controller records attempts and outcomes but does not yet time the
+reload path.
 
 ## Events
 
@@ -211,8 +218,8 @@ POST /api/config/check
 POST /api/config/reload
 ```
 
-`GET /api/config` should include active generation alongside the existing
-redacted config. If changing its response shape is too disruptive, add:
+`GET /api/config` remains the existing redacted config response for
+compatibility. v0.5.3 adds:
 
 ```text
 GET /api/config/active
@@ -228,6 +235,10 @@ with:
   }
 }
 ```
+
+`POST /api/config/check` accepts optional candidate config text and always runs
+as a dry run. `POST /api/config/reload` applies the stored startup config source
+unless `{"dry_run": true}` is supplied.
 
 ## Privacy Review
 

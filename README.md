@@ -10,7 +10,7 @@ origin service without a hosted control plane or required telemetry.
 
 ## Install
 
-v0.5.2 supports released binaries for Linux x86_64, Linux arm64, and Apple
+v0.5.3 supports released binaries for Linux x86_64, Linux arm64, and Apple
 Silicon macOS.
 
 | Host | Release target |
@@ -30,7 +30,7 @@ build from source.
 Common install variants:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.5.2 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.5.3 bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_INSTALL_DIR=/usr/local/bin bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_FLAVOR=http3-experimental bash
 ```
@@ -81,6 +81,10 @@ kubio explain "GET /api/products"
 kubio doctor --to http://localhost:3000
 kubio purge --all
 kubio purge --all --admin-token "$KUBIO_ADMIN_TOKEN"
+kubio config check --config examples/kubio.yml
+kubio config reload
+kubio config diff --config examples/kubio.yml
+kubio config status
 kubio update --check
 kubio update
 ```
@@ -142,6 +146,13 @@ status, body, and semantic response headers match. Those one-shot identifiers
 are stripped from cache-hit responses by default so cached hits do not replay an
 old origin request ID.
 
+v0.5.3 adds runtime config reload for safe behavioral changes. When kubio starts
+with `--config`, `kubio config reload`, `POST /api/config/reload`, or SIGHUP can
+reload mode, freshness, policy, route hints, debug headers, and panic-file
+changes without restarting. Listener, origin, dashboard binding, storage,
+performance, metrics-path, and admin-token changes are reported as
+restart-required and are not partially applied.
+
 Configure `--panic-file /path/to/file` to immediately disable reuse while
 keeping origin pass-through active.
 
@@ -186,6 +197,8 @@ kubio remains local-first and process-local:
   canary validation, bounded variants, and public slug routes.
 - Response-header equivalence for volatile metadata headers such as
   `x-response-id` without weakening cache safety headers.
+- Runtime reload for safe behavioral config, with generation tracking and
+  restart-required diff reporting for structural config.
 - No hosted control plane.
 - No required telemetry.
 - No distributed cache.
@@ -199,6 +212,7 @@ kubio remains local-first and process-local:
 - [Metrics](docs/metrics.md)
 - [Safety Model](docs/safety-model.md)
 - [Roadmap](docs/roadmap.md)
+- [v0.5.3 Release Notes](docs/release-notes-v0.5.3.md)
 - [v0.5.3 Design](.design/v0.5.3)
 - [v0.5.2 Release Notes](docs/release-notes-v0.5.2.md)
 - [v0.5.2 Design](.design/v0.5.2)

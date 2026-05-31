@@ -7,6 +7,10 @@ use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
 
+mod reload;
+
+pub use reload::*;
+
 pub const DEFAULT_PROXY_LISTEN: &str = "0.0.0.0:8080";
 pub const DEFAULT_DASHBOARD_LISTEN: &str = "127.0.0.1:9900";
 pub const DEFAULT_ORIGIN_TIMEOUT_MS: u64 = 30_000;

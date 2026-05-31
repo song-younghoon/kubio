@@ -66,4 +66,10 @@ pub enum EventType {
     Http3RuntimeError,
     UpstreamHttp3Fallback,
     UpstreamHttp3Failed,
+    ConfigReloadStarted,
+    ConfigReloadApplied,
+    ConfigReloadRejected,
+    ConfigReloadStateReconciled,
+    ConfigReloadRouteDemoted,
+    ConfigReloadCachePurged,
 }

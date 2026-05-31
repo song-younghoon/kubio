@@ -1,10 +1,10 @@
 use crate::args::ServeArgs;
-use crate::config::{load_config_for_serve, validate_config};
+use crate::commands::ServeConfigReloader;
+use crate::config::{config_source_for_serve, load_config_for_serve, validate_config};
 use anyhow::{Context, Result};
 use kubio_core::{EffectiveConfig, Mode};
 use kubio_dashboard::{run_dashboard, DashboardState};
 use kubio_observe::Observer;
-use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
 use kubio_store::{CacheStore, DiskStore, MemoryStore};
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     let no_update_check = args.no_update_check;
+    let config_source = config_source_for_serve(&args);
     let config = Arc::new(load_config_for_serve(&args)?);
     validate_config(&config)?;
 
@@ -31,12 +32,16 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         "disk" => Arc::new(DiskStore::open(&config.storage)?),
         _ => unreachable!("storage kind validated before startup"),
     };
-    let policy = Arc::new(PolicyEngine::new(&config));
-
     print_startup(&config);
 
     let (shutdown_tx, _) = broadcast::channel::<()>(4);
-    let proxy_state = ProxyState::new(config.clone(), policy, observer.clone(), store.clone())?;
+    let proxy_state = ProxyState::new(config.clone(), observer.clone(), store.clone())?;
+    let reloader = Arc::new(ServeConfigReloader::new(
+        config_source,
+        proxy_state.runtime.clone(),
+        observer.clone(),
+        store.clone(),
+    ));
     let mut proxy_shutdown = shutdown_tx.subscribe();
     let proxy_task = tokio::spawn(async move {
         run_proxy(proxy_state, async move {
@@ -50,6 +55,7 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
             config: config.clone(),
             observer: observer.clone(),
             store: store.clone(),
+            reloader: Some(reloader.clone()),
         };
         let mut dashboard_shutdown = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
@@ -63,6 +69,7 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     };
 
     crate::commands::spawn_ambient_update_check(no_update_check);
+    spawn_sighup_reload(reloader.clone());
 
     tokio::select! {
         result = proxy_task => {
@@ -83,6 +90,38 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(unix)]
+fn spawn_sighup_reload(reloader: Arc<ServeConfigReloader>) {
+    tokio::spawn(async move {
+        let mut signal = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        {
+            Ok(signal) => signal,
+            Err(err) => {
+                warn!(error = %err, "failed to install SIGHUP reload handler");
+                return;
+            }
+        };
+        while signal.recv().await.is_some() {
+            let result = reloader.reload_from_source().await;
+            if result.status == kubio_core::ReloadStatus::Applied {
+                info!(
+                    generation = result.active_generation,
+                    "config reload applied after SIGHUP"
+                );
+            } else {
+                warn!(
+                    status = %result.status,
+                    message = %result.message,
+                    "config reload rejected after SIGHUP"
+                );
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_sighup_reload(_reloader: Arc<ServeConfigReloader>) {}
 
 fn print_startup(config: &EffectiveConfig) {
     println!("kubio is watching your API.\n");

@@ -1,0 +1,40 @@
+origin: "http://localhost:3000"
+mode: "shadow"
+freshness: "balanced"
+debug_headers: true
+
+policy:
+  min_route_samples: 2
+  min_key_repeats: 2
+  min_shadow_validations: 1
+  response_header_equivalence:
+    enabled: true
+    verified_ignore:
+      enabled: true
+      auto_apply_known_metadata: true
+      auto_apply_unknown: false
+      min_distinct_values: 3
+      min_matching_fingerprints: 3
+      max_mismatches: 0
+      cooldown_secs: 600
+    serve:
+      strip_volatile_on_hit: true
+      strip_verified_ignored_on_hit: true
+      add_age: true
+      preserve_date: true
+    default_volatile:
+      add: []
+      block: []
+
+routes:
+  - match:
+      method: GET
+      path: "/api/products"
+    query:
+      verified_ignore:
+        enabled: true
+        allow: ["utm_*", "gclid", "fbclid"]
+    response_headers:
+      verified_ignore:
+        enabled: true
+        allow: ["x-vendor-execution-id"]

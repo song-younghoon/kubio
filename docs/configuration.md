@@ -12,7 +12,8 @@ Optional YAML config:
 kubio serve --config examples/kubio.yml
 ```
 
-CLI flags override config file values.
+CLI flags override config file values. Runtime reload keeps that precedence:
+defaults, then the config file, then the original startup CLI overrides.
 
 Important defaults:
 
@@ -223,6 +224,58 @@ Cache-hit responses strip one-shot volatile metadata by default.
 Set `auto_apply_known_metadata: false` to keep the curated volatile metadata set
 inside fingerprints unless a route or explicit `default_volatile.add` entry opts
 it in.
+
+## Runtime Reload
+
+When the process starts with `--config`, kubio stores the config path and the
+startup CLI overrides. These commands use the running dashboard API:
+
+```bash
+kubio config reload
+kubio config reload --dry-run
+kubio config diff --config examples/kubio-v0.5.3-reload.yml
+kubio config status
+```
+
+On Unix, SIGHUP triggers the same reload flow and records the result through
+tracing and observer events. Reload attempts are serialized. Failed reloads keep
+the previous active generation serving traffic.
+
+Reloadable fields:
+
+- `mode`
+- `freshness`
+- `policy.*`
+- `routes`
+- `debug_headers`
+- `panic_file`
+- `observability.tracing`
+
+Restart-required fields:
+
+- `server.*`
+- `origin`
+- `origin_protocol.*`
+- `dashboard.*`
+- `storage.*`
+- `performance.*`
+- `observability.metrics`
+- `observability.metrics_path`
+- `admin_token`
+
+Mixed diffs are rejected as a whole. `admin_token` changes are reported without
+exposing the token value. `GET /api/config/active` returns the redacted active
+config with its generation, and `GET /api/config/reload-status` returns the last
+reload result.
+
+Example workflow:
+
+```bash
+kubio serve --config examples/kubio-v0.5.3-reload.yml
+kubio config diff --config ./kubio.yml
+kubio config reload
+kubio config status
+```
 
 Disk store:
 

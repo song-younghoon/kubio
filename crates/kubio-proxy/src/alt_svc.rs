@@ -3,6 +3,7 @@ use http::header;
 use kubio_core::{EffectiveConfig, RouteId};
 use kubio_observe::{AltSvcOutcome, AltSvcReason};
 
+use crate::runtime::ActiveRuntime;
 use crate::state::ProxyState;
 
 pub(crate) const ALT_SVC_HEADER: &str = "alt-svc";
@@ -21,10 +22,11 @@ pub(crate) fn request_authority(uri: &Uri, headers: &HeaderMap) -> Option<String
 pub(crate) fn add_alt_svc_header(
     mut builder: http::response::Builder,
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     route_id: &RouteId,
     request_authority: Option<&str>,
 ) -> http::response::Builder {
-    let decision = alt_svc_decision(&state.config, request_authority);
+    let decision = alt_svc_decision(&runtime.config, request_authority);
     state
         .observer
         .record_alt_svc(route_id.clone(), decision.outcome, decision.reason);

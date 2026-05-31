@@ -16,7 +16,7 @@ pub(crate) struct Args {
     pub(crate) fail_on_budget: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Scenario {
     Smoke,
@@ -33,6 +33,7 @@ pub(crate) enum Scenario {
     DynamicResponseMetadata,
     VendorHeaderCandidate,
     VendorHeaderRouteEnabled,
+    ReloadSmoke,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, PartialEq, Eq)]

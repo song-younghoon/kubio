@@ -9,8 +9,7 @@ use kubio_core::{
     RouteResponseHeadersConfig, RouteVerifiedIgnoreConfig,
 };
 use kubio_observe::Observer;
-use kubio_policy::PolicyEngine;
-use kubio_proxy::{run_proxy, ProxyState};
+use kubio_proxy::{run_proxy, ProxyState, RuntimeHandle};
 use kubio_store::MemoryStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,6 +24,7 @@ pub(crate) struct ManagedProxy {
     http3_addr: Option<SocketAddr>,
     pub(crate) observer: Arc<Observer>,
     pub(crate) store: Arc<MemoryStore>,
+    runtime: RuntimeHandle,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -139,8 +139,8 @@ impl ManagedProxy {
             config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
-        let policy = Arc::new(PolicyEngine::new(&config));
-        let state = ProxyState::new(config.clone(), policy, observer.clone(), store.clone())?;
+        let state = ProxyState::new(config.clone(), observer.clone(), store.clone())?;
+        let runtime = state.runtime.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = run_proxy(state, async {
@@ -155,12 +155,34 @@ impl ManagedProxy {
             http3_addr: config.server.http3.listen,
             observer,
             store,
+            runtime,
             shutdown: Some(tx),
         })
     }
 
     pub(crate) fn http_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    pub(crate) fn reload_smoke_config(&self) -> Result<()> {
+        let active = self.runtime.load();
+        let mut next = (*active.config).clone();
+        next.debug_headers = true;
+        next.routes.push(RouteHintConfig {
+            name: Some("reload smoke".to_string()),
+            route_match: RouteMatchConfig {
+                method: "GET".to_string(),
+                path: "/stable".to_string(),
+            },
+            freshness: Default::default(),
+            query: Default::default(),
+            vary: Default::default(),
+            stale_if_error: Default::default(),
+            safety: Default::default(),
+            response_headers: Default::default(),
+        });
+        self.runtime.replace_config(Arc::new(next))?;
+        Ok(())
     }
 
     #[cfg(feature = "experimental-http3")]

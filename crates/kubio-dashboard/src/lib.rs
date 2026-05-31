@@ -10,4 +10,4 @@ mod state;
 
 pub use models::{OverviewResponse, PurgeRequest};
 pub use router::{router, run_dashboard};
-pub use state::DashboardState;
+pub use state::{ConfigReloadController, DashboardState};

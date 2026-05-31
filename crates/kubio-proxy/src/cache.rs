@@ -6,23 +6,25 @@ use kubio_store::CacheEntry;
 use std::time::SystemTime;
 
 use crate::alt_svc::{add_alt_svc_header, ALT_SVC_HEADER};
+use crate::runtime::ActiveRuntime;
 use crate::state::ProxyState;
 
 pub(crate) fn response_from_cache_entry_with_status(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     route_id: &RouteId,
     entry: CacheEntry,
     kubio_status: &'static str,
     request_authority: Option<&str>,
 ) -> Response<Body> {
     let mut builder = Response::builder().status(entry.status);
-    let route_hint = state.route_hints.get(route_id).map(|entry| &entry.hint);
+    let route_hint = runtime.route_hints.get(route_id).map(|entry| &entry.hint);
     for (name, value) in &entry.headers {
         let lower = name.as_str().to_ascii_lowercase();
         if !is_hop_by_hop_header(name.as_str())
             && name.as_str() != ALT_SVC_HEADER
             && !should_suppress_response_header_on_hit(
-                &state.config.policy.response_header_equivalence,
+                &runtime.config.policy.response_header_equivalence,
                 route_hint.map(|hint| &hint.response_headers),
                 &lower,
                 &entry.suppressed_response_headers,
@@ -31,7 +33,7 @@ pub(crate) fn response_from_cache_entry_with_status(
             builder = builder.header(name, value);
         }
     }
-    if state
+    if runtime
         .config
         .policy
         .response_header_equivalence
@@ -42,8 +44,9 @@ pub(crate) fn response_from_cache_entry_with_status(
             builder = builder.header(header::AGE, age);
         }
     }
-    if state.config.debug_headers {
+    if runtime.config.debug_headers {
         builder = builder.header("x-kubio-status", kubio_status);
+        builder = builder.header("x-kubio-config-generation", runtime.generation);
         let eligibility =
             state
                 .observer
@@ -78,7 +81,7 @@ pub(crate) fn response_from_cache_entry_with_status(
             );
         }
     }
-    builder = add_alt_svc_header(builder, state, route_id, request_authority);
+    builder = add_alt_svc_header(builder, state, runtime, route_id, request_authority);
     builder
         .body(Body::from(entry.body))
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())

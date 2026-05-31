@@ -23,6 +23,9 @@ pub(crate) async fn run(
     let mut successes = 0usize;
 
     for index in 0..requests {
+        if scenario == Scenario::ReloadSmoke && index == requests / 2 {
+            proxy.reload_smoke_config()?;
+        }
         let started = Instant::now();
         let (path, expected_prefix) = scenario_request(scenario, index);
         let ok = client.get_path(&proxy, &path, expected_prefix).await;
@@ -77,7 +80,9 @@ pub(crate) async fn run(
 
 fn scenario_request(scenario: Scenario, index: usize) -> (String, &'static str) {
     match scenario {
-        Scenario::Smoke | Scenario::FreshHit => ("/stable".to_string(), "stable"),
+        Scenario::Smoke | Scenario::FreshHit | Scenario::ReloadSmoke => {
+            ("/stable".to_string(), "stable")
+        }
         Scenario::ExactKeyAdaptive => ("/catalog/1".to_string(), "catalog-1"),
         Scenario::OriginPublicFastPath => ("/notice/1".to_string(), "notice-1"),
         Scenario::ProtectedUserSweep => (format!("/user/{}", index % 20), "user-"),

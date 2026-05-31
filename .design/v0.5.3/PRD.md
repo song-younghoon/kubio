@@ -1,6 +1,6 @@
 # PRD: kubio v0.5.3
 
-Document status: planned
+Document status: implemented
 Target release: `v0.5.3`
 Core philosophy: **shorten the operator feedback loop without weakening cache
 safety**
@@ -15,6 +15,33 @@ The user-facing difference is that a running kubio process can move from
 observing a safe opportunity to applying an operator-approved hint in one
 validated reload. Existing safe traffic keeps flowing, invalid reloads are
 rejected, and structural config changes still ask for a restart.
+
+## 1.1 Implementation Outcome
+
+v0.5.3 ships the core product contract:
+
+- `kubio config check`, `kubio config reload`, `kubio config diff`, and
+  `kubio config status`;
+- `GET /api/config/active`, `GET /api/config/reload-status`,
+  `POST /api/config/check`, and `POST /api/config/reload`;
+- Unix SIGHUP reload through the same reload controller used by the API;
+- active runtime generations starting at generation `1`;
+- atomic publication of config, policy engine, and route hint lookup;
+- restart-required rejection for listener, dashboard, origin, storage,
+  performance, metrics, and admin-token changes;
+- redacted active config visibility, dashboard reload status, per-route reload
+  metadata, bounded metrics, and bounded events.
+
+The shipped state reconciliation is conservative. Changed or removed route
+hints purge that route and demote its observer state. Global policy
+compatibility changes purge all cache entries and demote all observed routes.
+If required purge/reconciliation fails, the reload is rejected and the active
+generation is unchanged.
+
+The product defers reload duration histograms, a dashboard reload button, a
+route-heavy diff benchmark, and broader stress/privacy suites to future
+hardening. CLI/API reload, SIGHUP, dashboard visibility, bounded telemetry, and
+the normal plus HTTP/3 workspace test suites are included in v0.5.3.
 
 ## 2. Background
 
@@ -36,14 +63,16 @@ in-memory evidence that was useful for the decision.
 
 ## 3. Goals
 
-v0.5.3 should:
+v0.5.3 delivered:
 
 1. Add an explicit reloadable config contract.
 2. Add an explicit restart-required config contract.
 3. Apply safe config changes atomically.
 4. Preserve the previous active config on reload failure.
 5. Preserve compatible observer evidence across reloads.
-6. Demote or purge state when new config invalidates old proof.
+6. Demote or purge state when new config invalidates old proof, using
+   route-scoped purges for changed/removed route hints and global purges for
+   broad policy compatibility changes.
 7. Add CLI, admin API, and Unix SIGHUP reload entry points.
 8. Expose active config generation, last reload status, and restart-required
    reasons in dashboard, CLI, API, metrics, and events.
@@ -168,8 +197,8 @@ Every reload either commits a full new safe generation or changes nothing.
 ### 6.2 Structural Config Needs Restart
 
 If a field requires rebinding sockets, rebuilding stores, rebuilding connection
-pools, or changing public protocol topology, v0.5.3 should call that out
-instead of applying part of the edit.
+pools, or changing public protocol topology, v0.5.3 calls that out instead of
+applying part of the edit.
 
 ### 6.3 Evidence Can Survive Only When Compatible
 
@@ -197,3 +226,8 @@ The release is successful when:
   value, raw query value, raw header value, or response body content;
 - existing v0.5.2 adaptive reuse and response-header equivalence tests remain
   green.
+
+Shipped verification covered the workspace test suite, the HTTP/3 feature test
+suite, clippy across all targets/features, formatting, whitespace checks, and a
+reload-smoke benchmark. Proposed route-heavy diff and broader concurrent reload
+stress gates remain follow-up hardening items.

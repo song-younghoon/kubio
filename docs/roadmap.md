@@ -149,8 +149,9 @@ v0.5.3:
   demotion and purge for route or policy changes that invalidate prior proof.
 - CLI, admin API, Unix SIGHUP, dashboard, debug-header, metrics, and event
   visibility for reload status and restart-required changes.
-- Design status: `.design/v0.5.3` records the runtime config reload plan and
-  planned task checklist.
+- Design status: `.design/v0.5.3` records the implemented runtime config
+  reload design, shipped verification, and deferred hardening items.
+- Release notes: `docs/release-notes-v0.5.3.md`.
 
 v0.5+ candidates:
 

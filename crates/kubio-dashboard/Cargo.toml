@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 kubio-core.workspace = true
 kubio-observe.workspace = true

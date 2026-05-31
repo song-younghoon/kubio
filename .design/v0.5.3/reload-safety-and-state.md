@@ -1,6 +1,6 @@
 # Reload Safety and State
 
-Status: planned
+Status: implemented
 Target release: `v0.5.3`
 
 ## Goals
@@ -8,47 +8,47 @@ Target release: `v0.5.3`
 Reload safety ensures that a config edit cannot accidentally reuse unsafe
 responses, poison observer evidence, or partially update the runtime.
 
-The runtime should behave as if reload is an atomic commit:
+The runtime behaves as an atomic commit for reloadable runtime state:
 
 1. build candidate effective config;
 2. validate syntax and semantic constraints;
 3. compare against active config for restart-required changes;
 4. reconcile observer and cache state;
 5. publish a new active generation;
-6. record the result.
+6. update observer policy thresholds for snapshots/eligibility;
+7. record the result.
 
 If any step fails, the active generation remains unchanged.
 
 ## Runtime Handles
 
-Replace direct long-lived use of one `Arc<EffectiveConfig>` in request paths
-with a small config handle:
+Direct long-lived use of one `Arc<EffectiveConfig>` in request paths was
+replaced by `RuntimeHandle`:
 
 ```rust
-pub struct RuntimeConfigHandle {
-    current: ArcSwap<ActiveConfig>,
+pub struct RuntimeHandle {
+    current: Arc<RwLock<Arc<ActiveRuntime>>>,
 }
 
-impl RuntimeConfigHandle {
-    pub fn load(&self) -> Arc<ActiveConfig>;
-    pub fn compare_and_swap(&self, expected: u64, next: ActiveConfig) -> Result<()>;
+pub struct ActiveRuntime {
+    pub generation: u64,
+    pub loaded_at_unix_ms: u64,
+    pub config: Arc<EffectiveConfig>,
+    pub policy: Arc<PolicyEngine>,
+    pub(crate) route_hints: Arc<RouteHintLookup>,
+}
+
+impl RuntimeHandle {
+    pub fn load(&self) -> Arc<ActiveRuntime>;
+    pub fn generation(&self) -> u64;
+    pub fn active_config(&self) -> Arc<EffectiveConfig>;
+    pub fn replace_config(&self, config: Arc<EffectiveConfig>) -> Result<Arc<ActiveRuntime>>;
 }
 ```
 
-The exact implementation can use `arc-swap` or an equivalent lock-protected
-atomic handle. Reads should stay cheap because every request loads config.
-
-`PolicyEngine` should either become generation-aware and reloadable, or the
-runtime should publish a paired policy handle:
-
-```rust
-pub struct RuntimePolicyHandle {
-    current: ArcSwap<PolicyEngine>,
-}
-```
-
-The active config and active policy must be swapped together so new requests
-cannot observe a mismatched pair.
+The lock-protected snapshot keeps reads cheap and publishes active config,
+policy, and route hints together so new requests cannot observe a mismatched
+pair.
 
 ## Request Consistency
 
@@ -73,12 +73,12 @@ when debug headers are enabled.
 
 ## Evidence Retention
 
-Observer evidence can be retained only when the new config is compatible with
-the proof that created the evidence.
+Observer evidence is retained only when the new config is compatible with the
+proof that created the evidence. The shipped implementation uses conservative
+route/global demotion instead of fine-grained proof hashing.
 
 Retain evidence for changes such as:
 
-- lowering dashboard-only display options;
 - enabling debug headers;
 - adding an unrelated route hint;
 - changing thresholds in a stricter direction when current evidence still
@@ -98,9 +98,15 @@ Demote evidence for changes such as:
 - disabling adaptive reuse, query intelligence, or response-header
   equivalence.
 
+In v0.5.3, any global policy compatibility change listed by
+`ConfigDiff::requires_global_cache_purge()` demotes all observed routes and
+purges the cache. Changed or removed route hints demote matching routes and
+purge matching route cache entries. Added route hints are applied without
+resetting unrelated observed routes.
+
 ## Route Reconciliation
 
-Route hints should be diffed by normalized method and path template:
+Route hints are diffed by normalized method and path template:
 
 ```text
 GET /notice/{id}
@@ -112,9 +118,11 @@ Reconciliation outcomes:
 unchanged
 added
 removed
-changed_reloadable
-changed_demote
-changed_purge
+changed
+demoted
+purged
+retained
+requires_revalidation
 ```
 
 Rules:
@@ -129,8 +137,7 @@ Rules:
 
 ## Cache Entry Compatibility
 
-Stored entries should carry enough policy metadata to decide whether they can
-survive a reload:
+The original design considered adding per-entry policy compatibility metadata:
 
 ```rust
 pub struct StoredPolicyMetadata {
@@ -142,11 +149,19 @@ pub struct StoredPolicyMetadata {
 }
 ```
 
-v0.5.2 already introduced response-header policy metadata. v0.5.3 should extend
-or reuse that shape so reload can identify entries affected by route, query, or
-header policy changes.
+v0.5.3 did not add this stored metadata. Instead it enforces safety by purging
+before commit whenever compatibility is not definitely unchanged:
 
-Compatibility results:
+- changed or removed route hints purge entries for those routes;
+- global policy compatibility changes purge all entries;
+- purge failure returns `state_reconciliation_failed` and the old generation
+  remains active.
+
+This is more conservative than per-entry quarantine, but it keeps reload safety
+simple and avoids serving entries whose old proof no longer matches the new
+config.
+
+The deferred compatibility states remain future design options:
 
 ```text
 compatible
@@ -204,7 +219,7 @@ Potential failure points:
 - observer reconciliation error;
 - store purge error.
 
-If reconciliation requires purging and purge fails, the reload should fail by
+If reconciliation requires purging and purge fails, the reload fails by
 default. Keeping the previous config is safer than applying a stricter config
 while stale entries that depend on the old config remain reusable.
 

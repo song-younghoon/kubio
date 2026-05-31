@@ -40,6 +40,7 @@ pub(crate) async fn proxy_handler(
     request: Request<Body>,
 ) -> Response<Body> {
     let started = std::time::Instant::now();
+    let runtime = state.runtime.load();
     let downstream_protocol = http_protocol_from_version(request.version());
     let method = request.method().clone();
     let uri = request.uri().clone();
@@ -49,7 +50,7 @@ pub(crate) async fn proxy_handler(
     let headers = request.headers().clone();
     let request_authority = request_authority(&uri, &headers);
     if downstream_protocol == HttpProtocol::Http2
-        && header_list_size(&headers) > state.config.server.http2.max_header_list_size
+        && header_list_size(&headers) > runtime.config.server.http2.max_header_list_size
     {
         state
             .observer
@@ -77,16 +78,16 @@ pub(crate) async fn proxy_handler(
     state
         .observer
         .record_path_observation(route_id.clone(), observe_path(&path));
-    let route_hint_entry = state.route_hints.get(&route_id);
+    let route_hint_entry = runtime.route_hints.get(&route_id);
     let route_hint = route_hint_entry.map(|entry| &entry.hint);
     let route_hint_public_object = route_hint
         .map(|hint| hint.safety.public_object)
         .unwrap_or(false);
-    let panic_active = panic_switch_active(state.config.panic_file.as_deref());
+    let panic_active = panic_switch_active(runtime.config.panic_file.as_deref());
     record_panic_switch_transition(&state, panic_active, &route_id, None);
 
     let request_body_len = declared_request_body_len(&headers);
-    if request_body_len > state.config.policy.max_request_body_size as u64 {
+    if request_body_len > runtime.config.policy.max_request_body_size as u64 {
         warn!("request body exceeded proxy body limit");
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
@@ -95,7 +96,7 @@ pub(crate) async fn proxy_handler(
         .min(usize::MAX as u64) as usize;
 
     let mut request_signals =
-        state
+        runtime
             .policy
             .request_signals(&method, &path, &headers, signal_body_len);
     if route_hint
@@ -109,7 +110,7 @@ pub(crate) async fn proxy_handler(
         .map(count_query_params)
         .unwrap_or_default()
         .min(u16::MAX as usize) as u16;
-    let query_records = if state.config.policy.query_intelligence.enabled {
+    let query_records = if runtime.config.policy.query_intelligence.enabled {
         query_param_records(query.as_deref(), route_hint)
     } else {
         Vec::new()
@@ -119,8 +120,8 @@ pub(crate) async fn proxy_handler(
         .record_query_params(route_id.clone(), query_records.clone());
 
     let route_state = state.observer.route_state(&route_id);
-    let mut request_decision = state.policy.decide_request(
-        state.config.mode,
+    let mut request_decision = runtime.policy.decide_request(
+        runtime.config.mode,
         route_state,
         &request_signals,
         panic_active,
@@ -159,7 +160,7 @@ pub(crate) async fn proxy_handler(
         .verified_response_header_ignores(&route_id, route_hint.map(|hint| &hint.response_headers));
     let vary_names = route_hint_entry
         .map(|entry| entry.vary_names.as_slice())
-        .unwrap_or_else(|| state.route_hints.default_vary_names());
+        .unwrap_or_else(|| runtime.route_hints.default_vary_names());
     let variant_values = vary_names
         .iter()
         .map(|name| {
@@ -178,8 +179,8 @@ pub(crate) async fn proxy_handler(
         Some(
             build_cache_key_with_query_names_and_verified_ignores(
                 &method,
-                state.config.origin.scheme(),
-                &origin_authority(&state.config.origin),
+                runtime.config.origin.scheme(),
+                &origin_authority(&runtime.config.origin),
                 &path,
                 query.as_deref(),
                 &headers,
@@ -197,12 +198,12 @@ pub(crate) async fn proxy_handler(
     let mut stale_error_candidate: Option<(CacheKeyHash, CacheEntry)> = None;
     let mut canary_candidate: Option<(CacheKeyHash, CacheEntry)> = None;
 
-    if state.config.mode == Mode::Auto
+    if runtime.config.mode == Mode::Auto
         && request_decision.decision != Decision::Protect
         && !panic_active
     {
         if let Some(key_hash) = cache_key_hash.as_ref() {
-            let request_reuse_safe = state.policy.request_is_reuse_safe(&request_signals);
+            let request_reuse_safe = runtime.policy.request_is_reuse_safe(&request_signals);
             if state
                 .observer
                 .reuse_eligibility(
@@ -227,6 +228,7 @@ pub(crate) async fn proxy_handler(
                             );
                             return response_from_cache_entry_with_status(
                                 &state,
+                                &runtime,
                                 &route_id,
                                 entry,
                                 "hit",
@@ -235,10 +237,12 @@ pub(crate) async fn proxy_handler(
                         }
                     }
                     Ok(Some(entry)) if entry.is_stale_usable() => {
-                        if state.config.policy.revalidation.enabled && entry.validators.available()
+                        if runtime.config.policy.revalidation.enabled
+                            && entry.validators.available()
                         {
                             match send_conditional_origin(
                                 &state,
+                                &runtime,
                                 &method,
                                 &uri,
                                 &headers,
@@ -250,10 +254,13 @@ pub(crate) async fn proxy_handler(
                                 Ok(response) if response.status() == StatusCode::NOT_MODIFIED => {
                                     let not_modified_headers =
                                         clone_response_headers(response.headers());
-                                    if revalidation_metadata_is_safe(&state, &not_modified_headers)
-                                    {
+                                    if revalidation_metadata_is_safe(
+                                        &runtime,
+                                        &not_modified_headers,
+                                    ) {
                                         let refreshed = refresh_entry_after_304(
                                             &state,
+                                            &runtime,
                                             route_hint,
                                             entry,
                                             &not_modified_headers,
@@ -278,6 +285,7 @@ pub(crate) async fn proxy_handler(
                                         );
                                         return response_from_cache_entry_with_status(
                                             &state,
+                                            &runtime,
                                             &route_id,
                                             refreshed,
                                             "revalidated",
@@ -304,6 +312,7 @@ pub(crate) async fn proxy_handler(
                                     origin_response_override = Some(
                                         send_origin(
                                             &state,
+                                            &runtime,
                                             &method,
                                             &uri,
                                             &headers,
@@ -321,7 +330,7 @@ pub(crate) async fn proxy_handler(
                                         RevalidationOutcome::Failed,
                                     );
                                     if stale_if_error_allowed(
-                                        &state.config,
+                                        &runtime.config,
                                         route_hint,
                                         &entry,
                                         panic_active,
@@ -340,6 +349,7 @@ pub(crate) async fn proxy_handler(
                                         );
                                         return response_from_cache_entry_with_status(
                                             &state,
+                                            &runtime,
                                             &route_id,
                                             entry,
                                             "stale",
@@ -370,7 +380,7 @@ pub(crate) async fn proxy_handler(
                                         RevalidationOutcome::Failed,
                                     );
                                     if stale_if_error_allowed(
-                                        &state.config,
+                                        &runtime.config,
                                         route_hint,
                                         &entry,
                                         panic_active,
@@ -389,6 +399,7 @@ pub(crate) async fn proxy_handler(
                                         );
                                         return response_from_cache_entry_with_status(
                                             &state,
+                                            &runtime,
                                             &route_id,
                                             entry,
                                             "stale",
@@ -439,6 +450,7 @@ pub(crate) async fn proxy_handler(
     } else {
         match send_origin(
             &state,
+            &runtime,
             &method,
             &uri,
             &headers,
@@ -456,7 +468,7 @@ pub(crate) async fn proxy_handler(
                     StatusCode::BAD_GATEWAY
                 };
                 if let Some((key_hash, entry)) = stale_error_candidate {
-                    if stale_if_error_allowed(&state.config, route_hint, &entry, panic_active) {
+                    if stale_if_error_allowed(&runtime.config, route_hint, &entry, panic_active) {
                         state.observer.record_stale(
                             route_id.clone(),
                             Some(key_hash.clone()),
@@ -471,6 +483,7 @@ pub(crate) async fn proxy_handler(
                         );
                         return response_from_cache_entry_with_status(
                             &state,
+                            &runtime,
                             &route_id,
                             entry,
                             "stale",
@@ -498,7 +511,7 @@ pub(crate) async fn proxy_handler(
                     fingerprint: None,
                     shadow_eligible: false,
                     score: request_decision.score,
-                    mode: state.config.mode,
+                    mode: runtime.config.mode,
                 });
                 state.observer.push_event(
                     EventType::OriginRequestFailed,
@@ -518,9 +531,10 @@ pub(crate) async fn proxy_handler(
 
     let status = origin_response.status();
     let origin_headers = clone_response_headers(origin_response.headers());
-    let response_signals = state.policy.response_signals(status, &origin_headers);
+    let response_signals = runtime.policy.response_signals(status, &origin_headers);
     record_store_saturation_if_needed(
         &state,
+        &runtime,
         &route_id,
         cache_key_hash.as_ref(),
         &request_signals,
@@ -529,6 +543,7 @@ pub(crate) async fn proxy_handler(
     );
     if should_stream_origin_response(
         &state,
+        &runtime,
         &request_signals,
         &response_signals,
         response_signals.content_length,
@@ -537,8 +552,8 @@ pub(crate) async fn proxy_handler(
             .content_length
             .unwrap_or(0)
             .min(usize::MAX as u64) as usize;
-        let response_decision = state.policy.decide_response(
-            state.config.mode,
+        let response_decision = runtime.policy.decide_response(
+            runtime.config.mode,
             state.observer.route_state(&route_id),
             &request_signals,
             &response_signals,
@@ -578,11 +593,12 @@ pub(crate) async fn proxy_handler(
             fingerprint: None,
             shadow_eligible: false,
             score: response_decision.score,
-            mode: state.config.mode,
+            mode: runtime.config.mode,
         });
 
         return response_from_origin_stream(
             &state,
+            &runtime,
             &route_id,
             status,
             &origin_headers,
@@ -616,7 +632,7 @@ pub(crate) async fn proxy_handler(
                 fingerprint: None,
                 shadow_eligible: false,
                 score: request_decision.score,
-                mode: state.config.mode,
+                mode: runtime.config.mode,
             });
             state.observer.push_event(
                 EventType::OriginRequestFailed,
@@ -630,6 +646,7 @@ pub(crate) async fn proxy_handler(
     };
     record_store_saturation_if_needed(
         &state,
+        &runtime,
         &route_id,
         cache_key_hash.as_ref(),
         &request_signals,
@@ -638,7 +655,7 @@ pub(crate) async fn proxy_handler(
     );
 
     let fingerprint = make_fingerprint(
-        &state.config,
+        &runtime.config,
         route_hint,
         &verified_response_header_ignores,
         status,
@@ -656,8 +673,8 @@ pub(crate) async fn proxy_handler(
             &fingerprint.header_result.candidate_observations,
         );
     }
-    let response_decision = state.policy.decide_response(
-        state.config.mode,
+    let response_decision = runtime.policy.decide_response(
+        runtime.config.mode,
         state.observer.route_state(&route_id),
         &request_signals,
         &response_signals,
@@ -667,7 +684,7 @@ pub(crate) async fn proxy_handler(
 
     let protected = request_decision.decision == Decision::Protect
         || response_decision.decision == Decision::Protect;
-    let origin_public_response = state
+    let origin_public_response = runtime
         .policy
         .response_has_origin_public_signal(&response_signals);
     let final_decision = if matches!(
@@ -688,10 +705,10 @@ pub(crate) async fn proxy_handler(
     };
 
     let shadow_eligible = !panic_active
-        && state.policy.request_is_reuse_safe(&request_signals)
-        && state.policy.response_is_store_safe(&response_signals)
+        && runtime.policy.request_is_reuse_safe(&request_signals)
+        && runtime.policy.response_is_store_safe(&response_signals)
         && fingerprint.is_some()
-        && response_bytes.len() as u64 <= state.config.policy.max_fingerprint_body_size;
+        && response_bytes.len() as u64 <= runtime.config.policy.max_fingerprint_body_size;
 
     let observation_outcome = state.observer.record(ObservationRecord {
         route_id: route_id.clone(),
@@ -709,7 +726,7 @@ pub(crate) async fn proxy_handler(
             .map(|fingerprint| fingerprint.fingerprint.clone()),
         shadow_eligible,
         score: response_decision.score,
-        mode: state.config.mode,
+        mode: runtime.config.mode,
     });
     if let (Some((canary_key, canary_entry)), Some(fingerprint)) =
         (canary_candidate.as_ref(), fingerprint.as_ref())
@@ -770,23 +787,23 @@ pub(crate) async fn proxy_handler(
     if origin_public_response
         && !panic_active
         && !protected
-        && state.policy.response_is_store_safe(&response_signals)
+        && runtime.policy.response_is_store_safe(&response_signals)
     {
         state.observer.record_origin_public_response(
             route_id.clone(),
             cache_key_hash.clone(),
-            state.config.mode,
+            runtime.config.mode,
         );
     }
 
-    if state.config.mode == Mode::Auto
+    if runtime.config.mode == Mode::Auto
         && !panic_active
         && !protected
-        && state.policy.response_is_store_safe(&response_signals)
-        && response_bytes.len() as u64 <= state.config.storage.max_object_size
+        && runtime.policy.response_is_store_safe(&response_signals)
+        && response_bytes.len() as u64 <= runtime.config.storage.max_object_size
     {
-        let validators = state.policy.validators(&origin_headers);
-        let cache_control = state.policy.stored_cache_control(&origin_headers);
+        let validators = runtime.policy.validators(&origin_headers);
+        let cache_control = runtime.policy.stored_cache_control(&origin_headers);
         let validator_required = cache_control.no_cache || cache_control.must_revalidate;
         if validator_required && !validators.available() {
             state.observer.record_revalidation(
@@ -795,7 +812,7 @@ pub(crate) async fn proxy_handler(
                 RevalidationOutcome::Skipped,
             );
         } else if let (Some(key_hash), Some(fingerprint)) = (cache_key_hash.clone(), fingerprint) {
-            let request_reuse_safe = state.policy.request_is_reuse_safe(&request_signals);
+            let request_reuse_safe = runtime.policy.request_is_reuse_safe(&request_signals);
             if state
                 .observer
                 .store_eligibility(
@@ -813,6 +830,7 @@ pub(crate) async fn proxy_handler(
                 let header_policy_version = fingerprint.header_result.policy_version;
                 let freshness = entry_freshness(
                     &state,
+                    &runtime,
                     route_hint,
                     &cache_control,
                     &origin_headers,
@@ -821,7 +839,7 @@ pub(crate) async fn proxy_handler(
                 let entry = CacheEntry {
                     status: status.as_u16(),
                     headers: sanitized_response_headers(
-                        &state.config,
+                        &runtime.config,
                         route_hint,
                         &origin_headers,
                         &suppressed_response_headers,
@@ -857,6 +875,7 @@ pub(crate) async fn proxy_handler(
 
     response_from_origin_stream(
         &state,
+        &runtime,
         &route_id,
         status,
         &origin_headers,

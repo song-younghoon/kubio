@@ -16,6 +16,7 @@ pub(crate) enum Command {
     Explain(ExplainArgs),
     Doctor(DoctorArgs),
     Purge(PurgeArgs),
+    Config(ConfigArgs),
     Update(UpdateArgs),
 }
 
@@ -79,6 +80,52 @@ pub(crate) struct PurgeArgs {
     pub(crate) dashboard: String,
     #[arg(long, env = "KUBIO_ADMIN_TOKEN")]
     pub(crate) admin_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigArgs {
+    #[command(subcommand)]
+    pub(crate) command: ConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConfigSubcommand {
+    Check(ConfigCheckArgs),
+    Reload(ConfigReloadArgs),
+    Diff(ConfigDiffArgs),
+    Status(ConfigStatusArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigCheckArgs {
+    #[arg(long)]
+    pub(crate) config: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigReloadArgs {
+    #[arg(long, default_value = "http://127.0.0.1:9900")]
+    pub(crate) dashboard: String,
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    #[arg(long, env = "KUBIO_ADMIN_TOKEN")]
+    pub(crate) admin_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigDiffArgs {
+    #[arg(long)]
+    pub(crate) config: PathBuf,
+    #[arg(long, default_value = "http://127.0.0.1:9900")]
+    pub(crate) dashboard: String,
+    #[arg(long, env = "KUBIO_ADMIN_TOKEN")]
+    pub(crate) admin_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigStatusArgs {
+    #[arg(long, default_value = "http://127.0.0.1:9900")]
+    pub(crate) dashboard: String,
 }
 
 #[derive(Debug, Args)]

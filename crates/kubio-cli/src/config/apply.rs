@@ -11,12 +11,71 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
+#[derive(Debug, Clone)]
+pub(crate) struct StartupConfigSource {
+    pub(crate) path: PathBuf,
+    pub(crate) overrides: StartupOverrides,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StartupOverrides {
+    pub(crate) origin: Option<String>,
+    pub(crate) listen: Option<std::net::SocketAddr>,
+    pub(crate) dashboard: Option<std::net::SocketAddr>,
+    pub(crate) mode: Option<String>,
+    pub(crate) freshness: Option<String>,
+    pub(crate) debug_headers: bool,
+    pub(crate) panic_file: Option<PathBuf>,
+}
+
+impl StartupOverrides {
+    pub(crate) fn from_serve_args(args: &ServeArgs) -> Self {
+        Self {
+            origin: args.origin.clone(),
+            listen: args.listen,
+            dashboard: args.dashboard,
+            mode: args.mode.clone(),
+            freshness: args.freshness.clone(),
+            debug_headers: args.debug_headers,
+            panic_file: args.panic_file.clone(),
+        }
+    }
+
+    pub(crate) fn apply(&self, config: &mut EffectiveConfig) -> Result<()> {
+        if let Some(origin) = self.origin.as_ref() {
+            config.origin = Url::parse(origin).context("parse --to origin URL")?;
+        }
+        if let Some(listen) = self.listen {
+            config.server.listen = listen;
+        }
+        if let Some(dashboard) = self.dashboard {
+            config.dashboard.listen = dashboard;
+        }
+        if let Some(mode) = self.mode.as_ref() {
+            config.mode = mode.parse().map_err(anyhow::Error::msg)?;
+        }
+        if let Some(freshness) = self.freshness.as_ref() {
+            config.freshness = freshness.parse().map_err(anyhow::Error::msg)?;
+        }
+        if self.debug_headers {
+            config.debug_headers = true;
+        }
+        if self.panic_file.is_some() {
+            config.panic_file = self.panic_file.clone();
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn load_config_for_serve(args: &ServeArgs) -> Result<EffectiveConfig> {
-    let file = if let Some(path) = args.config.as_ref() {
-        Some(load_config_file(path)?)
-    } else {
-        None
-    };
+    let source = args.config.as_ref().map(|path| StartupConfigSource {
+        path: path.clone(),
+        overrides: StartupOverrides::from_serve_args(args),
+    });
+    let file = source
+        .as_ref()
+        .map(|source| load_config_file(&source.path))
+        .transpose()?;
 
     let origin_set = args.origin.is_some()
         || file
@@ -31,36 +90,43 @@ pub(crate) fn load_config_for_serve(args: &ServeArgs) -> Result<EffectiveConfig>
     if let Some(file) = file {
         apply_file_config(&mut config, file)?;
     }
+    StartupOverrides::from_serve_args(args).apply(&mut config)?;
 
-    if let Some(origin) = args.origin.as_ref() {
-        config.origin = Url::parse(origin).context("parse --to origin URL")?;
-    }
-    if let Some(listen) = args.listen {
-        config.server.listen = listen;
-    }
-    if let Some(dashboard) = args.dashboard {
-        config.dashboard.listen = dashboard;
-    }
-    if let Some(mode) = args.mode.as_ref() {
-        config.mode = mode.parse().map_err(anyhow::Error::msg)?;
-    }
-    if let Some(freshness) = args.freshness.as_ref() {
-        config.freshness = freshness.parse().map_err(anyhow::Error::msg)?;
-    }
-    if args.debug_headers {
-        config.debug_headers = true;
-    }
-    if args.panic_file.is_some() {
-        config.panic_file = args.panic_file.clone();
-    }
+    Ok(config)
+}
 
+pub(crate) fn config_source_for_serve(args: &ServeArgs) -> Option<StartupConfigSource> {
+    args.config.as_ref().map(|path| StartupConfigSource {
+        path: path.clone(),
+        overrides: StartupOverrides::from_serve_args(args),
+    })
+}
+
+pub(crate) fn load_config_from_source(source: &StartupConfigSource) -> Result<EffectiveConfig> {
+    let mut config = EffectiveConfig::default();
+    apply_file_config(&mut config, load_config_file(&source.path)?)?;
+    source.overrides.apply(&mut config)?;
+    Ok(config)
+}
+
+pub(crate) fn load_config_text_with_overrides(
+    text: &str,
+    overrides: &StartupOverrides,
+) -> Result<EffectiveConfig> {
+    let mut config = EffectiveConfig::default();
+    apply_file_config(&mut config, parse_config_text(text)?)?;
+    overrides.apply(&mut config)?;
     Ok(config)
 }
 
 pub(crate) fn load_config_file(path: &PathBuf) -> Result<FileConfig> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read config file {}", path.display()))?;
-    serde_yaml::from_str(&text).with_context(|| format!("parse config file {}", path.display()))
+    parse_config_text(&text).with_context(|| format!("parse config file {}", path.display()))
+}
+
+pub(crate) fn parse_config_text(text: &str) -> Result<FileConfig> {
+    serde_yaml::from_str(text).context("parse config")
 }
 
 pub(crate) fn apply_file_config(config: &mut EffectiveConfig, file: FileConfig) -> Result<()> {

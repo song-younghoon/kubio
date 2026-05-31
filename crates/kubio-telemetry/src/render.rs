@@ -622,6 +622,92 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
     );
     line(
         &mut out,
+        "kubio_config_generation",
+        "Active config generation.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_config_generation",
+        &[],
+        snapshot.overview.config_generation,
+    );
+    line(
+        &mut out,
+        "kubio_config_reload_attempts_total",
+        "Config reload attempts by bounded status.",
+        "counter",
+    );
+    for (status, count) in snapshot.overview.config_reload_attempts.iter() {
+        metric(
+            &mut out,
+            "kubio_config_reload_attempts_total",
+            &[("status", status.as_str())],
+            count,
+        );
+    }
+    line(
+        &mut out,
+        "kubio_config_reload_changes_total",
+        "Last config reload changes by bounded class.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_config_reload_changes_total",
+        &[("class", "reloadable")],
+        snapshot.overview.config_reload_reloadable_changes,
+    );
+    metric(
+        &mut out,
+        "kubio_config_reload_changes_total",
+        &[("class", "restart_required")],
+        snapshot.overview.config_reload_restart_required_changes,
+    );
+    line(
+        &mut out,
+        "kubio_config_reload_routes_total",
+        "Last config reload route reconciliation counts.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_config_reload_routes_total",
+        &[("action", "added")],
+        snapshot.overview.config_reload_routes_added,
+    );
+    metric(
+        &mut out,
+        "kubio_config_reload_routes_total",
+        &[("action", "changed")],
+        snapshot.overview.config_reload_routes_changed,
+    );
+    metric(
+        &mut out,
+        "kubio_config_reload_routes_total",
+        &[("action", "removed")],
+        snapshot.overview.config_reload_routes_removed,
+    );
+    metric(
+        &mut out,
+        "kubio_config_reload_routes_total",
+        &[("action", "demoted")],
+        snapshot.overview.config_reload_routes_demoted,
+    );
+    line(
+        &mut out,
+        "kubio_config_reload_cache_entries_purged_total",
+        "Cache entries purged by the last config reload.",
+        "gauge",
+    );
+    metric(
+        &mut out,
+        "kubio_config_reload_cache_entries_purged_total",
+        &[],
+        snapshot.overview.config_reload_cache_entries_purged,
+    );
+    line(
+        &mut out,
         "kubio_alt_svc_advertisements_total",
         "Alt-Svc advertisement decisions with bounded reasons.",
         "counter",
@@ -893,8 +979,8 @@ pub fn render_metrics(snapshot: &ObserverSnapshot, store: &StoreStats) -> String
 mod tests {
     use super::*;
     use kubio_core::{
-        ConfidenceTier, LatencyBucketSnapshot, LatencySnapshot, ReuseClass, RouteId, RouteState,
-        StatusClassCounts,
+        ConfidenceTier, LatencyBucketSnapshot, LatencySnapshot, ReuseClass, RouteId,
+        RouteReloadSnapshot, RouteState, StatusClassCounts,
     };
     use kubio_observe::{ObserverSnapshot, OverviewSnapshot, ProtocolCounts, RouteSnapshot};
     use kubio_store::{StoreKind, StoreOperationMetrics, StoreStats};
@@ -974,6 +1060,7 @@ mod tests {
                 route_hint: None,
                 query_params: vec![],
                 response_headers: vec![],
+                reload: RouteReloadSnapshot::default(),
             }],
             events: vec![],
         };
@@ -1016,6 +1103,8 @@ mod tests {
         assert!(metrics.contains("kubio_backpressure_rejections_total"));
         assert!(metrics.contains("kubio_in_flight_requests"));
         assert!(metrics.contains("kubio_protocol_fallbacks_total"));
+        assert!(metrics.contains("kubio_config_generation"));
+        assert!(metrics.contains("kubio_config_reload_attempts_total"));
         assert!(metrics.contains("kubio_observer_events_dropped_total"));
         assert!(metrics.contains("kubio_alt_svc_advertisements_total"));
         assert!(metrics.contains("kubio_http3_connections_total"));

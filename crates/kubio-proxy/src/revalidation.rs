@@ -7,6 +7,7 @@ use kubio_store::CacheEntry;
 use std::time::{Duration, SystemTime};
 
 use crate::headers::sanitized_response_headers;
+use crate::runtime::ActiveRuntime;
 use crate::state::ProxyState;
 
 #[derive(Debug, Clone)]
@@ -18,27 +19,29 @@ pub(crate) struct EntryFreshness {
 }
 
 pub(crate) fn entry_freshness(
-    state: &ProxyState,
+    _state: &ProxyState,
+    runtime: &ActiveRuntime,
     route_hint: Option<&RouteHintConfig>,
     cache_control: &StoredCacheControl,
     headers: &HeaderMap,
     now: SystemTime,
 ) -> EntryFreshness {
-    let base_ttl = state.policy.freshness_ttl_for_route(route_hint);
+    let base_ttl = runtime.policy.freshness_ttl_for_route(route_hint);
     let ttl = cache_control
         .max_age
         .map(|max_age| max_age.min(base_ttl))
         .unwrap_or(base_ttl);
     let must_revalidate = cache_control.no_cache || cache_control.must_revalidate;
     let fresh_until = if must_revalidate { now } else { now + ttl };
-    let stale_window = stale_window_from_policy(&state.config, route_hint, cache_control, headers);
+    let stale_window =
+        stale_window_from_policy(&runtime.config, route_hint, cache_control, headers);
     let stale_until = stale_window.map(|window| fresh_until + window);
     EntryFreshness {
         created_at: now,
         fresh_until,
         stale_until,
         expires_at: stale_until
-            .unwrap_or(fresh_until + state.config.policy.stale_if_error.max_stale),
+            .unwrap_or(fresh_until + runtime.config.policy.stale_if_error.max_stale),
     }
 }
 
@@ -104,12 +107,13 @@ pub(crate) fn stale_denial_reason(entry: &CacheEntry) -> DecisionReason {
 
 pub(crate) fn refresh_entry_after_304(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     route_hint: Option<&RouteHintConfig>,
     mut entry: CacheEntry,
     headers: &HeaderMap,
 ) -> CacheEntry {
     let sanitized = sanitized_response_headers(
-        &state.config,
+        &runtime.config,
         route_hint,
         headers,
         &entry.suppressed_response_headers,
@@ -122,9 +126,10 @@ pub(crate) fn refresh_entry_after_304(
             entry.headers.insert(name, value);
         }
     }
-    let cache_control = state.policy.stored_cache_control(&entry.headers);
+    let cache_control = runtime.policy.stored_cache_control(&entry.headers);
     let freshness = entry_freshness(
         state,
+        runtime,
         route_hint,
         &cache_control,
         &entry.headers,
@@ -134,13 +139,16 @@ pub(crate) fn refresh_entry_after_304(
     entry.fresh_until = freshness.fresh_until;
     entry.stale_until = freshness.stale_until;
     entry.expires_at = freshness.expires_at;
-    entry.validators = state.policy.validators(&entry.headers);
+    entry.validators = runtime.policy.validators(&entry.headers);
     entry.cache_control = cache_control.clone();
     entry.must_revalidate = cache_control.no_cache || cache_control.must_revalidate;
     entry
 }
 
-pub(crate) fn revalidation_metadata_is_safe(state: &ProxyState, headers: &HeaderMap) -> bool {
-    let signals = state.policy.response_signals(StatusCode::OK, headers);
-    state.policy.response_hard_deny_reasons(&signals).is_empty()
+pub(crate) fn revalidation_metadata_is_safe(runtime: &ActiveRuntime, headers: &HeaderMap) -> bool {
+    let signals = runtime.policy.response_signals(StatusCode::OK, headers);
+    runtime
+        .policy
+        .response_hard_deny_reasons(&signals)
+        .is_empty()
 }

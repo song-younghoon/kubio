@@ -49,6 +49,12 @@ pub struct OverviewResponse {
     pub cache_entries: u64,
     pub cache_bytes: u64,
     pub store_kind: String,
+    pub config_generation: u64,
+    pub last_reload_status: Option<String>,
+    pub last_reloadable_changes: u64,
+    pub last_restart_required: u64,
+    pub last_routes_demoted: u64,
+    pub last_cache_entries_purged: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

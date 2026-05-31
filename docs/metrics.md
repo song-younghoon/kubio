@@ -49,6 +49,11 @@ Required metrics include:
 - `kubio_in_flight_requests`
 - `kubio_max_in_flight_requests`
 - `kubio_protocol_fallbacks_total`
+- `kubio_config_generation`
+- `kubio_config_reload_attempts_total`
+- `kubio_config_reload_changes_total`
+- `kubio_config_reload_routes_total`
+- `kubio_config_reload_cache_entries_purged_total`
 - `kubio_request_duration_seconds`
 - `kubio_origin_duration_seconds`
 - `kubio_policy_decisions_total`
@@ -61,7 +66,10 @@ kubio_request_duration_seconds_sum{route_id="GET /api/products"} 0.42
 kubio_request_duration_seconds_count{route_id="GET /api/products"} 20
 ```
 
-Allowed labels are bounded to method, route id, decision, outcome, status class, store kind, and histogram bucket. Raw paths, query strings, user identifiers, header values, disk paths, and IP addresses are not used as metric labels.
+Allowed labels are bounded to method, route id, decision, outcome, status class,
+store kind, reload status, reload change class, reload route action, protocol,
+and histogram bucket. Raw paths, query strings, user identifiers, header values,
+disk paths, config paths, and IP addresses are not used as metric labels.
 
 v0.3.0 protocol labels are bounded enum values only:
 
@@ -75,4 +83,15 @@ kubio_protocol_fallbacks_total 0
 kubio_store_operations_total{store="memory",operation="put",result="ok"} 2
 kubio_store_operation_duration_seconds_sum{store="memory",operation="put"} 0.001200
 kubio_store_saturation_events_total{store="memory"} 0
+```
+
+v0.5.3 reload metrics use bounded labels only:
+
+```text
+kubio_config_generation 2
+kubio_config_reload_attempts_total{status="applied"} 1
+kubio_config_reload_changes_total{class="reloadable"} 3
+kubio_config_reload_changes_total{class="restart_required"} 0
+kubio_config_reload_routes_total{action="demoted"} 1
+kubio_config_reload_cache_entries_purged_total 2
 ```

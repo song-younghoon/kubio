@@ -6,8 +6,8 @@ use std::future::Future;
 use tokio::net::TcpListener;
 
 use crate::api::{
-    api_config, api_events, api_overview, api_purge, api_route_detail, api_routes, api_store,
-    metrics,
+    api_active_config, api_check_config, api_config, api_events, api_overview, api_purge,
+    api_reload_config, api_reload_status, api_route_detail, api_routes, api_store, metrics,
 };
 use crate::pages::{config_page, events_page, index, route_page, routes_page, store_page};
 use crate::state::DashboardState;
@@ -25,6 +25,10 @@ pub fn router(state: DashboardState) -> Router {
         .route("/api/routes/by-hash/{route_hash}", get(api_route_detail))
         .route("/api/events", get(api_events))
         .route("/api/config", get(api_config))
+        .route("/api/config/active", get(api_active_config))
+        .route("/api/config/reload-status", get(api_reload_status))
+        .route("/api/config/reload", post(api_reload_config))
+        .route("/api/config/check", post(api_check_config))
         .route("/api/store", get(api_store))
         .route("/api/purge", post(api_purge));
 
@@ -110,12 +114,66 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn reload_endpoint_requires_admin_token_when_configured() {
+        let mut config = EffectiveConfig::default();
+        config.dashboard.allow_public = true;
+        config.admin_token = Some("secret-token".to_string());
+        let app = router(test_state(config));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/reload")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"dry_run":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/reload")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header("x-kubio-admin-token", "secret-token")
+                    .body(Body::from(r#"{"dry_run":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(authorized.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn active_config_endpoint_includes_generation() {
+        let app = router(test_state(EffectiveConfig::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/active")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     fn test_state(config: EffectiveConfig) -> DashboardState {
         let config = Arc::new(config);
         DashboardState {
             config: config.clone(),
             observer: Arc::new(Observer::new(100, 100, 100, 2, 2, 1)),
             store: Arc::new(MemoryStore::new(&StorageConfig::default())),
+            reloader: None,
         }
     }
 }

@@ -9,6 +9,7 @@ use kubio_observe::EventType;
 
 use crate::alt_svc::{add_alt_svc_header, ALT_SVC_HEADER};
 use crate::headers::{connection_header_names, is_hop_by_hop_header_named};
+use crate::runtime::ActiveRuntime;
 use crate::state::ProxyState;
 
 #[derive(Debug, Clone)]
@@ -46,8 +47,10 @@ pub(crate) fn make_fingerprint(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn response_from_origin_stream(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     route_id: &RouteId,
     status: StatusCode,
     headers: &HeaderMap,
@@ -64,8 +67,9 @@ pub(crate) fn response_from_origin_stream(
             builder = builder.header(name, value);
         }
     }
-    if state.config.debug_headers {
+    if runtime.config.debug_headers {
         builder = builder.header("x-kubio-status", kubio_status);
+        builder = builder.header("x-kubio-config-generation", runtime.generation);
         if let Some(route) = state.observer.route_by_hash(&route_id.hash()) {
             builder = builder.header("x-kubio-reuse-class", route.reuse_class.to_string());
             builder = builder.header("x-kubio-confidence", route.confidence_tier.to_string());
@@ -86,33 +90,35 @@ pub(crate) fn response_from_origin_stream(
             }
         }
     }
-    builder = add_alt_svc_header(builder, state, route_id, request_authority);
+    builder = add_alt_svc_header(builder, state, runtime, route_id, request_authority);
     builder
         .body(body)
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
 pub(crate) fn should_stream_origin_response(
-    state: &ProxyState,
+    _state: &ProxyState,
+    runtime: &ActiveRuntime,
     request_signals: &kubio_policy::RequestSignals,
     response_signals: &kubio_policy::ResponseSignals,
     content_length: Option<u64>,
 ) -> bool {
     let known_too_large = content_length
         .map(|length| {
-            length > state.config.policy.max_fingerprint_body_size
-                || length > state.config.storage.max_object_size
-                || length > state.config.performance.max_buffered_response_size
+            length > runtime.config.policy.max_fingerprint_body_size
+                || length > runtime.config.storage.max_object_size
+                || length > runtime.config.performance.max_buffered_response_size
         })
         .unwrap_or(false);
-    (state.config.performance.stream_unstoreable_bodies
-        && (!state.policy.request_is_reuse_safe(request_signals)
-            || !state.policy.response_is_store_safe(response_signals)))
+    (runtime.config.performance.stream_unstoreable_bodies
+        && (!runtime.policy.request_is_reuse_safe(request_signals)
+            || !runtime.policy.response_is_store_safe(response_signals)))
         || known_too_large
 }
 
 pub(crate) fn record_store_saturation_if_needed(
     state: &ProxyState,
+    runtime: &ActiveRuntime,
     route_id: &RouteId,
     cache_key_hash: Option<&CacheKeyHash>,
     request_signals: &kubio_policy::RequestSignals,
@@ -122,11 +128,11 @@ pub(crate) fn record_store_saturation_if_needed(
     let Some(response_size) = response_size else {
         return;
     };
-    if response_size <= state.config.storage.max_object_size {
+    if response_size <= runtime.config.storage.max_object_size {
         return;
     }
-    if !state.policy.request_is_reuse_safe(request_signals)
-        || !state.policy.response_is_store_safe(response_signals)
+    if !runtime.policy.request_is_reuse_safe(request_signals)
+        || !runtime.policy.response_is_store_safe(response_signals)
     {
         return;
     }

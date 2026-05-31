@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-bench"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -844,9 +844,10 @@ dependencies = [
 
 [[package]]
 name = "kubio-cli"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "http",
  "kubio-core",
@@ -868,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-core"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "blake3",
  "http",
@@ -880,9 +881,10 @@ dependencies = [
 
 [[package]]
 name = "kubio-dashboard"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "kubio-core",
  "kubio-observe",
@@ -897,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-observe"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "kubio-core",
  "parking_lot",
@@ -906,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-policy"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "http",
  "kubio-core",
@@ -915,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-proxy"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -932,6 +934,7 @@ dependencies = [
  "kubio-store",
  "kubio-telemetry",
  "kubio-transport",
+ "parking_lot",
  "quinn",
  "reqwest",
  "serde_json",
@@ -943,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-store"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -958,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-telemetry"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "kubio-core",
  "kubio-observe",
@@ -969,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "kubio-transport"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "axum",

@@ -1,7 +1,8 @@
 use kubio_core::{
     AdaptiveReuseBlocker, AdaptiveReuseConfig, CacheKeyHash, ConfidenceTier, DecisionReason,
     HeaderEquivalenceSource, ResponseHeaderEquivalenceConfig, ReuseClass, RouteId,
-    RouteResponseHeadersConfig, RouteState, StatusClassCounts,
+    RouteReloadAction, RouteReloadSnapshot, RouteResponseHeadersConfig, RouteState,
+    StatusClassCounts,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime};
@@ -12,7 +13,7 @@ use crate::protocol::{AltSvcCounts, Http3ServerCounts, ProtocolCounts, UpstreamH
 use crate::query::QueryParamStats;
 use crate::records::KeyObservation;
 use crate::response_headers::ResponseHeaderStats;
-use crate::snapshot::RouteSnapshot;
+use crate::snapshot::{ConfigReloadStatusCounts, RouteSnapshot};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ObserverInner {
@@ -30,6 +31,15 @@ pub(crate) struct ObserverInner {
     pub(crate) alt_svc: AltSvcCounts,
     pub(crate) http3_server: Http3ServerCounts,
     pub(crate) upstream_http3: UpstreamHttp3Counts,
+    pub(crate) config_generation: u64,
+    pub(crate) config_reload_attempts: ConfigReloadStatusCounts,
+    pub(crate) config_reload_reloadable_changes: u64,
+    pub(crate) config_reload_restart_required_changes: u64,
+    pub(crate) config_reload_routes_added: u64,
+    pub(crate) config_reload_routes_changed: u64,
+    pub(crate) config_reload_routes_removed: u64,
+    pub(crate) config_reload_routes_demoted: u64,
+    pub(crate) config_reload_cache_entries_purged: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +92,7 @@ pub(crate) struct RouteStats {
     pub(crate) reasons: Vec<DecisionReason>,
     pub(crate) query_params: HashMap<String, QueryParamStats>,
     pub(crate) response_headers: HashMap<String, ResponseHeaderStats>,
+    pub(crate) reload: RouteReloadSnapshot,
 }
 
 impl RouteStats {
@@ -135,6 +146,7 @@ impl RouteStats {
             reasons: Vec::new(),
             query_params: HashMap::new(),
             response_headers: HashMap::new(),
+            reload: RouteReloadSnapshot::default(),
         }
     }
 
@@ -455,6 +467,29 @@ impl RouteStats {
                 })
                 .collect(),
             response_headers,
+            reload: self.reload.clone(),
         }
+    }
+
+    pub(crate) fn demote_for_reload(
+        &mut self,
+        generation: u64,
+        action: RouteReloadAction,
+        reason: &str,
+    ) {
+        if self.state != RouteState::Protected {
+            self.state = RouteState::Watching;
+        }
+        self.shadow_matches = 0;
+        self.origin_public_responses = 0;
+        self.precision_positive_samples = 0;
+        self.canary_matches = 0;
+        self.query_compacted_groups.clear();
+        self.response_headers.clear();
+        self.reload = RouteReloadSnapshot {
+            last_config_generation: generation,
+            last_reload_action: Some(action),
+            last_reload_reason: Some(reason.to_string()),
+        };
     }
 }

@@ -15,7 +15,6 @@ use kubio_core::{
     RouteVerifiedIgnoreConfig,
 };
 use kubio_observe::{EventType, Observer};
-use kubio_policy::PolicyEngine;
 use kubio_proxy::{run_proxy, ProxyState};
 use kubio_store::{CacheStore, MemoryStore};
 #[cfg(feature = "experimental-http3")]
@@ -2575,8 +2574,7 @@ impl TestRuntime {
             config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
-        let policy = Arc::new(PolicyEngine::new(&config));
-        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let state = ProxyState::new(config, observer.clone(), store.clone()).unwrap();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = run_proxy(state, async {
@@ -2654,8 +2652,7 @@ impl TestRuntime {
             config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
-        let policy = Arc::new(PolicyEngine::new(&config));
-        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let state = ProxyState::new(config, observer.clone(), store.clone()).unwrap();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = run_proxy(state, async {
@@ -2760,8 +2757,7 @@ impl TestRuntime {
             config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
-        let policy = Arc::new(PolicyEngine::new(&config));
-        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let state = ProxyState::new(config, observer.clone(), store.clone()).unwrap();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = run_proxy(state, async {
@@ -2964,8 +2960,7 @@ impl TestRuntime {
             config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
-        let policy = Arc::new(PolicyEngine::new(&config));
-        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let state = ProxyState::new(config, observer.clone(), store.clone()).unwrap();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = run_proxy(state, async {
@@ -3001,8 +2996,7 @@ impl TestRuntime {
             config.policy.response_header_equivalence.clone(),
         ));
         let store = Arc::new(MemoryStore::new(&config.storage));
-        let policy = Arc::new(PolicyEngine::new(&config));
-        let state = ProxyState::new(config, policy, observer.clone(), store.clone()).unwrap();
+        let state = ProxyState::new(config, observer.clone(), store.clone()).unwrap();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = run_proxy(state, async {

@@ -2,7 +2,10 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use kubio_core::{CacheKeyHash, DecisionReason, RedactedConfig};
+use kubio_core::{
+    ActiveConfigResponse, CacheKeyHash, ConfigCheckRequest, ConfigReloadRequest,
+    ConfigReloadSnapshot, DecisionReason, RedactedConfig,
+};
 use kubio_observe::{EventType, ObserverSnapshot};
 use kubio_store::{PurgeSelector, StoreStats};
 use kubio_telemetry::render_metrics;
@@ -13,9 +16,11 @@ use crate::state::DashboardState;
 
 pub(crate) async fn api_overview(State(state): State<DashboardState>) -> Json<OverviewResponse> {
     let snapshot = state.observer.snapshot();
+    let active = state.active_config();
+    let reload = state.reload_status();
     Json(OverviewResponse {
-        mode: state.config.mode.to_string(),
-        origin: state.config.origin.to_string(),
+        mode: active.config.mode.to_string(),
+        origin: active.config.origin.to_string(),
         observed_requests: snapshot.overview.observed_requests,
         origin_requests: snapshot.overview.origin_requests,
         reused_responses: snapshot.overview.reused_responses,
@@ -58,6 +63,12 @@ pub(crate) async fn api_overview(State(state): State<DashboardState>) -> Json<Ov
         cache_entries: state.store.stats().entries,
         cache_bytes: state.store.stats().bytes,
         store_kind: format!("{:?}", state.store.stats().kind).to_ascii_lowercase(),
+        config_generation: active.generation,
+        last_reload_status: reload.last_status.map(|status| status.to_string()),
+        last_reloadable_changes: reload.last_reloadable_change_count,
+        last_restart_required: reload.last_restart_required_count,
+        last_routes_demoted: reload.last_routes_demoted,
+        last_cache_entries_purged: reload.last_cache_entries_purged,
     })
 }
 
@@ -80,7 +91,53 @@ pub(crate) async fn api_events(State(state): State<DashboardState>) -> Json<Obse
 }
 
 pub(crate) async fn api_config(State(state): State<DashboardState>) -> Json<RedactedConfig> {
-    Json(state.config.redacted())
+    Json(state.active_config().config)
+}
+
+pub(crate) async fn api_active_config(
+    State(state): State<DashboardState>,
+) -> Json<ActiveConfigResponse> {
+    Json(state.active_config())
+}
+
+pub(crate) async fn api_reload_status(
+    State(state): State<DashboardState>,
+) -> Json<ConfigReloadSnapshot> {
+    Json(state.reload_status())
+}
+
+pub(crate) async fn api_reload_config(
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    Json(request): Json<ConfigReloadRequest>,
+) -> Response {
+    if !state.config.dashboard.admin_api {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !authorized(&state.config, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.reloader.as_ref() {
+        Some(reloader) => Json(reloader.reload_config(request).await).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(crate) async fn api_check_config(
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    Json(request): Json<ConfigCheckRequest>,
+) -> Response {
+    if !state.config.dashboard.admin_api {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !authorized(&state.config, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.reloader.as_ref() {
+        Some(reloader) => Json(reloader.check_config(request).await).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 pub(crate) async fn api_store(State(state): State<DashboardState>) -> Json<StoreStats> {
