@@ -1,0 +1,258 @@
+# Runtime Config Reload
+
+Status: planned
+Target release: `v0.5.3`
+
+## Goals
+
+Runtime config reload should let kubio apply safe behavioral changes while the
+process keeps running. The contract must be explicit enough that an operator
+knows when a change can be reloaded and when a restart is required.
+
+The reload path answers five questions:
+
+1. Where does the new config come from?
+2. Is the new file syntactically and semantically valid?
+3. Does the diff contain only reloadable fields?
+4. What state must be retained, demoted, or purged?
+5. Which config generation is active for new requests?
+
+## Config Source
+
+When `kubio serve --config PATH` is used, the runtime stores:
+
+```rust
+pub struct ConfigSource {
+    pub path: PathBuf,
+    pub startup_overrides: StartupOverrides,
+}
+```
+
+Startup CLI overrides such as `--to`, `--listen`, `--dashboard`, `--mode`,
+`--freshness`, `--debug-headers`, and `--panic-file` are part of the effective
+startup config. v0.5.3 should preserve the current precedence rule on reload:
+
+```text
+defaults -> config file -> startup CLI overrides
+```
+
+This keeps reload behavior predictable. A file edit cannot silently override a
+startup CLI flag that was already chosen by the operator.
+
+If the process started without `--config`, explicit reload returns
+`no_config_source` unless the API or CLI supplies a file path for validation
+only. Applying a new config source to a running process is out of scope.
+
+## Reload Entry Points
+
+### CLI
+
+Add:
+
+```bash
+kubio config reload --dashboard http://127.0.0.1:9900
+kubio config check --config ./kubio.yml
+kubio config diff --config ./kubio.yml --dashboard http://127.0.0.1:9900
+```
+
+`reload` calls the dashboard admin API. `check` validates a local file without
+contacting a running process. `diff` compares a candidate file against the
+running redacted active config and reports reloadable vs restart-required
+changes.
+
+### Admin API
+
+Add protected endpoints:
+
+```text
+POST /api/config/reload
+POST /api/config/check
+GET  /api/config/reload-status
+```
+
+`POST /api/config/reload` uses the stored startup config source by default.
+The request body may optionally request dry-run mode:
+
+```json
+{"dry_run": true}
+```
+
+When `admin_token` is configured, reload endpoints require the same admin auth
+as purge.
+
+### SIGHUP
+
+On Unix, SIGHUP triggers the same reload flow as the admin API. It should never
+write to stdout. It may log via tracing and record observer events.
+
+## Reloadable Fields
+
+v0.5.3 should allow these fields to reload:
+
+```text
+mode
+freshness
+policy.respect_origin_headers
+policy.protect_authorization
+policy.protect_cookies
+policy.protect_set_cookie
+policy.max_object_size
+policy.max_fingerprint_body_size
+policy.min_route_samples
+policy.min_key_repeats
+policy.min_shadow_validations
+policy.max_shadow_mismatch_rate
+policy.revalidation
+policy.stale_if_error
+policy.query_intelligence
+policy.response_header_equivalence
+policy.adaptive_reuse
+routes
+debug_headers
+panic_file
+observability.tracing
+```
+
+Reloading `observability.tracing` means toggling runtime recording where the
+existing tracing infrastructure supports it. It does not imply replacing the
+global subscriber.
+
+## Restart-Required Fields
+
+v0.5.3 should reject reloads that change these fields:
+
+```text
+server.listen
+server.origin_timeout_ms
+server.tls
+server.protocols
+server.http2
+server.http3
+origin
+origin_protocol
+dashboard.enabled
+dashboard.listen
+dashboard.allow_public
+dashboard.admin_api
+storage.kind
+storage.path
+storage.max_size
+storage.sync
+performance.max_in_flight_requests
+performance.max_buffered_response_size
+performance.stream_unstoreable_bodies
+performance.observer_shards
+performance.async_disk_writes
+performance.origin_pool_max_idle_per_host
+performance.origin_pool_idle_timeout
+observability.metrics
+observability.metrics_path
+admin_token
+```
+
+Rationale:
+
+- listener and protocol fields require rebinding sockets or rebuilding protocol
+  servers;
+- origin fields require rebuilding clients and connection pools;
+- storage fields affect existing store identity and capacity behavior;
+- performance fields often size runtime structures created at startup;
+- metrics path registration is part of the dashboard router;
+- changing `admin_token` at runtime needs a separate credential-rotation
+  design.
+
+## Diff Model
+
+Add a structural diff that classifies changed fields:
+
+```rust
+pub enum ConfigChangeClass {
+    Reloadable,
+    RestartRequired,
+    SecretRedacted,
+}
+
+pub struct ConfigDiffEntry {
+    pub path: String,
+    pub class: ConfigChangeClass,
+    pub summary: String,
+}
+```
+
+The diff should never include secret values. For route hints and policy lists,
+the summary should include counts and route templates, not raw query values.
+
+Example CLI output:
+
+```text
+reloadable:
+  mode: shadow -> auto
+  routes: 1 added, 1 changed
+  policy.response_header_equivalence: verified_ignore allowlist changed
+
+restart required:
+  server.listen: listener address changed
+```
+
+If any restart-required field changed, no reloadable fields are applied.
+
+## Config Generation
+
+Every committed config receives a monotonic process-local generation:
+
+```rust
+pub struct ActiveConfig {
+    pub generation: u64,
+    pub loaded_at_unix_ms: u64,
+    pub config: Arc<EffectiveConfig>,
+}
+```
+
+Generation `1` is startup. A successful reload increments the generation.
+Failed reload attempts get attempt IDs but do not increment active generation.
+
+Requests should capture the active generation at request start and use that
+generation consistently for policy, route hints, debug headers, and response
+handling.
+
+## Reload Results
+
+Reload result classes:
+
+```text
+applied
+dry_run_ok
+parse_failed
+validation_failed
+restart_required
+state_reconciliation_failed
+no_config_source
+unauthorized
+internal_error
+```
+
+Failure response example:
+
+```json
+{
+  "status": "restart_required",
+  "active_generation": 3,
+  "attempt_id": 4,
+  "restart_required": ["server.listen"],
+  "message": "config contains restart-required changes"
+}
+```
+
+Success response example:
+
+```json
+{
+  "status": "applied",
+  "previous_generation": 3,
+  "active_generation": 4,
+  "reloadable_changes": 5,
+  "routes_added": 1,
+  "routes_changed": 2,
+  "routes_removed": 0
+}
+```

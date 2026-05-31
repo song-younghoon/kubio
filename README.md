@@ -199,6 +199,7 @@ kubio remains local-first and process-local:
 - [Metrics](docs/metrics.md)
 - [Safety Model](docs/safety-model.md)
 - [Roadmap](docs/roadmap.md)
+- [v0.5.3 Design](.design/v0.5.3)
 - [v0.5.2 Release Notes](docs/release-notes-v0.5.2.md)
 - [v0.5.2 Design](.design/v0.5.2)
 - [v0.5.1 Release Notes](docs/release-notes-v0.5.1.md)

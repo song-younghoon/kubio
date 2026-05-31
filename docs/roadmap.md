@@ -132,10 +132,29 @@ v0.5.2:
   and completed task checklist.
 - Release notes: `docs/release-notes-v0.5.2.md`.
 
+v0.5.3:
+
+- Runtime config reload for safe behavioral changes.
+- Explicit reloadable vs restart-required config contract.
+- Live reload for mode, freshness, policy thresholds, adaptive reuse,
+  query-intelligence, response-header equivalence, route hints, debug headers,
+  and panic file path.
+- Keep listener sockets, TLS identity, protocol topology, origin, storage,
+  metrics path, and admin token restart-required.
+- Atomic reload apply with previous-good-config retention on parse,
+  validation, compatibility, or reconciliation failure.
+- Config generations so in-flight requests use the generation they started
+  with and new requests use the latest committed generation.
+- Observer evidence retention for compatible changes, with deterministic
+  demotion and purge for route or policy changes that invalidate prior proof.
+- CLI, admin API, Unix SIGHUP, dashboard, debug-header, metrics, and event
+  visibility for reload status and restart-required changes.
+- Design status: `.design/v0.5.3` records the runtime config reload plan and
+  planned task checklist.
+
 v0.5+ candidates:
 
 - Redis-compatible shared store.
 - Kubernetes deployment guide or operator.
 - GraphQL opt-in mode.
 - Further observer sharding beyond the v0.3 read/write lock split.
-- Runtime config reload.
