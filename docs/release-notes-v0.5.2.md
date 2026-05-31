@@ -1,6 +1,6 @@
 # kubio v0.5.2 Release Notes
 
-Status: implemented
+Status: released.
 
 v0.5.2 improves real API cache hit rates when origins attach dynamic response
 metadata to otherwise stable public responses.

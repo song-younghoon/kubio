@@ -10,7 +10,7 @@ origin service without a hosted control plane or required telemetry.
 
 ## Install
 
-v0.5.1 supports released binaries for Linux x86_64, Linux arm64, and Apple
+v0.5.2 supports released binaries for Linux x86_64, Linux arm64, and Apple
 Silicon macOS.
 
 | Host | Release target |
@@ -30,7 +30,7 @@ build from source.
 Common install variants:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.5.1 bash
+curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_VERSION=v0.5.2 bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_INSTALL_DIR=/usr/local/bin bash
 curl -fsSL https://raw.githubusercontent.com/song-younghoon/kubio/refs/heads/main/install.sh | KUBIO_FLAVOR=http3-experimental bash
 ```
