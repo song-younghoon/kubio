@@ -46,8 +46,7 @@ type route struct {
 }
 
 type pathPattern struct {
-	exact    string
-	prefix   string
+	path     string
 	wildcard bool
 }
 
@@ -96,14 +95,14 @@ func newRouter(cfg config) (http.Handler, error) {
 			return nil, fmt.Errorf("sites[%d].target must be set", siteIndex)
 		}
 
-		target, err := parseTarget(siteConfig.Target)
+		target, err := newProxy(siteConfig.Target)
 		if err != nil {
 			return nil, fmt.Errorf("sites[%d].target: %w", siteIndex, err)
 		}
 
 		s := site{
 			hosts:  siteConfig.Hosts,
-			target: httputil.NewSingleHostReverseProxy(target),
+			target: target,
 			routes: make([]route, 0, len(siteConfig.Routes)),
 		}
 
@@ -116,14 +115,14 @@ func newRouter(cfg config) (http.Handler, error) {
 				return nil, fmt.Errorf("sites[%d].routes[%d].target must be set", siteIndex, routeIndex)
 			}
 
-			routeTarget, err := parseTarget(routeConfig.Target)
+			routeTarget, err := newProxy(routeConfig.Target)
 			if err != nil {
 				return nil, fmt.Errorf("sites[%d].routes[%d].target: %w", siteIndex, routeIndex, err)
 			}
 
 			s.routes = append(s.routes, route{
 				pattern: pattern,
-				proxy:   httputil.NewSingleHostReverseProxy(routeTarget),
+				proxy:   routeTarget,
 				strip:   routeConfig.Strip,
 			})
 		}
@@ -162,7 +161,7 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	http.NotFound(w, req)
 }
 
-func parseTarget(raw string) (*url.URL, error) {
+func newProxy(raw string) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
@@ -170,7 +169,7 @@ func parseTarget(raw string) (*url.URL, error) {
 	if target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") {
 		return nil, fmt.Errorf("must be an absolute HTTP(S) URL")
 	}
-	return target, nil
+	return httputil.NewSingleHostReverseProxy(target), nil
 }
 
 func newPathPattern(raw string) (pathPattern, error) {
@@ -186,21 +185,21 @@ func newPathPattern(raw string) (pathPattern, error) {
 		if strings.Contains(prefix, "*") {
 			return pathPattern{}, fmt.Errorf("only a trailing /* wildcard is supported")
 		}
-		return pathPattern{prefix: prefix, wildcard: true}, nil
+		return pathPattern{path: prefix, wildcard: true}, nil
 	}
 	if strings.Contains(raw, "*") {
 		return pathPattern{}, fmt.Errorf("only a trailing /* wildcard is supported")
 	}
 
-	return pathPattern{exact: raw}, nil
+	return pathPattern{path: raw}, nil
 }
 
 func (p pathPattern) match(path string) (string, bool) {
 	if !p.wildcard {
-		return p.exact, path == p.exact
+		return p.path, path == p.path
 	}
-	if p.prefix == "" || path == p.prefix || strings.HasPrefix(path, p.prefix+"/") {
-		return p.prefix, true
+	if p.path == "" || path == p.path || strings.HasPrefix(path, p.path+"/") {
+		return p.path, true
 	}
 	return "", false
 }
