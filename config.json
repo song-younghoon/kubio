@@ -1,6 +1,9 @@
 {
   "listen": ":8080",
-  "proxy": {
-    "target": "http://localhost:3000"
-  }
+  "sites": [
+    {
+      "hosts": ["*"],
+      "target": "http://localhost:3000"
+    }
+  ]
 }
