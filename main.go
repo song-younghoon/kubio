@@ -645,8 +645,7 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if selectedRoute.route.strip {
-		req.URL.Path = stripPathPrefix(req.URL.Path, selectedRoute.prefix)
-		req.URL.RawPath = ""
+		stripRequestPath(req, selectedRoute.prefix)
 	}
 	selectedRoute.route.proxy.ServeHTTP(w, req)
 }
@@ -690,7 +689,7 @@ func newProxy(raw string, headers map[string]string, trustProxies []netip.Prefix
 func parseTarget(raw string) (*url.URL, error) {
 	target, err := url.Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid URL")
 	}
 	if !strings.EqualFold(target.Scheme, "http") && !strings.EqualFold(target.Scheme, "https") {
 		return nil, fmt.Errorf("must be an absolute HTTP(S) URL")
@@ -720,6 +719,18 @@ func validateTargetPort(target *url.URL) error {
 	}
 	if port == "" {
 		return nil
+	}
+	return validatePort(port)
+}
+
+func validatePort(port string) error {
+	if port == "" {
+		return fmt.Errorf("invalid port")
+	}
+	for i := 0; i < len(port); i++ {
+		if port[i] < '0' || port[i] > '9' {
+			return fmt.Errorf("invalid port")
+		}
 	}
 	value, err := strconv.Atoi(port)
 	if err != nil || value < 0 || value > 65535 {
@@ -797,6 +808,7 @@ func peerAddress(remote string) (netip.Addr, string) {
 	if err != nil {
 		return netip.Addr{}, ""
 	}
+	address = address.WithZone("")
 	return address, address.String()
 }
 
@@ -881,9 +893,9 @@ func validHeaderValue(value string) bool {
 }
 
 func restrictedHeader(name string) bool {
-	switch name {
-	case "Connection", "Proxy-Connection", "Keep-Alive", "Transfer-Encoding",
-		"TE", "Trailer", "Upgrade", "Content-Length":
+	switch strings.ToLower(name) {
+	case "connection", "proxy-connection", "keep-alive", "transfer-encoding",
+		"te", "trailer", "upgrade", "content-length":
 		return true
 	default:
 		return false
@@ -1016,6 +1028,67 @@ func stripPathPrefix(path, prefix string) string {
 	return path
 }
 
+func stripRequestPath(req *http.Request, prefix string) {
+	rawPath := req.URL.RawPath
+	req.URL.Path = stripPathPrefix(req.URL.Path, prefix)
+	if rawPath == "" || prefix == "" {
+		return
+	}
+	stripped, ok := stripEscapedPathPrefix(rawPath, prefix)
+	if !ok {
+		req.URL.RawPath = ""
+		return
+	}
+	req.URL.RawPath = stripped
+}
+
+func stripEscapedPathPrefix(rawPath, prefix string) (string, bool) {
+	decodedIndex := 0
+	for index := 0; index < len(rawPath); {
+		value, next, ok := escapedPathByte(rawPath, index)
+		if !ok || decodedIndex >= len(prefix) || value != prefix[decodedIndex] {
+			return "", false
+		}
+		decodedIndex++
+		index = next
+		if decodedIndex == len(prefix) {
+			return rawPath[index:], true
+		}
+	}
+	return "", false
+}
+
+func escapedPathByte(rawPath string, index int) (byte, int, bool) {
+	if rawPath[index] != '%' {
+		return rawPath[index], index + 1, true
+	}
+	if index+2 >= len(rawPath) {
+		return 0, 0, false
+	}
+	high, ok := hexDigit(rawPath[index+1])
+	if !ok {
+		return 0, 0, false
+	}
+	low, ok := hexDigit(rawPath[index+2])
+	if !ok {
+		return 0, 0, false
+	}
+	return high<<4 | low, index + 3, true
+}
+
+func hexDigit(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
 func newHostPatterns(raw []string) ([]hostPattern, error) {
 	patterns := make([]hostPattern, 0, len(raw))
 	for index, value := range raw {
@@ -1033,7 +1106,10 @@ func newHostPattern(raw string) (hostPattern, error) {
 		return hostPattern{}, fmt.Errorf("host pattern must not be empty or contain whitespace")
 	}
 
-	value := normalizeHost(raw)
+	value, err := normalizeConfiguredHost(raw)
+	if err != nil {
+		return hostPattern{}, err
+	}
 	if value == "*" {
 		return hostPattern{value: value}, nil
 	}
@@ -1058,6 +1134,24 @@ func newHostPattern(raw string) (hostPattern, error) {
 		return hostPattern{}, err
 	}
 	return hostPattern{value: value}, nil
+}
+
+func normalizeConfiguredHost(raw string) (string, error) {
+	if host, port, err := net.SplitHostPort(raw); err == nil {
+		if port == "" {
+			return "", fmt.Errorf("invalid host pattern %q", raw)
+		}
+		if err := validatePort(port); err != nil {
+			return "", fmt.Errorf("invalid host pattern %q: %w", raw, err)
+		}
+		raw = host
+	} else if strings.Contains(raw, ":") {
+		address := strings.Trim(raw, "[]")
+		if _, err := netip.ParseAddr(address); err != nil {
+			return "", fmt.Errorf("invalid host pattern %q", raw)
+		}
+	}
+	return normalizeHost(raw), nil
 }
 
 func validateHostName(value string) error {

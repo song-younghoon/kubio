@@ -138,12 +138,29 @@ func TestRouterChoosesMostSpecificSiteAndRoute(t *testing.T) {
 	}
 }
 
+func TestRouterReturnsNotFoundForUnknownHost(t *testing.T) {
+	backend := newTextBackend(t, "backend")
+	defer backend.Close()
+	handler, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"example.com"}, Target: backend.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNotFound)
+	}
+}
+
 func TestProxyAppliesHeadersAndForwardingRules(t *testing.T) {
 	type observation struct {
 		path     string
+		escaped  string
 		query    string
 		host     string
 		site     string
+		empty    bool
+		client   string
 		override string
 		route    string
 		xff      string
@@ -152,11 +169,15 @@ func TestProxyAppliesHeadersAndForwardingRules(t *testing.T) {
 	}
 	var got observation
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, empty := req.Header["X-Empty"]
 		got = observation{
 			path:     req.URL.Path,
+			escaped:  req.URL.EscapedPath(),
 			query:    req.URL.RawQuery,
 			host:     req.Host,
 			site:     req.Header.Get("X-Site"),
+			empty:    empty,
+			client:   req.Header.Get("X-Client"),
 			override: req.Header.Get("X-Override"),
 			route:    req.Header.Get("X-Route"),
 			xff:      req.Header.Get("X-Forwarded-For"),
@@ -174,6 +195,7 @@ func TestProxyAppliesHeadersAndForwardingRules(t *testing.T) {
 			Target: backend.URL,
 			Headers: map[string]string{
 				"X-Site":     "site",
+				"X-Empty":    "",
 				"X-Override": "site",
 				"Host":       "configured.example",
 			},
@@ -195,6 +217,7 @@ func TestProxyAppliesHeadersAndForwardingRules(t *testing.T) {
 	req.Host = "app.example:8080"
 	req.RemoteAddr = "198.51.100.7:1234"
 	req.Header.Set("X-Site", "client")
+	req.Header.Set("X-Client", "preserve")
 	req.Header.Set("X-Override", "client")
 	req.Header.Set("X-Forwarded-For", "spoofed")
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -207,7 +230,7 @@ func TestProxyAppliesHeadersAndForwardingRules(t *testing.T) {
 	if got.path != "/users" || got.query != "a=1;b=2" {
 		t.Fatalf("untrusted request = %q?%q, want %q?%q", got.path, got.query, "/users", "a=1;b=2")
 	}
-	if got.host != "configured.example" || got.site != "site" || got.override != "route" || got.route != "yes" {
+	if got.host != "configured.example" || got.site != "site" || !got.empty || got.client != "preserve" || got.override != "route" || got.route != "yes" {
 		t.Fatalf("configured headers = %#v", got)
 	}
 	if got.xff != "198.51.100.7" || got.xfp != "http" || got.xfh != "app.example:8080" {
@@ -228,6 +251,18 @@ func TestProxyAppliesHeadersAndForwardingRules(t *testing.T) {
 	if got.xff != "1.2.3.4, 192.0.2.7" || got.xfp != "https" || got.xfh != "public.example" {
 		t.Fatalf("trusted forwarded headers = %#v", got)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "http://proxy/api/a%2Fb", nil)
+	req.Host = "app.example:8080"
+	req.RemoteAddr = "198.51.100.7:1234"
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("escaped path status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if got.path != "/a/b" || got.escaped != "/a%2Fb" {
+		t.Fatalf("escaped path = %q (%q), want %q (%q)", got.path, got.escaped, "/a/b", "/a%2Fb")
+	}
 }
 
 func TestHeaderAndTargetValidation(t *testing.T) {
@@ -239,6 +274,7 @@ func TestHeaderAndTargetValidation(t *testing.T) {
 	for name, headers := range map[string]map[string]string{
 		"duplicate case": {"X-Test": "a", "x-test": "b"},
 		"managed":        {"Connection": "close"},
+		"managed te":     {"TE": "trailers"},
 		"bad name":       {"X Test": "value"},
 		"bad value":      {"X-Test": "line\nfeed"},
 		"unset env":      {"X-Test": "${KUBIO_NOT_SET}"},
@@ -267,6 +303,11 @@ func TestHeaderAndTargetValidation(t *testing.T) {
 			t.Errorf("parseTarget(%q): %v", target, err)
 		}
 	}
+	for _, host := range []string{"example.com:bad", "example.com:65536", "[::1]:bad"} {
+		if _, err := newHostPattern(host); err == nil {
+			t.Errorf("newHostPattern(%q) accepted invalid port", host)
+		}
+	}
 }
 
 func TestProxyErrorHandlerHidesUpstreamDetails(t *testing.T) {
@@ -291,11 +332,32 @@ func TestProxyErrorHandlerHidesUpstreamDetails(t *testing.T) {
 	}
 }
 
+func TestProxyPassesUpstreamResponse(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Backend", "ok")
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte("backend"))
+	}))
+	defer backend.Close()
+
+	handler, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: backend.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if res.Code != http.StatusTeapot || res.Header().Get("X-Backend") != "ok" || res.Body.String() != "backend" {
+		t.Fatalf("response = %d, headers=%v, body=%q", res.Code, res.Header(), res.Body.String())
+	}
+}
+
 func TestRouterMatchesWildcardHostAndStripsPathPrefix(t *testing.T) {
 	var gotPath string
+	var gotHost string
 	var gotHeaders map[string]string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		gotPath = req.URL.Path
+		gotHost = req.Host
 		gotHeaders = map[string]string{
 			"Authorization": req.Header.Get("Authorization"),
 			"X-Proxy":       req.Header.Get("X-Proxy"),
@@ -342,6 +404,9 @@ func TestRouterMatchesWildcardHostAndStripsPathPrefix(t *testing.T) {
 	}
 	if gotPath != "/users" {
 		t.Fatalf("backend path = %q, want %q", gotPath, "/users")
+	}
+	if gotHost != "api.example.com:8080" {
+		t.Fatalf("backend host = %q, want %q", gotHost, "api.example.com:8080")
 	}
 	if gotHeaders["Authorization"] != "Bearer route-token" {
 		t.Fatalf("authorization = %q, want %q", gotHeaders["Authorization"], "Bearer route-token")
