@@ -1,0 +1,146 @@
+Kubio kubio.json v0.2 Specification
+Status: Agreed specification
+Base: v0.1
+
+
+1. Scope
+
+v0.2 adds named backends containing one or more upstream targets and
+deterministic round-robin selection.
+
+All v0.1 behavior remains unchanged unless a site or route selects a backend.
+Every valid v0.1 configuration remains valid in v0.2.
+
+
+2. Configuration
+
+The optional top-level backends field is an object. It defaults to an empty
+object.
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": [
+            "http://app-1:3000",
+            "http://app-2:3000"
+          ]
+        }
+      },
+      "sites": [
+        {
+          "hosts": ["example.com"],
+          "backend": "app",
+          "routes": [
+            {
+              "path": "/legacy/*",
+              "target": "http://legacy:3000"
+            }
+          ]
+        }
+      ]
+    }
+
+Each property name in backends is a backend name. Names:
+
+- Must be non-empty.
+- Are case-sensitive.
+- Are matched exactly without trimming or normalization.
+
+Each backend object has exactly one field:
+
+- targets: required non-empty array of strings.
+
+Every targets element must be a valid v0.1 target URL. Duplicate target strings
+within one backend are configuration errors. Unknown backend fields are errors.
+
+
+3. Site and route selection
+
+A site must contain exactly one of:
+
+- target: a v0.1 target URL.
+- backend: a non-empty string naming a defined backend.
+
+Specifying both or neither is a configuration error.
+
+A route may contain:
+
+- target,
+- backend, or
+- neither.
+
+Specifying both target and backend is a configuration error. A route specifying
+neither inherits the site's target or backend. A route specifying either field
+replaces the site's selection completely.
+
+The selected route does not merge backend or target selection with another
+route. Header inheritance, route priority, path matching, stripping, and all
+other v0.1 behavior are unchanged.
+
+Every backend reference must match a backend defined in the same configuration.
+Unused backend definitions are valid.
+
+
+4. Round-robin behavior
+
+Each named backend has one selector shared by every site and route that
+references it.
+
+A newly built backend starts at targets index 0. Each request resolved to that
+backend atomically:
+
+1. Selects the current index.
+2. Advances the index to the next array position, wrapping to index 0.
+3. Uses the selected target for that request.
+
+Concurrent selections are serialized into one total selection order. Therefore,
+for a backend with targets A, B, and C, the selection sequence is always A, B,
+C, A, B, C in that order. Concurrent request arrival or scheduling does not
+change this sequence, although it may change which request obtains each
+position.
+
+Selection occurs once when Kubio prepares the upstream request. A selection is
+consumed even if the client disconnects or the upstream request fails. Direct
+target requests do not affect backend state. Different named backends have
+independent state.
+
+
+5. Failures
+
+Failures after target selection are handled identically to failures for a direct
+target. They consume the selection and do not select another target. Upstream
+HTTP statuses are passed through and consume the selection normally.
+
+
+6. Validation and reload
+
+The v0.1 JSON, unknown-field, duplicate-key, startup, and atomic reload rules
+continue to apply.
+
+Validation additionally rejects:
+
+- A non-object backends value.
+- An empty backend name.
+- A non-object backend definition.
+- A missing, non-array, or empty targets field.
+- A non-string or v0.1-invalid target in targets.
+- Duplicate target strings within one backend.
+- An unknown field in a backend definition.
+- A non-string or empty backend reference.
+- A reference to an undefined backend.
+- A site containing both target and backend, or neither.
+- A route containing both target and backend.
+
+A failed reload preserves the active router and all of its round-robin state.
+
+On a successful reload, the new router receives new backend selectors. Every
+backend starts again at targets index 0, including an unchanged backend with the
+same name and targets. In-flight requests continue with the previous router and
+its state; requests entering the new router use the reset state.
+
+
+7. Deferred features
+
+v0.2 does not add retries or failover, health checks, or weighted targets. All
+features deferred by v0.1 remain deferred.

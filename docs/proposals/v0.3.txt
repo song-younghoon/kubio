@@ -1,27 +1,27 @@
-Kubio kubio.json v0.2 Proposal
+Kubio kubio.json v0.3 Proposal
 Status: Deferred features; discussion not started
-Base: v0.1
+Base: v0.2
 
 
 1. Purpose
 
-This file contains only features deferred from v0.1. It is not a specification
-yet. Each item must be discussed and narrowed before v0.2 is finalized.
+This file carries forward features excluded from v0.2. It is not a
+specification yet. The scope must be narrowed and each selected item must be
+fully defined before v0.3 is finalized.
 
 
-2. Named backends
+2. Backend resilience and upstream transport
 
-Add reusable named backend definitions so routes do not need to contain all
-upstream behavior.
+Consider extending v0.2 backends with:
 
-Potential additions:
-
-- Multiple upstream targets.
-- Round-robin load balancing.
-- Active health checks.
 - Retry and failover rules.
-- Per-backend connection and response timeouts.
+- Active or passive health checks.
+- Weighted target selection.
+- Per-backend connection and response-header timeouts.
 - HTTPS upstream CA and SNI settings.
+
+Retry safety, health state, selection priority, timeout inheritance, and reload
+behavior must be defined before implementation.
 
 
 3. Additional route matching
@@ -44,7 +44,7 @@ Consider extending headers beyond v0.1 request injection:
 - Response header set.
 - Header removal.
 - Multiple header values.
-- Explicit set/add/remove operation ordering.
+- Explicit set, add, and remove operation ordering.
 
 
 5. Client-facing TLS
@@ -57,13 +57,7 @@ Consider TLS termination on Kubio's public listener:
 - Automatic ACME certificates.
 
 
-6. Configurable timeouts
-
-Consider moving v0.1's fixed upstream timeout values into kubio.json, with
-clear inheritance and streaming semantics.
-
-
-7. Observability and administration
+6. Observability and administration
 
 Consider:
 
@@ -73,7 +67,7 @@ Consider:
 - Reload status reporting.
 
 
-8. Additional proxy protocols and routing actions
+7. Additional proxy protocols and routing actions
 
 Consider:
 
@@ -85,7 +79,7 @@ Consider:
 - Custom error bodies.
 
 
-9. Application gateway features
+8. Application gateway features
 
 Consider only when there is a concrete use case:
 
