@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -26,6 +27,9 @@ const (
 
 	proxyDialTimeout         = 5 * time.Second
 	proxyResponseHeaderLimit = 30 * time.Second
+	proxyBufferSize          = 32 * 1024
+	proxyMaxIdleConnsPerHost = 32
+	routeIndexThreshold      = 8
 )
 
 var proxyTransport = func() *http.Transport {
@@ -33,8 +37,28 @@ var proxyTransport = func() *http.Transport {
 	transport.DialContext = (&net.Dialer{Timeout: proxyDialTimeout}).DialContext
 	transport.TLSHandshakeTimeout = proxyDialTimeout
 	transport.ResponseHeaderTimeout = proxyResponseHeaderLimit
+	transport.MaxIdleConnsPerHost = proxyMaxIdleConnsPerHost
 	return transport
 }()
+
+var proxyBuffers proxyBufferPool
+
+type proxyBufferPool struct {
+	pool sync.Pool
+}
+
+func (p *proxyBufferPool) Get() []byte {
+	if buffer := p.pool.Get(); buffer != nil {
+		return buffer.([]byte)
+	}
+	return make([]byte, proxyBufferSize)
+}
+
+func (p *proxyBufferPool) Put(buffer []byte) {
+	if cap(buffer) == proxyBufferSize {
+		p.pool.Put(buffer[:proxyBufferSize])
+	}
+}
 
 type config struct {
 	Listen       string       `json:"listen"`
@@ -150,14 +174,19 @@ func (b *strictBool) UnmarshalJSON(data []byte) error {
 }
 
 type router struct {
-	sites        []site
-	trustProxies []netip.Prefix
+	sites         []site
+	trustProxies  []netip.Prefix
+	exactHosts    map[string]int
+	wildcardHosts map[string]int
+	starSite      int
 }
 
 type site struct {
-	hosts  []hostPattern
-	target *httputil.ReverseProxy
-	routes []route
+	hosts          []hostPattern
+	target         *httputil.ReverseProxy
+	routes         []route
+	exactRoutes    map[string]int
+	wildcardRoutes map[string]int
 }
 
 type route struct {
@@ -461,8 +490,11 @@ func newRouter(cfg config) (*router, error) {
 	}
 
 	r := &router{
-		sites:        make([]site, 0, len(cfg.Sites)),
-		trustProxies: trustProxies,
+		sites:         make([]site, 0, len(cfg.Sites)),
+		trustProxies:  trustProxies,
+		exactHosts:    make(map[string]int),
+		wildcardHosts: make(map[string]int),
+		starSite:      -1,
 	}
 
 	for siteIndex, siteConfig := range cfg.Sites {
@@ -519,8 +551,28 @@ func newRouter(cfg config) (*router, error) {
 				strip:   routeConfig.Strip,
 			})
 		}
+		if len(s.routes) > routeIndexThreshold {
+			s.buildRouteIndex()
+		}
 
+		siteIndex := len(r.sites)
 		r.sites = append(r.sites, s)
+		for _, host := range hosts {
+			switch {
+			case host.value == "*":
+				if r.starSite < 0 {
+					r.starSite = siteIndex
+				}
+			case host.wildcard:
+				if _, exists := r.wildcardHosts[host.suffix]; !exists {
+					r.wildcardHosts[host.suffix] = siteIndex
+				}
+			default:
+				if _, exists := r.exactHosts[host.value]; !exists {
+					r.exactHosts[host.value] = siteIndex
+				}
+			}
+		}
 	}
 
 	return r, nil
@@ -604,41 +656,13 @@ func statConfig(path string) (fileState, error) {
 
 func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	host := normalizeHost(req.Host)
-
-	var selected *site
-	var selectedScore hostScore
-	for index := range r.sites {
-		score, ok := bestHostMatch(host, r.sites[index].hosts)
-		if !ok {
-			continue
-		}
-		if selected == nil || betterHostScore(score, selectedScore) {
-			selected = &r.sites[index]
-			selectedScore = score
-		}
-	}
+	selected := r.selectSite(host)
 	if selected == nil {
 		http.NotFound(w, req)
 		return
 	}
 
-	var selectedRoute routeCandidate
-	for index := range selected.routes {
-		prefix, ok := selected.routes[index].pattern.match(req.URL.Path)
-		if !ok {
-			continue
-		}
-		candidate := routeCandidate{
-			route:  &selected.routes[index],
-			prefix: prefix,
-			exact:  !selected.routes[index].pattern.wildcard,
-			depth:  selected.routes[index].pattern.depth,
-			index:  index,
-		}
-		if selectedRoute.route == nil || betterRoute(candidate, selectedRoute) {
-			selectedRoute = candidate
-		}
-	}
+	selectedRoute := selected.selectRoute(req.URL.Path)
 
 	if selectedRoute.route == nil {
 		selected.target.ServeHTTP(w, req)
@@ -648,6 +672,108 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		stripRequestPath(req, selectedRoute.prefix)
 	}
 	selectedRoute.route.proxy.ServeHTTP(w, req)
+}
+
+func (s *site) buildRouteIndex() {
+	s.exactRoutes = make(map[string]int, len(s.routes))
+	s.wildcardRoutes = make(map[string]int, len(s.routes))
+	for index := range s.routes {
+		pattern := s.routes[index].pattern
+		if pattern.wildcard {
+			s.wildcardRoutes[pattern.path] = index
+		} else {
+			s.exactRoutes[pattern.path] = index
+		}
+	}
+}
+
+func (s *site) selectRoute(path string) routeCandidate {
+	if s.exactRoutes == nil {
+		var selected routeCandidate
+		for index := range s.routes {
+			prefix, ok := s.routes[index].pattern.match(path)
+			if !ok {
+				continue
+			}
+			candidate := s.routeCandidate(index)
+			candidate.prefix = prefix
+			if selected.route == nil || betterRoute(candidate, selected) {
+				selected = candidate
+			}
+		}
+		return selected
+	}
+
+	if index, ok := s.exactRoutes[path]; ok {
+		return s.routeCandidate(index)
+	}
+
+	var selected routeCandidate
+	if index, ok := s.wildcardRoutes[""]; ok {
+		selected = s.routeCandidate(index)
+	}
+	for index := 1; index < len(path); index++ {
+		if path[index] != '/' {
+			continue
+		}
+		if routeIndex, ok := s.wildcardRoutes[path[:index]]; ok {
+			candidate := s.routeCandidate(routeIndex)
+			if selected.route == nil || betterRoute(candidate, selected) {
+				selected = candidate
+			}
+		}
+	}
+	if routeIndex, ok := s.wildcardRoutes[path]; ok {
+		candidate := s.routeCandidate(routeIndex)
+		if selected.route == nil || betterRoute(candidate, selected) {
+			selected = candidate
+		}
+	}
+	return selected
+}
+
+func (s *site) routeCandidate(index int) routeCandidate {
+	route := &s.routes[index]
+	return routeCandidate{
+		route:  route,
+		prefix: route.pattern.path,
+		exact:  !route.pattern.wildcard,
+		depth:  route.pattern.depth,
+		index:  index,
+	}
+}
+
+func (r *router) selectSite(host string) *site {
+	if len(r.sites) == 1 {
+		if _, ok := bestHostMatch(host, r.sites[0].hosts); ok {
+			return &r.sites[0]
+		}
+		return nil
+	}
+	if r.exactHosts == nil && r.wildcardHosts == nil {
+		var selected *site
+		var selectedScore hostScore
+		for index := range r.sites {
+			score, ok := bestHostMatch(host, r.sites[index].hosts)
+			if ok && (selected == nil || betterHostScore(score, selectedScore)) {
+				selected = &r.sites[index]
+				selectedScore = score
+			}
+		}
+		return selected
+	}
+	if index, ok := r.exactHosts[host]; ok {
+		return &r.sites[index]
+	}
+	if dot := strings.IndexByte(host, '.'); dot > 0 && dot+1 < len(host) {
+		if index, ok := r.wildcardHosts[host[dot+1:]]; ok {
+			return &r.sites[index]
+		}
+	}
+	if r.starSite >= 0 {
+		return &r.sites[r.starSite]
+	}
+	return nil
 }
 
 func betterRoute(candidate, current routeCandidate) bool {
@@ -681,6 +807,7 @@ func newProxy(raw string, headers map[string]string, trustProxies []netip.Prefix
 			}
 		},
 		Transport:    proxyTransport,
+		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
 	return proxy, nil
@@ -1220,8 +1347,10 @@ func (p hostPattern) match(host string) (hostScore, bool) {
 }
 
 func normalizeHost(raw string) string {
-	if host, _, err := net.SplitHostPort(raw); err == nil {
-		raw = host
+	if strings.Contains(raw, ":") {
+		if host, _, err := net.SplitHostPort(raw); err == nil {
+			raw = host
+		}
 	}
 	return strings.ToLower(strings.TrimSuffix(strings.Trim(raw, "[]"), "."))
 }

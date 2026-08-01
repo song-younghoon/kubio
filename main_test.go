@@ -152,6 +152,53 @@ func TestRouterReturnsNotFoundForUnknownHost(t *testing.T) {
 	}
 }
 
+func TestIndexedRouteSelectionPreservesPriority(t *testing.T) {
+	all := newTextBackend(t, "all")
+	api := newTextBackend(t, "api")
+	apiLast := newTextBackend(t, "api-last")
+	admin := newTextBackend(t, "admin")
+	health := newTextBackend(t, "health")
+	defer all.Close()
+	defer api.Close()
+	defer apiLast.Close()
+	defer admin.Close()
+	defer health.Close()
+
+	routeConfigs := []routeConfig{
+		{Path: "/*", Target: all.URL},
+		{Path: "/api/*", Target: api.URL},
+		{Path: "/api/admin/*", Target: admin.URL},
+		{Path: "/health", Target: health.URL},
+		{Path: "/unused-a", Target: all.URL},
+		{Path: "/unused-b", Target: all.URL},
+		{Path: "/unused-c", Target: all.URL},
+		{Path: "/unused-d", Target: all.URL},
+		{Path: "/unused-e", Target: all.URL},
+		{Path: "/api/*", Target: apiLast.URL},
+	}
+	handler, err := newRouter(config{Sites: []siteConfig{{
+		Hosts:  []string{"*"},
+		Target: all.URL,
+		Routes: routeConfigs,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{path: "/", want: "all"},
+		{path: "/api/users", want: "api-last"},
+		{path: "/api/admin/users", want: "admin"},
+		{path: "/health", want: "health"},
+	} {
+		if got := proxyResponse(t, handler, "anything", test.path); got != test.want {
+			t.Errorf("path %q = %q, want %q", test.path, got, test.want)
+		}
+	}
+}
+
 func TestProxyAppliesHeadersAndForwardingRules(t *testing.T) {
 	type observation struct {
 		path     string
