@@ -18,15 +18,17 @@ type config struct {
 }
 
 type siteConfig struct {
-	Hosts  []string      `json:"hosts"`
-	Target string        `json:"target"`
-	Routes []routeConfig `json:"routes"`
+	Hosts   []string          `json:"hosts"`
+	Target  string            `json:"target"`
+	Headers map[string]string `json:"headers"`
+	Routes  []routeConfig     `json:"routes"`
 }
 
 type routeConfig struct {
-	Path   string `json:"path"`
-	Target string `json:"target"`
-	Strip  bool   `json:"strip"`
+	Path    string            `json:"path"`
+	Target  string            `json:"target"`
+	Headers map[string]string `json:"headers"`
+	Strip   bool              `json:"strip"`
 }
 
 type router struct {
@@ -95,7 +97,12 @@ func newRouter(cfg config) (http.Handler, error) {
 			return nil, fmt.Errorf("sites[%d].target must be set", siteIndex)
 		}
 
-		target, err := newProxy(siteConfig.Target)
+		siteHeaders, err := resolveHeaders(siteConfig.Headers)
+		if err != nil {
+			return nil, fmt.Errorf("sites[%d].headers: %w", siteIndex, err)
+		}
+
+		target, err := newProxy(siteConfig.Target, siteHeaders)
 		if err != nil {
 			return nil, fmt.Errorf("sites[%d].target: %w", siteIndex, err)
 		}
@@ -115,7 +122,12 @@ func newRouter(cfg config) (http.Handler, error) {
 				return nil, fmt.Errorf("sites[%d].routes[%d].target must be set", siteIndex, routeIndex)
 			}
 
-			routeTarget, err := newProxy(routeConfig.Target)
+			routeHeaders, err := resolveHeaders(routeConfig.Headers)
+			if err != nil {
+				return nil, fmt.Errorf("sites[%d].routes[%d].headers: %w", siteIndex, routeIndex, err)
+			}
+
+			routeTarget, err := newProxy(routeConfig.Target, mergeHeaders(siteHeaders, routeHeaders))
 			if err != nil {
 				return nil, fmt.Errorf("sites[%d].routes[%d].target: %w", siteIndex, routeIndex, err)
 			}
@@ -161,7 +173,7 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	http.NotFound(w, req)
 }
 
-func newProxy(raw string) (*httputil.ReverseProxy, error) {
+func newProxy(raw string, headers map[string]string) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
@@ -169,7 +181,95 @@ func newProxy(raw string) (*httputil.ReverseProxy, error) {
 	if target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") {
 		return nil, fmt.Errorf("must be an absolute HTTP(S) URL")
 	}
-	return httputil.NewSingleHostReverseProxy(target), nil
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	if len(headers) == 0 {
+		return proxy, nil
+	}
+
+	director := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		director(req)
+		for name, value := range headers {
+			if name == "Host" {
+				req.Host = value
+				continue
+			}
+			req.Header.Set(name, value)
+		}
+	}
+	return proxy, nil
+}
+
+func resolveHeaders(raw map[string]string) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	headers := make(map[string]string, len(raw))
+	for name, value := range raw {
+		if name == "" {
+			return nil, fmt.Errorf("header name must not be empty")
+		}
+
+		name = http.CanonicalHeaderKey(name)
+		if _, exists := headers[name]; exists {
+			return nil, fmt.Errorf("duplicate header name %q", name)
+		}
+
+		value, err := expandEnv(value)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", name, err)
+		}
+		headers[name] = value
+	}
+	return headers, nil
+}
+
+func mergeHeaders(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	headers := make(map[string]string, len(base)+len(override))
+	for name, value := range base {
+		headers[name] = value
+	}
+	for name, value := range override {
+		headers[name] = value
+	}
+	return headers
+}
+
+func expandEnv(value string) (string, error) {
+	var expanded strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] == '\\' && i+1 < len(value) && (value[i+1] == '\\' || value[i+1] == '$') {
+			expanded.WriteByte(value[i+1])
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(value[i:], "${") {
+			end := strings.IndexByte(value[i+2:], '}')
+			if end < 0 {
+				return "", fmt.Errorf("unterminated environment variable")
+			}
+
+			name := value[i+2 : i+2+end]
+			if name == "" {
+				return "", fmt.Errorf("environment variable name must not be empty")
+			}
+			env, ok := os.LookupEnv(name)
+			if !ok {
+				return "", fmt.Errorf("environment variable %q is not set", name)
+			}
+			expanded.WriteString(env)
+			i += 2 + end + 1
+			continue
+		}
+		expanded.WriteByte(value[i])
+		i++
+	}
+	return expanded.String(), nil
 }
 
 func newPathPattern(raw string) (pathPattern, error) {
