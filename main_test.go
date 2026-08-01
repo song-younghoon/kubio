@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -65,6 +67,365 @@ func TestDecodeConfigIsStrict(t *testing.T) {
 				t.Fatal("invalid config was accepted")
 			}
 		})
+	}
+}
+
+func TestDecodeConfigSupportsBackends(t *testing.T) {
+	data := `{
+  "listen": ":8080",
+  "backends": {
+    "app": {"targets": ["http://app-1:3000", "http://app-2:3000"]}
+  },
+  "sites": [{
+    "hosts": ["*"],
+    "backend": "app",
+    "routes": [
+      {"path": "/inherited/*"},
+      {"path": "/direct/*", "target": "http://legacy:3000"},
+      {"path": "/named/*", "backend": "app"}
+    ]
+  }]
+}`
+	cfg, err := decodeConfig([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Backends["app"].Targets; len(got) != 2 || got[0] != "http://app-1:3000" || got[1] != "http://app-2:3000" {
+		t.Fatalf("backend targets = %v", got)
+	}
+	if cfg.Sites[0].Backend != "app" || cfg.Sites[0].Routes[0].Target != "" || cfg.Sites[0].Routes[0].Backend != "" ||
+		cfg.Sites[0].Routes[1].Target != "http://legacy:3000" || cfg.Sites[0].Routes[2].Backend != "app" {
+		t.Fatalf("decoded selections = %#v", cfg.Sites[0])
+	}
+
+	invalid := map[string]string{
+		"null backends":            `{"listen":":8080","backends":null,"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"non-object backends":      `{"listen":":8080","backends":[],"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"empty backend name":       `{"listen":":8080","backends":{"":{"targets":["http://localhost:3000"]}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"null backend":             `{"listen":":8080","backends":{"app":null},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"missing targets":          `{"listen":":8080","backends":{"app":{}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"null targets":             `{"listen":":8080","backends":{"app":{"targets":null}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"non-array targets":        `{"listen":":8080","backends":{"app":{"targets":"http://localhost:3000"}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"empty targets":            `{"listen":":8080","backends":{"app":{"targets":[]}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"non-string target":        `{"listen":":8080","backends":{"app":{"targets":[1]}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"unknown backend field":    `{"listen":":8080","backends":{"app":{"targets":["http://localhost:3000"],"extra":true}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"duplicate backend key":    `{"listen":":8080","backends":{"app":{"targets":["http://localhost:3000"]},"app":{"targets":["http://localhost:4000"]}},"sites":[{"hosts":["*"],"target":"http://localhost:3000"}]}`,
+		"site both selections":     `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://localhost:3000","backend":"app"}]}`,
+		"site neither selection":   `{"listen":":8080","sites":[{"hosts":["*"]}]}`,
+		"empty site backend":       `{"listen":":8080","sites":[{"hosts":["*"],"backend":""}]}`,
+		"non-string site backend":  `{"listen":":8080","sites":[{"hosts":["*"],"backend":1}]}`,
+		"null target with backend": `{"listen":":8080","backends":{"app":{"targets":["http://localhost:3000"]}},"sites":[{"hosts":["*"],"target":null,"backend":"app"}]}`,
+		"null backend with target": `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://localhost:3000","backend":null}]}`,
+		"route both selections":    `{"listen":":8080","backends":{"app":{"targets":["http://localhost:3000"]}},"sites":[{"hosts":["*"],"backend":"app","routes":[{"path":"/*","target":"http://localhost:4000","backend":"app"}]}]}`,
+		"empty route backend":      `{"listen":":8080","backends":{"app":{"targets":["http://localhost:3000"]}},"sites":[{"hosts":["*"],"backend":"app","routes":[{"path":"/*","backend":""}]}]}`,
+		"non-string route backend": `{"listen":":8080","backends":{"app":{"targets":["http://localhost:3000"]}},"sites":[{"hosts":["*"],"backend":"app","routes":[{"path":"/*","backend":1}]}]}`,
+		"null route backend":       `{"listen":":8080","backends":{"app":{"targets":["http://localhost:3000"]}},"sites":[{"hosts":["*"],"backend":"app","routes":[{"path":"/*","backend":null}]}]}`,
+	}
+	for name, raw := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeConfig([]byte(raw)); err == nil {
+				t.Fatal("invalid config was accepted")
+			}
+		})
+	}
+}
+
+func TestBackendValidation(t *testing.T) {
+	directSite := siteConfig{Hosts: []string{"*"}, Target: "http://localhost:3000"}
+	tests := map[string]config{
+		"empty backend name": {
+			Backends: map[string]backendConfig{"": {Targets: []string{"http://localhost:3000"}}},
+			Sites:    []siteConfig{directSite},
+		},
+		"empty targets": {
+			Backends: map[string]backendConfig{"app": {}},
+			Sites:    []siteConfig{directSite},
+		},
+		"duplicate targets": {
+			Backends: map[string]backendConfig{"app": {Targets: []string{"http://localhost:3000", "http://localhost:3000"}}},
+			Sites:    []siteConfig{directSite},
+		},
+		"invalid target": {
+			Backends: map[string]backendConfig{"app": {Targets: []string{"http://localhost:3000/path"}}},
+			Sites:    []siteConfig{directSite},
+		},
+		"undefined site backend": {
+			Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "missing"}},
+		},
+		"case-sensitive reference": {
+			Backends: map[string]backendConfig{"App": {Targets: []string{"http://localhost:3000"}}},
+			Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+		},
+		"site both selections": {
+			Backends: map[string]backendConfig{"app": {Targets: []string{"http://localhost:3000"}}},
+			Sites:    []siteConfig{{Hosts: []string{"*"}, Target: "http://localhost:3000", Backend: "app"}},
+		},
+		"site neither selection": {
+			Sites: []siteConfig{{Hosts: []string{"*"}}},
+		},
+		"route both selections": {
+			Backends: map[string]backendConfig{"app": {Targets: []string{"http://localhost:3000"}}},
+			Sites: []siteConfig{{
+				Hosts: []string{"*"}, Target: "http://localhost:3000",
+				Routes: []routeConfig{{Path: "/*", Target: "http://localhost:4000", Backend: "app"}},
+			}},
+		},
+		"undefined route backend": {
+			Sites: []siteConfig{{
+				Hosts: []string{"*"}, Target: "http://localhost:3000",
+				Routes: []routeConfig{{Path: "/*", Backend: "missing"}},
+			}},
+		},
+	}
+	for name, cfg := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := newRouter(cfg); err == nil {
+				t.Fatal("invalid config was accepted")
+			}
+		})
+	}
+
+	if _, err := newRouter(config{
+		Backends: map[string]backendConfig{
+			" unused ": {Targets: []string{"http://localhost:4000"}},
+		},
+		Sites: []siteConfig{directSite},
+	}); err != nil {
+		t.Fatalf("valid unused backend rejected: %v", err)
+	}
+}
+
+func TestBackendRoundRobinIsSharedAndRoutesInherit(t *testing.T) {
+	newObservedBackend := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			_, _ = w.Write([]byte(name + "|" + req.URL.Path + "|" + req.Header.Get("X-Site") + "|" + req.Header.Get("X-Route")))
+		}))
+	}
+	a := newObservedBackend("a")
+	b := newObservedBackend("b")
+	c := newObservedBackend("c")
+	direct := newObservedBackend("direct")
+	defer a.Close()
+	defer b.Close()
+	defer c.Close()
+	defer direct.Close()
+
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{
+			"app":   {Targets: []string{a.URL, b.URL, c.URL}},
+			"other": {Targets: []string{c.URL, a.URL}},
+		},
+		Sites: []siteConfig{
+			{
+				Hosts:   []string{"one.test"},
+				Backend: "app",
+				Headers: map[string]string{"X-Site": "site"},
+				Routes: []routeConfig{
+					{Path: "/inherit/*", Headers: map[string]string{"X-Route": "inherit"}, Strip: true},
+					{Path: "/same/*", Backend: "app"},
+					{Path: "/direct/*", Target: direct.URL},
+					{Path: "/other/*", Backend: "other"},
+				},
+			},
+			{Hosts: []string{"two.test"}, Backend: "app"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requests := []struct {
+		host string
+		path string
+		want string
+	}{
+		{host: "one.test", path: "/", want: "a|/|site|"},
+		{host: "one.test", path: "/inherit/users", want: "b|/users|site|inherit"},
+		{host: "two.test", path: "/", want: "c|/||"},
+		{host: "one.test", path: "/same/value", want: "a|/same/value|site|"},
+		{host: "one.test", path: "/direct/value", want: "direct|/direct/value|site|"},
+		{host: "one.test", path: "/", want: "b|/|site|"},
+		{host: "one.test", path: "/other/value", want: "c|/other/value|site|"},
+		{host: "one.test", path: "/", want: "c|/|site|"},
+		{host: "one.test", path: "/other/value", want: "a|/other/value|site|"},
+	}
+	for _, request := range requests {
+		if got := proxyResponse(t, handler, request.host, request.path); got != request.want {
+			t.Errorf("%s %s = %q, want %q", request.host, request.path, got, request.want)
+		}
+	}
+}
+
+func TestBackendSelectionIsConsumedOnFailureAndStatus(t *testing.T) {
+	closed := newTextBackend(t, "closed")
+	closedURL := closed.URL
+	closed.Close()
+	healthy := newTextBackend(t, "healthy")
+	defer healthy.Close()
+
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {Targets: []string{closedURL, healthy.URL}}},
+		Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("failed target status = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+	if got := proxyResponse(t, handler, "proxy", "/"); got != "healthy" {
+		t.Fatalf("target after failure = %q, want healthy", got)
+	}
+
+	first := newTextBackend(t, "first")
+	second := newTextBackend(t, "second")
+	defer first.Close()
+	defer second.Close()
+	canceledHandler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {Targets: []string{first.URL, second.URL}}},
+		Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "http://proxy/", nil).WithContext(ctx)
+	canceledHandler.ServeHTTP(httptest.NewRecorder(), request)
+	if got := proxyResponse(t, canceledHandler, "proxy", "/"); got != "second" {
+		t.Fatalf("target after client cancellation = %q, want second", got)
+	}
+
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer unavailable.Close()
+	statusHandler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {Targets: []string{unavailable.URL, healthy.URL}}},
+		Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = httptest.NewRecorder()
+	statusHandler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("upstream status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+	if got := proxyResponse(t, statusHandler, "proxy", "/"); got != "healthy" {
+		t.Fatalf("target after upstream status = %q, want healthy", got)
+	}
+}
+
+func TestBackendSelectionIsConcurrencySafe(t *testing.T) {
+	backend, err := newBackend([]string{"http://a:3000", "http://b:3000", "http://c:3000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const requests = 300
+	start := make(chan struct{})
+	selected := make(chan string, requests)
+	var workers sync.WaitGroup
+	workers.Add(requests)
+	for range requests {
+		go func() {
+			defer workers.Done()
+			<-start
+			selected <- backend.nextTarget().Hostname()
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(selected)
+
+	counts := map[string]int{}
+	for host := range selected {
+		counts[host]++
+	}
+	for _, host := range []string{"a", "b", "c"} {
+		if counts[host] != requests/3 {
+			t.Fatalf("selection counts = %v", counts)
+		}
+	}
+}
+
+func TestBackendStateSurvivesFailedReloadAndResetsOnSuccess(t *testing.T) {
+	a := newTextBackend(t, "a")
+	b := newTextBackend(t, "b")
+	defer a.Close()
+	defer b.Close()
+	cfg := config{
+		Backends: map[string]backendConfig{"app": {Targets: []string{a.URL, b.URL}}},
+		Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	}
+	initial, err := newRouter(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newReloadableRouter(initial)
+	if got := proxyResponse(t, handler, "proxy", "/"); got != "a" {
+		t.Fatalf("initial target = %q, want a", got)
+	}
+	if _, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "missing"}}}); err == nil {
+		t.Fatal("invalid reload was accepted")
+	}
+	if got := proxyResponse(t, handler, "proxy", "/"); got != "b" {
+		t.Fatalf("target after failed reload = %q, want b", got)
+	}
+
+	reloaded, err := newRouter(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.Store(reloaded)
+	if got := proxyResponse(t, handler, "proxy", "/"); got != "a" {
+		t.Fatalf("target after successful reload = %q, want a", got)
+	}
+}
+
+func TestInFlightBackendRequestKeepsPreviousRouter(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	oldA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		entered <- struct{}{}
+		<-release
+		_, _ = w.Write([]byte("old"))
+	}))
+	oldB := newTextBackend(t, "old-b")
+	newA := newTextBackend(t, "new")
+	newB := newTextBackend(t, "new-b")
+	defer oldA.Close()
+	defer oldB.Close()
+	defer newA.Close()
+	defer newB.Close()
+	defer close(release)
+
+	build := func(first, second string) *router {
+		router, err := newRouter(config{
+			Backends: map[string]backendConfig{"app": {Targets: []string{first, second}}},
+			Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return router
+	}
+	handler := newReloadableRouter(build(oldA.URL, oldB.URL))
+	oldResult := make(chan string, 1)
+	go func() {
+		oldResult <- proxyResponse(t, handler, "proxy", "/")
+	}()
+	<-entered
+	handler.Store(build(newA.URL, newB.URL))
+	if got := proxyResponse(t, handler, "proxy", "/"); got != "new" {
+		t.Fatalf("new router target = %q, want new", got)
+	}
+	release <- struct{}{}
+	if got := <-oldResult; got != "old" {
+		t.Fatalf("in-flight target = %q, want old", got)
 	}
 }
 

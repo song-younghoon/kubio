@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,11 @@ type proxyBufferPool struct {
 	pool sync.Pool
 }
 
+type backend struct {
+	targets   []*url.URL
+	nextIndex atomic.Uint64
+}
+
 func (p *proxyBufferPool) Get() []byte {
 	if buffer := p.pool.Get(); buffer != nil {
 		return buffer.([]byte)
@@ -49,31 +55,80 @@ func (p *proxyBufferPool) Put(buffer []byte) {
 	}
 }
 
+func newBackend(rawTargets []string) (*backend, error) {
+	if len(rawTargets) == 0 {
+		return nil, fmt.Errorf("targets must not be empty")
+	}
+	targets := make([]*url.URL, len(rawTargets))
+	seen := make(map[string]struct{}, len(rawTargets))
+	for index, raw := range rawTargets {
+		if _, exists := seen[raw]; exists {
+			return nil, fmt.Errorf("targets contains duplicate %q", raw)
+		}
+		seen[raw] = struct{}{}
+		target, err := parseTarget(raw)
+		if err != nil {
+			return nil, fmt.Errorf("targets[%d]: %w", index, err)
+		}
+		targets[index] = target
+	}
+	return &backend{targets: targets}, nil
+}
+
+func (b *backend) nextTarget() *url.URL {
+	if len(b.targets) == 1 {
+		return b.targets[0]
+	}
+	for {
+		current := b.nextIndex.Load()
+		next := current + 1
+		if next == uint64(len(b.targets)) {
+			next = 0
+		}
+		if b.nextIndex.CompareAndSwap(current, next) {
+			return b.targets[current]
+		}
+	}
+}
+
 func newProxy(raw string, headers map[string]string, trustProxies []netip.Prefix) (*httputil.ReverseProxy, error) {
 	target, err := parseTarget(raw)
 	if err != nil {
 		return nil, err
 	}
 
-	proxy := &httputil.ReverseProxy{
-		Rewrite: func(request *httputil.ProxyRequest) {
-			request.SetURL(target)
-			request.Out.URL.RawQuery = request.In.URL.RawQuery
-			request.Out.Host = request.In.Host
-			setForwardedHeaders(request.In, request.Out, trustProxies)
-			for name, value := range headers {
-				if name == "Host" {
-					request.Out.Host = value
-					continue
-				}
-				request.Out.Header.Set(name, value)
-			}
-		},
+	return newReverseProxy(func(request *httputil.ProxyRequest) {
+		rewriteProxyRequest(request, target, headers, trustProxies)
+	}), nil
+}
+
+func newBackendProxy(backend *backend, headers map[string]string, trustProxies []netip.Prefix) *httputil.ReverseProxy {
+	return newReverseProxy(func(request *httputil.ProxyRequest) {
+		rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
+	})
+}
+
+func newReverseProxy(rewrite func(*httputil.ProxyRequest)) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Rewrite:      rewrite,
 		Transport:    proxyTransport,
 		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
-	return proxy, nil
+}
+
+func rewriteProxyRequest(request *httputil.ProxyRequest, target *url.URL, headers map[string]string, trustProxies []netip.Prefix) {
+	request.SetURL(target)
+	request.Out.URL.RawQuery = request.In.URL.RawQuery
+	request.Out.Host = request.In.Host
+	setForwardedHeaders(request.In, request.Out, trustProxies)
+	for name, value := range headers {
+		if name == "Host" {
+			request.Out.Host = value
+			continue
+		}
+		request.Out.Header.Set(name, value)
+	}
 }
 
 func parseTarget(raw string) (*url.URL, error) {

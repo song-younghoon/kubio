@@ -21,7 +21,7 @@ type router struct {
 
 type site struct {
 	hosts          []hostPattern
-	target         *httputil.ReverseProxy
+	proxy          *httputil.ReverseProxy
 	routes         []route
 	exactRoutes    map[string]int
 	wildcardRoutes map[string]int
@@ -66,6 +66,10 @@ func newRouter(cfg config) (*router, error) {
 	if err != nil {
 		return nil, fmt.Errorf("trustProxies: %w", err)
 	}
+	backends, err := newBackends(cfg.Backends)
+	if err != nil {
+		return nil, err
+	}
 
 	r := &router{
 		sites:         make([]site, 0, len(cfg.Sites)),
@@ -76,65 +80,13 @@ func newRouter(cfg config) (*router, error) {
 	}
 
 	for siteIndex, siteConfig := range cfg.Sites {
-		if len(siteConfig.Hosts) == 0 {
-			return nil, fmt.Errorf("sites[%d].hosts must not be empty", siteIndex)
-		}
-		if siteConfig.Target == "" {
-			return nil, fmt.Errorf("sites[%d].target must be set", siteIndex)
-		}
-
-		hosts, err := newHostPatterns(siteConfig.Hosts)
+		s, err := newSite(siteConfig, backends, trustProxies)
 		if err != nil {
-			return nil, fmt.Errorf("sites[%d].hosts: %w", siteIndex, err)
-		}
-		siteHeaders, err := resolveHeaders(siteConfig.Headers)
-		if err != nil {
-			return nil, fmt.Errorf("sites[%d].headers: %w", siteIndex, err)
-		}
-
-		target, err := newProxy(siteConfig.Target, siteHeaders, trustProxies)
-		if err != nil {
-			return nil, fmt.Errorf("sites[%d].target: %w", siteIndex, err)
-		}
-
-		s := site{
-			hosts:  hosts,
-			target: target,
-			routes: make([]route, 0, len(siteConfig.Routes)),
-		}
-
-		for routeIndex, routeConfig := range siteConfig.Routes {
-			pattern, err := newPathPattern(routeConfig.Path)
-			if err != nil {
-				return nil, fmt.Errorf("sites[%d].routes[%d].path: %w", siteIndex, routeIndex, err)
-			}
-
-			routeHeaders, err := resolveHeaders(routeConfig.Headers)
-			if err != nil {
-				return nil, fmt.Errorf("sites[%d].routes[%d].headers: %w", siteIndex, routeIndex, err)
-			}
-
-			targetURL := siteConfig.Target
-			if routeConfig.Target != "" {
-				targetURL = routeConfig.Target
-			}
-			routeTarget, err := newProxy(targetURL, mergeHeaders(siteHeaders, routeHeaders), trustProxies)
-			if err != nil {
-				return nil, fmt.Errorf("sites[%d].routes[%d].target: %w", siteIndex, routeIndex, err)
-			}
-
-			s.routes = append(s.routes, route{
-				pattern: pattern,
-				proxy:   routeTarget,
-				strip:   routeConfig.Strip,
-			})
-		}
-		if len(s.routes) > routeIndexThreshold {
-			s.buildRouteIndex()
+			return nil, fmt.Errorf("sites[%d]: %w", siteIndex, err)
 		}
 
 		r.sites = append(r.sites, s)
-		for _, host := range hosts {
+		for _, host := range s.hosts {
 			switch {
 			case host.value == "*":
 				if r.starSite < 0 {
@@ -153,6 +105,91 @@ func newRouter(cfg config) (*router, error) {
 	}
 
 	return r, nil
+}
+
+func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.Prefix) (site, error) {
+	if len(cfg.Hosts) == 0 {
+		return site{}, fmt.Errorf("hosts must not be empty")
+	}
+	hosts, err := newHostPatterns(cfg.Hosts)
+	if err != nil {
+		return site{}, fmt.Errorf("hosts: %w", err)
+	}
+	siteHeaders, err := resolveHeaders(cfg.Headers)
+	if err != nil {
+		return site{}, fmt.Errorf("headers: %w", err)
+	}
+
+	proxy, err := newProxyForSelection(cfg.Target, cfg.Backend, siteHeaders, trustProxies, backends)
+	if err != nil {
+		return site{}, err
+	}
+	s := site{
+		hosts:  hosts,
+		proxy:  proxy,
+		routes: make([]route, 0, len(cfg.Routes)),
+	}
+	for routeIndex, routeConfig := range cfg.Routes {
+		pattern, err := newPathPattern(routeConfig.Path)
+		if err != nil {
+			return site{}, fmt.Errorf("routes[%d].path: %w", routeIndex, err)
+		}
+		routeHeaders, err := resolveHeaders(routeConfig.Headers)
+		if err != nil {
+			return site{}, fmt.Errorf("routes[%d].headers: %w", routeIndex, err)
+		}
+
+		target, backendName := cfg.Target, cfg.Backend
+		if routeConfig.Target != "" || routeConfig.Backend != "" {
+			target, backendName = routeConfig.Target, routeConfig.Backend
+		}
+		routeProxy, err := newProxyForSelection(target, backendName, mergeHeaders(siteHeaders, routeHeaders), trustProxies, backends)
+		if err != nil {
+			return site{}, fmt.Errorf("routes[%d]: %w", routeIndex, err)
+		}
+		s.routes = append(s.routes, route{pattern: pattern, proxy: routeProxy, strip: routeConfig.Strip})
+	}
+	if len(s.routes) > routeIndexThreshold {
+		s.buildRouteIndex()
+	}
+	return s, nil
+}
+
+func newBackends(configs map[string]backendConfig) (map[string]*backend, error) {
+	if len(configs) == 0 {
+		return nil, nil
+	}
+	backends := make(map[string]*backend, len(configs))
+	for name, cfg := range configs {
+		if name == "" {
+			return nil, fmt.Errorf("backend name must not be empty")
+		}
+		backend, err := newBackend(cfg.Targets)
+		if err != nil {
+			return nil, fmt.Errorf("backends[%q]: %w", name, err)
+		}
+		backends[name] = backend
+	}
+	return backends, nil
+}
+
+func newProxyForSelection(target, backendName string, headers map[string]string, trustProxies []netip.Prefix, backends map[string]*backend) (*httputil.ReverseProxy, error) {
+	hasTarget, hasBackend := target != "", backendName != ""
+	if hasTarget == hasBackend {
+		return nil, fmt.Errorf("must set exactly one of target or backend")
+	}
+	if hasTarget {
+		proxy, err := newProxy(target, headers, trustProxies)
+		if err != nil {
+			return nil, fmt.Errorf("target: %w", err)
+		}
+		return proxy, nil
+	}
+	backend, ok := backends[backendName]
+	if !ok {
+		return nil, fmt.Errorf("backend %q is not defined", backendName)
+	}
+	return newBackendProxy(backend, headers, trustProxies), nil
 }
 
 func parseTrustedProxies(raw []string) ([]netip.Prefix, error) {
@@ -181,7 +218,7 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	selectedRoute := selected.selectRoute(req.URL.Path)
 
 	if selectedRoute.route == nil {
-		selected.target.ServeHTTP(w, req)
+		selected.proxy.ServeHTTP(w, req)
 		return
 	}
 	if selectedRoute.route.strip {

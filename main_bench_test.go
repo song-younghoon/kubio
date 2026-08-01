@@ -7,6 +7,43 @@ import (
 	"testing"
 )
 
+func BenchmarkBackendSelection(b *testing.B) {
+	for _, count := range []int{1, 2, 8} {
+		b.Run(strconv.Itoa(count), func(b *testing.B) {
+			targets := make([]string, count)
+			for index := range targets {
+				targets[index] = "http://backend-" + strconv.Itoa(index) + ":3000"
+			}
+			backend, err := newBackend(targets)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				_ = backend.nextTarget()
+			}
+		})
+	}
+}
+
+func BenchmarkBackendSelectionParallel(b *testing.B) {
+	backend, err := newBackend([]string{
+		"http://backend-0:3000",
+		"http://backend-1:3000",
+		"http://backend-2:3000",
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = backend.nextTarget()
+		}
+	})
+}
+
 func BenchmarkLinearRouteSelection(b *testing.B) {
 	patterns, err := newHostPatterns([]string{
 		"*",
@@ -84,15 +121,28 @@ func BenchmarkProxyRequest(b *testing.B) {
 }
 
 func BenchmarkProxyRequestParallel(b *testing.B) {
+	benchmarkProxyRequestParallel(b, func(target string) config {
+		return config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: target}}}
+	})
+}
+
+func BenchmarkBackendProxyRequestParallel(b *testing.B) {
+	benchmarkProxyRequestParallel(b, func(target string) config {
+		sameTarget := "HTTP" + target[len("http"):]
+		return config{
+			Backends: map[string]backendConfig{"app": {Targets: []string{target, sameTarget}}},
+			Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+		}
+	})
+}
+
+func benchmarkProxyRequestParallel(b *testing.B, configForTarget func(string) config) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
 
-	handler, err := newRouter(config{Sites: []siteConfig{{
-		Hosts:  []string{"*"},
-		Target: backend.URL,
-	}}})
+	handler, err := newRouter(configForTarget(backend.URL))
 	if err != nil {
 		b.Fatal(err)
 	}

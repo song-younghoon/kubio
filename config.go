@@ -12,14 +12,20 @@ import (
 )
 
 type config struct {
-	Listen       string       `json:"listen"`
-	TrustProxies []string     `json:"trustProxies"`
-	Sites        []siteConfig `json:"sites"`
+	Listen       string                   `json:"listen"`
+	TrustProxies []string                 `json:"trustProxies"`
+	Backends     map[string]backendConfig `json:"backends"`
+	Sites        []siteConfig             `json:"sites"`
+}
+
+type backendConfig struct {
+	Targets []string `json:"targets"`
 }
 
 type siteConfig struct {
 	Hosts   []string          `json:"hosts"`
 	Target  string            `json:"target"`
+	Backend string            `json:"backend"`
 	Headers map[string]string `json:"headers"`
 	Routes  []routeConfig     `json:"routes"`
 }
@@ -27,6 +33,7 @@ type siteConfig struct {
 type routeConfig struct {
 	Path    string            `json:"path"`
 	Target  string            `json:"target"`
+	Backend string            `json:"backend"`
 	Headers map[string]string `json:"headers"`
 	Strip   bool              `json:"strip"`
 }
@@ -34,19 +41,26 @@ type routeConfig struct {
 type rawConfig struct {
 	Listen       *string          `json:"listen"`
 	TrustProxies stringArray      `json:"trustProxies"`
+	Backends     rawBackends      `json:"backends"`
 	Sites        *[]rawSiteConfig `json:"sites"`
 }
 
+type rawBackendConfig struct {
+	Targets *stringArray `json:"targets"`
+}
+
 type rawSiteConfig struct {
-	Hosts   *stringArray `json:"hosts"`
-	Target  *string      `json:"target"`
-	Headers headerMap    `json:"headers"`
-	Routes  rawRoutes    `json:"routes"`
+	Hosts   *stringArray   `json:"hosts"`
+	Target  optionalString `json:"target"`
+	Backend optionalString `json:"backend"`
+	Headers headerMap      `json:"headers"`
+	Routes  rawRoutes      `json:"routes"`
 }
 
 type rawRouteConfig struct {
 	Path    *string        `json:"path"`
 	Target  optionalString `json:"target"`
+	Backend optionalString `json:"backend"`
 	Headers headerMap      `json:"headers"`
 	Strip   strictBool     `json:"strip"`
 }
@@ -54,6 +68,7 @@ type rawRouteConfig struct {
 type headerMap map[string]string
 
 type stringArray []string
+type rawBackends map[string]rawBackendConfig
 type rawRoutes []rawRouteConfig
 
 type optionalString struct {
@@ -62,6 +77,27 @@ type optionalString struct {
 }
 
 type strictBool bool
+
+func (b *rawBackends) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("must be an object")
+	}
+	var backends map[string]rawBackendConfig
+	if err := json.Unmarshal(data, &backends); err != nil {
+		return fmt.Errorf("must be an object: %w", err)
+	}
+	*b = backends
+	return nil
+}
+
+func (b *rawBackendConfig) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	type plain rawBackendConfig
+	return json.Unmarshal(data, (*plain)(b))
+}
 
 func (a *stringArray) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
@@ -158,28 +194,54 @@ func decodeConfig(data []byte) (config, error) {
 	cfg := config{
 		Listen:       *raw.Listen,
 		TrustProxies: append([]string(nil), raw.TrustProxies...),
+		Backends:     make(map[string]backendConfig, len(raw.Backends)),
 		Sites:        make([]siteConfig, len(*raw.Sites)),
+	}
+	for name, rawBackend := range raw.Backends {
+		if name == "" {
+			return config{}, fmt.Errorf("backend name must not be empty")
+		}
+		if rawBackend.Targets == nil || len(*rawBackend.Targets) == 0 {
+			return config{}, fmt.Errorf("backends[%q].targets must not be empty", name)
+		}
+		cfg.Backends[name] = backendConfig{Targets: append([]string(nil), (*rawBackend.Targets)...)}
 	}
 	for siteIndex, rawSite := range *raw.Sites {
 		if rawSite.Hosts == nil || len(*rawSite.Hosts) == 0 {
 			return config{}, fmt.Errorf("sites[%d].hosts must not be empty", siteIndex)
 		}
-		if rawSite.Target == nil || *rawSite.Target == "" {
-			return config{}, fmt.Errorf("sites[%d].target must be set", siteIndex)
+		if rawSite.Target.set == rawSite.Backend.set {
+			return config{}, fmt.Errorf("sites[%d] must set exactly one of target or backend", siteIndex)
+		}
+		if rawSite.Target.set && rawSite.Target.value == "" {
+			return config{}, fmt.Errorf("sites[%d].target must not be empty", siteIndex)
+		}
+		if rawSite.Backend.set && rawSite.Backend.value == "" {
+			return config{}, fmt.Errorf("sites[%d].backend must not be empty", siteIndex)
 		}
 
 		site := siteConfig{
 			Hosts:   append([]string(nil), (*rawSite.Hosts)...),
-			Target:  *rawSite.Target,
 			Headers: map[string]string(rawSite.Headers),
 			Routes:  make([]routeConfig, len(rawSite.Routes)),
+		}
+		if rawSite.Target.set {
+			site.Target = rawSite.Target.value
+		} else {
+			site.Backend = rawSite.Backend.value
 		}
 		for routeIndex, rawRoute := range rawSite.Routes {
 			if rawRoute.Path == nil || *rawRoute.Path == "" {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].path must be set", siteIndex, routeIndex)
 			}
+			if rawRoute.Target.set && rawRoute.Backend.set {
+				return config{}, fmt.Errorf("sites[%d].routes[%d] cannot set both target and backend", siteIndex, routeIndex)
+			}
 			if rawRoute.Target.set && rawRoute.Target.value == "" {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].target must not be empty", siteIndex, routeIndex)
+			}
+			if rawRoute.Backend.set && rawRoute.Backend.value == "" {
+				return config{}, fmt.Errorf("sites[%d].routes[%d].backend must not be empty", siteIndex, routeIndex)
 			}
 			route := routeConfig{
 				Path:    *rawRoute.Path,
@@ -188,6 +250,8 @@ func decodeConfig(data []byte) (config, error) {
 			}
 			if rawRoute.Target.set {
 				route.Target = rawRoute.Target.value
+			} else if rawRoute.Backend.set {
+				route.Backend = rawRoute.Backend.value
 			}
 			site.Routes[routeIndex] = route
 		}
@@ -216,6 +280,8 @@ type jsonSchema uint8
 const (
 	jsonAny jsonSchema = iota
 	jsonRoot
+	jsonBackends
+	jsonBackend
 	jsonSites
 	jsonSite
 	jsonRoutes
@@ -291,13 +357,22 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "listen", "trustProxies":
 			return jsonAny, nil
+		case "backends":
+			return jsonBackends, nil
 		case "sites":
 			return jsonSites, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackends:
+		return jsonBackend, nil
+	case jsonBackend:
+		if key == "targets" {
+			return jsonAny, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonSite:
 		switch key {
-		case "hosts", "target":
+		case "hosts", "target", "backend":
 			return jsonAny, nil
 		case "headers":
 			return jsonHeaders, nil
@@ -307,7 +382,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonRoute:
 		switch key {
-		case "path", "target", "strip":
+		case "path", "target", "backend", "strip":
 			return jsonAny, nil
 		case "headers":
 			return jsonHeaders, nil
