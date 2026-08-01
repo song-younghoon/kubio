@@ -9,8 +9,6 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -115,22 +113,6 @@ func validateTargetPort(target *url.URL) error {
 	return validatePort(port)
 }
 
-func validatePort(port string) error {
-	if port == "" {
-		return fmt.Errorf("invalid port")
-	}
-	for i := 0; i < len(port); i++ {
-		if port[i] < '0' || port[i] > '9' {
-			return fmt.Errorf("invalid port")
-		}
-	}
-	value, err := strconv.Atoi(port)
-	if err != nil || value < 0 || value > 65535 {
-		return fmt.Errorf("invalid port")
-	}
-	return nil
-}
-
 func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
 	status := http.StatusBadGateway
 	var timeout net.Error
@@ -217,149 +199,4 @@ func requestProtocol(req *http.Request) string {
 		return "https"
 	}
 	return "http"
-}
-
-func resolveHeaders(raw map[string]string) (map[string]string, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-
-	headers := make(map[string]string, len(raw))
-	for name, value := range raw {
-		if !validHeaderName(name) {
-			return nil, fmt.Errorf("invalid header name %q", name)
-		}
-
-		name = http.CanonicalHeaderKey(name)
-		if _, exists := headers[name]; exists {
-			return nil, fmt.Errorf("duplicate header name %q", name)
-		}
-		if restrictedHeader(name) {
-			return nil, fmt.Errorf("header %q is managed by the proxy", name)
-		}
-
-		value, err := expandEnv(value)
-		if err != nil {
-			return nil, fmt.Errorf("%q: %w", name, err)
-		}
-		if !validHeaderValue(value) {
-			return nil, fmt.Errorf("header %q contains invalid control characters", name)
-		}
-		headers[name] = value
-	}
-	return headers, nil
-}
-
-func validHeaderName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		if !validTokenByte(name[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func validTokenByte(value byte) bool {
-	if value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' {
-		return true
-	}
-	switch value {
-	case '!', '#', '$', '%', '&', '\'', '+', '-', '.', '^', '_', '\x60', '|', '~':
-		return true
-	default:
-		return false
-	}
-}
-
-func validHeaderValue(value string) bool {
-	for i := 0; i < len(value); i++ {
-		if value[i] == '\r' || value[i] == '\n' || value[i] == 0x7f ||
-			value[i] < 0x20 && value[i] != '\t' {
-			return false
-		}
-	}
-	return true
-}
-
-func restrictedHeader(name string) bool {
-	switch strings.ToLower(name) {
-	case "connection", "proxy-connection", "keep-alive", "transfer-encoding",
-		"te", "trailer", "upgrade", "content-length":
-		return true
-	default:
-		return false
-	}
-}
-
-func mergeHeaders(base, override map[string]string) map[string]string {
-	if len(base) == 0 && len(override) == 0 {
-		return nil
-	}
-
-	headers := make(map[string]string, len(base)+len(override))
-	for name, value := range base {
-		headers[name] = value
-	}
-	for name, value := range override {
-		headers[name] = value
-	}
-	return headers
-}
-
-func expandEnv(value string) (string, error) {
-	var expanded strings.Builder
-	for i := 0; i < len(value); {
-		if value[i] == '\\' {
-			if i+1 < len(value) && value[i+1] == '\\' {
-				expanded.WriteByte('\\')
-				i += 2
-				continue
-			}
-			if i+2 < len(value) && value[i+1] == '$' && value[i+2] == '{' {
-				expanded.WriteString("${")
-				i += 3
-				continue
-			}
-		}
-		if strings.HasPrefix(value[i:], "${") {
-			end := strings.IndexByte(value[i+2:], '}')
-			if end < 0 {
-				return "", fmt.Errorf("unterminated environment variable")
-			}
-
-			name := value[i+2 : i+2+end]
-			if !validEnvironmentName(name) {
-				return "", fmt.Errorf("invalid environment variable name %q", name)
-			}
-			env, ok := os.LookupEnv(name)
-			if !ok {
-				return "", fmt.Errorf("environment variable %q is not set", name)
-			}
-			expanded.WriteString(env)
-			i += 2 + end + 1
-			continue
-		}
-		expanded.WriteByte(value[i])
-		i++
-	}
-	return expanded.String(), nil
-}
-
-func validEnvironmentName(name string) bool {
-	if name == "" || !isEnvironmentNameStart(name[0]) {
-		return false
-	}
-	for i := 1; i < len(name); i++ {
-		if !isEnvironmentNameStart(name[i]) && (name[i] < '0' || name[i] > '9') {
-			return false
-		}
-	}
-	return true
-}
-
-func isEnvironmentNameStart(value byte) bool {
-	return value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }

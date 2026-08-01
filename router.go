@@ -133,7 +133,6 @@ func newRouter(cfg config) (*router, error) {
 			s.buildRouteIndex()
 		}
 
-		siteIndex := len(r.sites)
 		r.sites = append(r.sites, s)
 		for _, host := range hosts {
 			switch {
@@ -266,18 +265,6 @@ func (r *router) selectSite(host string) *site {
 			return &r.sites[0]
 		}
 		return nil
-	}
-	if r.exactHosts == nil && r.wildcardHosts == nil {
-		var selected *site
-		var selectedScore hostScore
-		for index := range r.sites {
-			score, ok := bestHostMatch(host, r.sites[index].hosts)
-			if ok && (selected == nil || betterHostScore(score, selectedScore)) {
-				selected = &r.sites[index]
-				selectedScore = score
-			}
-		}
-		return selected
 	}
 	if index, ok := r.exactHosts[host]; ok {
 		return &r.sites[index]
@@ -557,13 +544,4 @@ func normalizeHost(raw string) string {
 		}
 	}
 	return strings.ToLower(strings.TrimSuffix(strings.Trim(raw, "[]"), "."))
-}
-
-func matchesHost(host string, patterns []string) bool {
-	parsed, err := newHostPatterns(patterns)
-	if err != nil {
-		return false
-	}
-	_, ok := bestHostMatch(normalizeHost(host), parsed)
-	return ok
 }

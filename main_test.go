@@ -25,6 +25,15 @@ func proxyResponse(t *testing.T, handler http.Handler, host, path string) string
 	return res.Body.String()
 }
 
+func matchesHost(host string, patterns []string) bool {
+	parsed, err := newHostPatterns(patterns)
+	if err != nil {
+		return false
+	}
+	_, ok := bestHostMatch(normalizeHost(host), parsed)
+	return ok
+}
+
 func TestDecodeConfigIsStrict(t *testing.T) {
 	valid := `{
   "listen": ":8080",
@@ -195,6 +204,38 @@ func TestIndexedRouteSelectionPreservesPriority(t *testing.T) {
 	} {
 		if got := proxyResponse(t, handler, "anything", test.path); got != test.want {
 			t.Errorf("path %q = %q, want %q", test.path, got, test.want)
+		}
+	}
+}
+
+func TestIndexedRouteSelectionMatchesLinearSelection(t *testing.T) {
+	paths := []string{
+		"/*", "/api/*", "/api/admin/*", "/health",
+		"/unused-a", "/unused-b", "/unused-c", "/unused-d", "/unused-e", "/api/*",
+	}
+	routes := make([]route, len(paths))
+	for index, path := range paths {
+		pattern, err := newPathPattern(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes[index].pattern = pattern
+	}
+
+	linear := site{routes: routes}
+	indexed := site{routes: routes}
+	indexed.buildRouteIndex()
+	for _, path := range []string{"/", "/api/users", "/api/admin/users", "/health", "/other"} {
+		want := linear.selectRoute(path)
+		got := indexed.selectRoute(path)
+		if got.route == nil || want.route == nil {
+			if got.route != want.route {
+				t.Errorf("path %q selected route mismatch", path)
+			}
+			continue
+		}
+		if got.index != want.index || got.prefix != want.prefix {
+			t.Errorf("path %q selected route (%d, %q), want (%d, %q)", path, got.index, got.prefix, want.index, want.prefix)
 		}
 	}
 }
