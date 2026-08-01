@@ -10,6 +10,13 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	configPath         = "config.json"
+	configPollInterval = time.Second
 )
 
 type config struct {
@@ -52,17 +59,34 @@ type pathPattern struct {
 	wildcard bool
 }
 
+type reloadableRouter struct {
+	current atomic.Pointer[router]
+}
+
+type fileState struct {
+	exists  bool
+	size    int64
+	modTime time.Time
+}
+
 func main() {
-	cfg, err := loadConfig("config.json")
+	initialState, err := statConfig(configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	handler, err := newRouter(cfg)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	initial, err := newRouter(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handler := newReloadableRouter(initial)
+	go watchConfig(configPath, cfg.Listen, initialState, handler)
 	log.Fatal(http.ListenAndServe(cfg.Listen, handler))
 }
 
@@ -86,7 +110,7 @@ func loadConfig(path string) (config, error) {
 	return cfg, nil
 }
 
-func newRouter(cfg config) (http.Handler, error) {
+func newRouter(cfg config) (*router, error) {
 	r := &router{sites: make([]site, 0, len(cfg.Sites))}
 
 	for siteIndex, siteConfig := range cfg.Sites {
@@ -143,6 +167,66 @@ func newRouter(cfg config) (http.Handler, error) {
 	}
 
 	return r, nil
+}
+
+func newReloadableRouter(initial *router) *reloadableRouter {
+	r := &reloadableRouter{}
+	r.current.Store(initial)
+	return r
+}
+
+func (r *reloadableRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.current.Load().ServeHTTP(w, req)
+}
+
+func (r *reloadableRouter) Store(next *router) {
+	r.current.Store(next)
+}
+
+func watchConfig(path, listen string, last fileState, handler *reloadableRouter) {
+	ticker := time.NewTicker(configPollInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		current, err := statConfig(path)
+		if err != nil {
+			log.Printf("watch %s: %v", path, err)
+			continue
+		}
+		if current == last {
+			continue
+		}
+		last = current
+
+		cfg, err := loadConfig(path)
+		if err != nil {
+			log.Printf("reload %s failed; keeping current config: %v", path, err)
+			continue
+		}
+		if cfg.Listen != listen {
+			log.Printf("reload %s: listen changed to %q; keeping %q until restart", path, cfg.Listen, listen)
+		}
+
+		next, err := newRouter(cfg)
+		if err != nil {
+			log.Printf("reload %s failed; keeping current config: %v", path, err)
+			continue
+		}
+		handler.Store(next)
+		log.Printf("reloaded %s", path)
+	}
+}
+
+func statConfig(path string) (fileState, error) {
+	// ponytail: poll mtime and size to keep the request path cheap; use a filesystem watcher if exact event delivery is needed.
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return fileState{}, nil
+	}
+	if err != nil {
+		return fileState{}, fmt.Errorf("stat %s: %w", path, err)
+	}
+	return fileState{exists: true, size: info.Size(), modTime: info.ModTime()}, nil
 }
 
 func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {

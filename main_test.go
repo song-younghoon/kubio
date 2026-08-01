@@ -98,3 +98,39 @@ func TestExpandEnvUsesShellEscaping(t *testing.T) {
 		}
 	}
 }
+
+func TestReloadableRouterSwitchesConfiguration(t *testing.T) {
+	backendA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = w.Write([]byte("a"))
+	}))
+	defer backendA.Close()
+	backendB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = w.Write([]byte("b"))
+	}))
+	defer backendB.Close()
+
+	first, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: backendA.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: backendB.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newReloadableRouter(first)
+	request := func() string {
+		req := httptest.NewRequest(http.MethodGet, "http://proxy/", nil)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res.Body.String()
+	}
+
+	if got := request(); got != "a" {
+		t.Fatalf("initial response = %q, want %q", got, "a")
+	}
+	handler.Store(second)
+	if got := request(); got != "b" {
+		t.Fatalf("reloaded response = %q, want %q", got, "b")
+	}
+}
