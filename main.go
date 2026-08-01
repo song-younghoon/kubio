@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	configPath         = "config.json"
+	configPath         = "kubio.json"
 	configPollInterval = time.Second
 )
 

@@ -1,0 +1,96 @@
+Kubio kubio.json v0.2 Proposal
+Status: Deferred features; discussion not started
+Base: v0.1
+
+
+1. Purpose
+
+This file contains only features deferred from v0.1. It is not a specification
+yet. Each item must be discussed and narrowed before v0.2 is finalized.
+
+
+2. Named backends
+
+Add reusable named backend definitions so routes do not need to contain all
+upstream behavior.
+
+Potential additions:
+
+- Multiple upstream targets.
+- Round-robin load balancing.
+- Active health checks.
+- Retry and failover rules.
+- Per-backend connection and response timeouts.
+- HTTPS upstream CA and SNI settings.
+
+
+3. Additional route matching
+
+Consider route conditions beyond host and path:
+
+- HTTP method.
+- Request header.
+- Query parameter.
+- Client IP.
+
+The matching precedence and interaction between conditions must be defined
+before implementation.
+
+
+4. Response headers
+
+Consider extending headers beyond v0.1 request injection:
+
+- Response header set.
+- Header removal.
+- Multiple header values.
+- Explicit set/add/remove operation ordering.
+
+
+5. Client-facing TLS
+
+Consider TLS termination on Kubio's public listener:
+
+- Manual certificates.
+- Certificate selection by host.
+- HTTP-to-HTTPS redirects.
+- Automatic ACME certificates.
+
+
+6. Configurable timeouts
+
+Consider moving v0.1's fixed upstream timeout values into kubio.json, with
+clear inheritance and streaming semantics.
+
+
+7. Observability and administration
+
+Consider:
+
+- Structured access logs.
+- Request and upstream metrics.
+- Health and metrics endpoints.
+- Reload status reporting.
+
+
+8. Additional proxy protocols and routing actions
+
+Consider:
+
+- RFC Forwarded headers.
+- PROXY protocol.
+- URI rewriting.
+- Redirect responses.
+- Fixed responses.
+- Custom error bodies.
+
+
+9. Application gateway features
+
+Consider only when there is a concrete use case:
+
+- Rate limiting.
+- Authentication.
+- Response compression.
+- Response caching.
+- Service discovery.

@@ -1,0 +1,337 @@
+Kubio kubio.json v0.1 Specification
+Status: Agreed specification
+Research date: 2026-08-01
+
+
+1. Scope
+
+v0.1 defines a small, single-process HTTP reverse proxy configured by
+kubio.json.
+
+The scope is intentionally limited to:
+
+- One HTTP listener.
+- Host-based site selection.
+- Path-based route selection.
+- A direct HTTP or HTTPS upstream target.
+- Request header injection.
+- Safe forwarded-header handling when Kubio runs behind another proxy.
+- Configuration validation and zero-downtime reload.
+
+The configuration has no runtime version field. The documentation filename
+identifies the specification version.
+
+
+2. Minimal configuration
+
+The smallest valid configuration forwards every request to one upstream.
+
+    {
+      "listen": ":8080",
+      "sites": [
+        {
+          "hosts": ["*"],
+          "target": "http://localhost:3000"
+        }
+      ]
+    }
+
+
+3. Top-level fields
+
+3.1 listen
+
+- Required string.
+- Defines one plaintext HTTP listener.
+- At least one listener is not configurable in v0.1; exactly one is used.
+- A listener address change requires a restart.
+
+3.2 trustProxies
+
+- Optional array of CIDR strings.
+- Defaults to an empty array.
+- Lists proxy IP ranges whose forwarded headers may be trusted.
+- Invalid CIDR values are configuration errors.
+
+3.3 sites
+
+- Required non-empty array.
+- Site order is used only as the final tie-breaker when host specificity is
+  equal.
+
+
+4. Site specification
+
+    {
+      "sites": [
+        {
+          "hosts": ["example.com", "*.example.com"],
+          "target": "http://localhost:3000",
+          "headers": {
+            "X-Proxy-Name": "kubio"
+          },
+          "routes": [
+            {
+              "path": "/api/*",
+              "target": "http://localhost:4000",
+              "strip": true
+            }
+          ]
+        }
+      ]
+    }
+
+4.1 hosts
+
+- Required non-empty array.
+- Host names are compared in lowercase.
+- The port and trailing dot are removed before comparison.
+- example.com is an exact match.
+- *.example.com matches exactly one subdomain label.
+- *.example.com does not match example.com or v1.api.example.com.
+- * matches every host.
+- Site priority is exact host, longest wildcard suffix, then *.
+- If sites have equal host specificity, the first declaration wins.
+- If no site matches, return 404.
+
+4.2 target
+
+- Required absolute HTTP or HTTPS URL.
+- The URL must contain a scheme and hostname.
+- The URL may contain a port.
+- The URL must not contain a path, query, fragment, or userinfo.
+- Target values are not expanded from environment variables.
+- The target hostname is used for the upstream connection and TLS SNI.
+- By default, the original client Host header is preserved when forwarding.
+- A configured Host header explicitly overrides the forwarded Host field.
+
+4.3 headers
+
+- Optional object mapping header names to string values.
+- These are request headers sent to the upstream.
+- Site headers apply to every request handled by the site.
+- A route header with the same name overrides the site value.
+- Configured values override client-supplied values with the same name.
+- Client headers not configured by Kubio are forwarded unchanged.
+- Header names are case-insensitive.
+- Host is applied to the request Host field, not only to the header map.
+- Response-header modification is not part of v0.1.
+
+4.4 routes
+
+- Optional array.
+- Routes are evaluated only after a site has been selected.
+- If no route matches, the site's target handles the request.
+- A route may change the target, strip a path prefix, or add/override headers.
+
+
+5. Route specification
+
+    {
+      "routes": [
+        {
+          "path": "/*",
+          "target": "http://localhost:3000"
+        },
+        {
+          "path": "/api/*",
+          "target": "http://localhost:4000",
+          "strip": true,
+          "headers": {
+            "X-Route": "api"
+          }
+        }
+      ]
+    }
+
+5.1 path
+
+- Required string beginning with /.
+- An exact path such as /health matches only /health.
+- A trailing wildcard pattern such as /api/* matches /api and every path
+  below /api/.
+- /api/* does not match /apix.
+- /* matches every path.
+- The wildcard is allowed only as the final /* suffix.
+- Query strings are not used for matching and are forwarded unchanged.
+
+5.2 Route priority
+
+Evaluate every matching route and select the most specific one.
+
+Priority is:
+
+1. Exact path over wildcard path.
+2. Greater fixed-segment depth over lesser fixed-segment depth.
+3. Later declaration over earlier declaration when specificity is equal.
+
+The wildcard segment is not counted in depth:
+
+- /* has depth 0.
+- /api/* has depth 1.
+- /api/admin/* has depth 2.
+
+Only the selected route is applied. Routes are not merged with one another.
+
+5.3 target inheritance
+
+- route.target is optional.
+- If route.target is absent, the route inherits the site's target.
+- The resolved route must always have a target.
+- route.target follows the same URL validation rules as site.target.
+
+5.4 strip
+
+- Optional boolean; defaults to false.
+- With strip=false, the original path is forwarded.
+- With path=/api/* and strip=true, /api/users becomes /users.
+- With path=/api/* and strip=true, /api becomes /.
+- The query string is not changed.
+
+
+6. Request headers
+
+Site and route headers use the same object format.
+
+    {
+      "headers": {
+        "X-Proxy-Name": "kubio",
+        "Authorization": "Bearer ${API_TOKEN}"
+      }
+    }
+
+Header processing rules:
+
+- Apply site headers first.
+- Apply the selected route headers second.
+- A route value replaces a site value with the same case-insensitive name.
+- A configured value replaces a client value with the same name.
+- An unset client header is not created unless it is configured.
+- Header values may be empty strings.
+- Header names must be valid HTTP field names.
+- Header values must not contain carriage return, line feed, or other invalid
+  control characters.
+- Validate the value after environment-variable expansion.
+- Connection, Proxy-Connection, Keep-Alive, Transfer-Encoding, TE, Trailer,
+  Upgrade, and Content-Length are managed by the proxy and cannot be
+  configured.
+
+
+7. Environment-variable expansion
+
+- Expand ${NAME} in header values while loading kubio.json.
+- Expansion occurs once; environment values are not recursively expanded.
+- An unset environment variable is a configuration error.
+- An environment variable set to an empty string is valid.
+- Shell-style \${NAME} means the literal ${NAME}.
+- In JSON, write "\\${NAME}" to represent the escaped form.
+- Expanded secret values must not be written to logs.
+
+
+8. Forwarded headers and trusted proxies
+
+Kubio generates X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host for
+the upstream request.
+
+8.1 Direct client connection
+
+When the directly connected peer is not in trustProxies:
+
+- Ignore incoming X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host.
+- Set X-Forwarded-For from the direct peer address.
+- Set X-Forwarded-Proto from the request protocol.
+- Set X-Forwarded-Host from the original request Host.
+
+8.2 Trusted proxy connection
+
+When the directly connected peer is in trustProxies:
+
+- Preserve the incoming forwarded chain.
+- Append the direct peer address to X-Forwarded-For.
+- Use the incoming X-Forwarded-Proto and X-Forwarded-Host values when present.
+- The operator is responsible for listing only proxies that sanitize their
+  forwarded headers.
+
+Explicit site or route header configuration is applied after automatic
+forwarded-header generation and may intentionally override it.
+
+The RFC Forwarded header and PROXY protocol are not supported in v0.1.
+
+
+9. Upstream forwarding
+
+- Forward upstream HTTP status, headers, and response body unchanged unless
+  Kubio must produce an error response.
+- Forward WebSocket upgrades without extra configuration.
+- Forward SSE and streaming responses without buffering the entire body.
+- Use the target hostname for upstream TLS SNI.
+- Preserve the client Host by default.
+
+
+10. Timeouts and errors
+
+v0.1 uses fixed internal upstream timeouts:
+
+- Connection establishment: 5s.
+- Response headers: 30s.
+- Response body: no global timeout, so streaming is not interrupted.
+
+Error responses:
+
+- No matching site: 404.
+- Upstream connection, TLS, or protocol failure: 502.
+- Upstream connection or response-header timeout: 504.
+- Pass upstream HTTP statuses and bodies through unchanged.
+- Do not expose internal upstream addresses, credentials, or detailed TLS
+  verification errors.
+- Custom error bodies are not supported.
+
+
+11. Configuration validation
+
+Kubio accepts standard JSON only:
+
+- Comments are not allowed.
+- Trailing commas are not allowed.
+- Single-quoted strings are not allowed.
+- Unknown fields are errors.
+- Duplicate object keys are errors.
+- Required fields must be present and have the expected type.
+- Host patterns, paths, URLs, CIDRs, header names, header values, and
+  environment-variable expansions are validated while loading.
+
+Startup behavior:
+
+- Missing, unreadable, malformed, or invalid kubio.json causes an error and
+  process exit.
+
+Reload behavior:
+
+- A failed read, parse, validation, or router build logs an error and keeps
+  the previous configuration.
+- Valid portions are not applied independently.
+- A new router is fully built before the atomic swap.
+- In-flight requests finish with the previous router.
+- New requests use the new router after the swap.
+- Deleting kubio.json does not stop the process; the previous valid
+  configuration remains active.
+- Changing listen requires a restart and does not change the active listener.
+- The file-watching mechanism and polling interval are not part of the public
+  schema.
+
+
+12. Current configuration
+
+The current configuration remains valid for the v0.1 shape:
+
+    {
+      "listen": ":8080",
+      "sites": [
+        {
+          "hosts": ["*"],
+          "target": "http://localhost:3000"
+        }
+      ]
+    }
+
+The configuration file is named kubio.json.
