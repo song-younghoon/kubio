@@ -27,14 +27,19 @@ type tlsConfig struct {
 }
 
 type backendConfig struct {
-	Targets []string       `json:"targets"`
-	Tries   int            `json:"tries"`
-	Timeout backendTimeout `json:"timeout"`
+	Targets []string            `json:"targets"`
+	Tries   int                 `json:"tries"`
+	Timeout backendTimeout      `json:"timeout"`
+	Retry   *backendRetryConfig `json:"retry"`
 }
 
 type backendTimeout struct {
 	Dial   time.Duration
 	Header time.Duration
+}
+
+type backendRetryConfig struct {
+	Status []int `json:"status"`
 }
 
 type siteConfig struct {
@@ -87,6 +92,12 @@ type rawBackendConfig struct {
 	Targets *stringArray      `json:"targets"`
 	Tries   optionalInt       `json:"tries"`
 	Timeout rawBackendTimeout `json:"timeout"`
+	Retry   rawBackendRetry   `json:"retry"`
+}
+
+type rawBackendRetry struct {
+	set    bool
+	Status optionalIntArray `json:"status"`
 }
 
 type rawBackendTimeout struct {
@@ -151,6 +162,11 @@ type optionalConditionValues struct {
 type optionalInt struct {
 	set   bool
 	value int
+}
+
+type optionalIntArray struct {
+	set    bool
+	values []int
 }
 
 type optionalDuration struct {
@@ -223,6 +239,26 @@ func (t *rawBackendTimeout) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must contain dial or header")
 	}
 	*t = rawBackendTimeout{Dial: decoded.Dial, Header: decoded.Header}
+	return nil
+}
+
+func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Status optionalIntArray `json:"status"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Status.set || len(decoded.Status.values) == 0 {
+		return fmt.Errorf("status must be a non-empty array")
+	}
+	*r = rawBackendRetry{set: true, Status: decoded.Status}
 	return nil
 }
 
@@ -381,6 +417,27 @@ func (i *optionalInt) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (a *optionalIntArray) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("must be an array of integers")
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("must be an array of integers")
+	}
+	values := make([]int, len(raw))
+	for index, rawValue := range raw {
+		var value optionalInt
+		if err := value.UnmarshalJSON(rawValue); err != nil {
+			return fmt.Errorf("item %d must be an integer without a decimal point or exponent", index)
+		}
+		values[index] = value.value
+	}
+	a.set = true
+	a.values = values
+	return nil
+}
+
 func (d *optionalDuration) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return fmt.Errorf("must be a positive Go duration string")
@@ -465,6 +522,16 @@ func decodeConfig(data []byte) (config, error) {
 				return config{}, fmt.Errorf("backends[%q].tries must be between 1 and the target count", name)
 			}
 		}
+		var retry *backendRetryConfig
+		if rawBackend.Retry.set {
+			if !rawBackend.Tries.set || tries <= 1 {
+				return config{}, fmt.Errorf("backends[%q].retry requires tries greater than one", name)
+			}
+			if err := validateRetryStatuses(rawBackend.Retry.Status.values); err != nil {
+				return config{}, fmt.Errorf("backends[%q].retry.status: %w", name, err)
+			}
+			retry = &backendRetryConfig{Status: append([]int(nil), rawBackend.Retry.Status.values...)}
+		}
 		cfg.Backends[name] = backendConfig{
 			Targets: append([]string(nil), (*rawBackend.Targets)...),
 			Tries:   tries,
@@ -472,6 +539,7 @@ func decodeConfig(data []byte) (config, error) {
 				Dial:   rawBackend.Timeout.Dial.value,
 				Header: rawBackend.Timeout.Header.value,
 			},
+			Retry: retry,
 		}
 	}
 	for siteIndex, rawSite := range *raw.Sites {
@@ -564,6 +632,7 @@ const (
 	jsonRoot
 	jsonBackends
 	jsonBackend
+	jsonBackendRetry
 	jsonSites
 	jsonSite
 	jsonRoutes
@@ -658,8 +727,15 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "targets", "tries":
 			return jsonAny, nil
+		case "retry":
+			return jsonBackendRetry, nil
 		case "timeout":
 			return jsonBackendTimeout, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackendRetry:
+		if key == "status" {
+			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackendTimeout:

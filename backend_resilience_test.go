@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"net/textproto"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,7 @@ func TestBackendResilienceConfig(t *testing.T) {
     "app": {
       "targets": ["http://app-1:3000", "http://app-2:3000", "http://app-3:3000"],
       "tries": 2,
+      "retry": {"status": [502, 503, 504]},
       "timeout": {"dial": "250ms", "header": "1m30s"}
     }
   },
@@ -40,7 +42,8 @@ func TestBackendResilienceConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := cfg.Backends["app"]
-	if backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second {
+	if backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second ||
+		!slices.Equal(backend.Retry.Status, []int{502, 503, 504}) {
 		t.Fatalf("decoded backend = %+v", backend)
 	}
 
@@ -48,7 +51,7 @@ func TestBackendResilienceConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := legacy.Backends["app"]; got.Tries != 1 || got.Timeout != (backendTimeout{}) {
+	if got := legacy.Backends["app"]; got.Tries != 1 || got.Timeout != (backendTimeout{}) || got.Retry != nil {
 		t.Fatalf("default backend = %+v", got)
 	}
 
@@ -77,7 +80,26 @@ func TestBackendResilienceConfig(t *testing.T) {
 		"header invalid":          withBackend(`"timeout":{"header":"soon"}`),
 		"duration environment":    withBackend(`"timeout":{"header":"${KUBIO_TIMEOUT}"}`),
 		"duplicate timeout field": withBackend(`"timeout":{"dial":"1s","dial":"2s"}`),
+		"retry null":              withBackend(`"tries":2,"retry":null`),
+		"retry scalar":            withBackend(`"tries":2,"retry":true`),
+		"retry array":             withBackend(`"tries":2,"retry":[]`),
+		"retry empty":             withBackend(`"tries":2,"retry":{}`),
+		"retry missing tries":     withBackend(`"retry":{"status":[503]}`),
+		"retry one try":           withBackend(`"tries":1,"retry":{"status":[503]}`),
+		"retry null status":       withBackend(`"tries":2,"retry":{"status":null}`),
+		"retry scalar status":     withBackend(`"tries":2,"retry":{"status":503}`),
+		"retry empty status":      withBackend(`"tries":2,"retry":{"status":[]}`),
+		"retry status string":     withBackend(`"tries":2,"retry":{"status":["503"]}`),
+		"retry status decimal":    withBackend(`"tries":2,"retry":{"status":[503.0]}`),
+		"retry status exponent":   withBackend(`"tries":2,"retry":{"status":[5.03e2]}`),
+		"retry status low":        withBackend(`"tries":2,"retry":{"status":[399]}`),
+		"retry status high":       withBackend(`"tries":2,"retry":{"status":[600]}`),
+		"retry duplicate status":  withBackend(`"tries":2,"retry":{"status":[503,503]}`),
+		"retry duplicate field":   withBackend(`"tries":2,"retry":{"status":[503],"status":[504]}`),
+		"retry unknown field":     withBackend(`"tries":2,"retry":{"status":[503],"codes":[503]}`),
+		"retry alias":             withBackend(`"tries":2,"retries":{"status":[503]}`),
 		"site timeout":            `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"dial":"1s"}}]}`,
+		"site retry":              `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","retry":{"status":[503]}}]}`,
 	}
 	for name, data := range invalid {
 		t.Run(name, func(t *testing.T) {
@@ -196,6 +218,154 @@ func TestBackendDoesNotRetryHTTPResponse(t *testing.T) {
 	}
 }
 
+func TestBackendRetriesConfiguredStatuses(t *testing.T) {
+	var firstHits atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		firstHits.Add(1)
+		w.Header().Set("X-Attempt", "first")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "unavailable")
+	}))
+	defer first.Close()
+
+	var secondHits atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondHits.Add(1)
+		w.Header().Set("X-Attempt", "second")
+		_, _ = io.WriteString(w, "healthy")
+	}))
+	defer second.Close()
+
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{first.URL, second.URL},
+			Tries:   2,
+			Retry:   &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "healthy" || response.Header().Get("X-Attempt") != "second" {
+		t.Fatalf("response = %d %q headers=%v", response.Code, response.Body.String(), response.Header())
+	}
+	if firstHits.Load() != 1 || secondHits.Load() != 1 {
+		t.Fatalf("hits = first %d, second %d", firstHits.Load(), secondHits.Load())
+	}
+}
+
+func TestBackendStatusRetryStopsAtUnlistedOrFinalStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		firstCode  int
+		secondCode int
+		wantCode   int
+		wantBody   string
+		wantSecond int32
+	}{
+		{name: "unlisted", firstCode: http.StatusBadGateway, secondCode: http.StatusOK, wantCode: http.StatusBadGateway, wantBody: "first", wantSecond: 0},
+		{name: "final matching", firstCode: http.StatusServiceUnavailable, secondCode: http.StatusServiceUnavailable, wantCode: http.StatusServiceUnavailable, wantBody: "second", wantSecond: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var secondHits atomic.Int32
+			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.firstCode)
+				_, _ = io.WriteString(w, "first")
+			}))
+			defer first.Close()
+			second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				secondHits.Add(1)
+				w.WriteHeader(test.secondCode)
+				_, _ = io.WriteString(w, "second")
+			}))
+			defer second.Close()
+
+			handler, err := newRouter(config{
+				Backends: map[string]backendConfig{"app": {
+					Targets: []string{first.URL, second.URL},
+					Tries:   2,
+					Retry:   &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}},
+				}},
+				Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+			if response.Code != test.wantCode || response.Body.String() != test.wantBody || secondHits.Load() != test.wantSecond {
+				t.Fatalf("response = %d %q, second hits = %d", response.Code, response.Body.String(), secondHits.Load())
+			}
+		})
+	}
+}
+
+func TestBackendStatusRetryStopsAfterInformationalResponse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer connection.Close()
+		reader := bufio.NewReader(connection)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		_, err = io.WriteString(connection, "HTTP/1.1 103 Early Hints\r\nX-Early: yes\r\n\r\nHTTP/1.1 503 Service Unavailable\r\nContent-Length: 11\r\nConnection: close\r\n\r\nunavailable")
+		serverDone <- err
+	}()
+
+	var secondHits atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondHits.Add(1)
+		_, _ = io.WriteString(w, "healthy")
+	}))
+	defer second.Close()
+
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://" + listener.Addr().String(), second.URL},
+		Tries:   2,
+		Retry:   &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://proxy/", nil)
+	start := backend.nextTargetIndex()
+	request.URL.Scheme = backend.targets[start].Scheme
+	request.URL.Host = backend.targets[start].Host
+	response, err := backend.RoundTrip(withBackendRetry(request, start))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable || secondHits.Load() != 0 {
+		t.Fatalf("response = %d, second hits = %d", response.StatusCode, secondHits.Load())
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRetryableBackendRequest(t *testing.T) {
 	request := func(method string) *http.Request {
 		return httptest.NewRequest(method, "http://proxy/", nil)
@@ -288,8 +458,12 @@ func TestBackendDoesNotRetryIneligibleRequests(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			healthyHits.Store(0)
 			handler, err := newRouter(config{
-				Backends: map[string]backendConfig{"app": {Targets: []string{closedURL, healthy.URL}, Tries: 2}},
-				Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+				Backends: map[string]backendConfig{"app": {
+					Targets: []string{closedURL, healthy.URL},
+					Tries:   2,
+					Retry:   &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}},
+				}},
+				Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
 			})
 			if err != nil {
 				t.Fatal(err)

@@ -42,10 +42,11 @@ type proxyBufferPool struct {
 }
 
 type backend struct {
-	targets   []*url.URL
-	tries     int
-	transport *http.Transport
-	nextIndex atomic.Uint64
+	targets       []*url.URL
+	tries         int
+	retryStatuses map[int]struct{}
+	transport     *http.Transport
+	nextIndex     atomic.Uint64
 }
 
 type backendRetryKey struct{}
@@ -68,6 +69,23 @@ func (p *proxyBufferPool) Put(buffer []byte) {
 	}
 }
 
+func validateRetryStatuses(statuses []int) error {
+	if len(statuses) == 0 {
+		return fmt.Errorf("must not be empty")
+	}
+	seen := make(map[int]struct{}, len(statuses))
+	for index, status := range statuses {
+		if status < 400 || status > 599 {
+			return fmt.Errorf("item %d must be between 400 and 599", index)
+		}
+		if _, exists := seen[status]; exists {
+			return fmt.Errorf("item %d duplicates status %d", index, status)
+		}
+		seen[status] = struct{}{}
+	}
+	return nil
+}
+
 func newBackend(cfg backendConfig) (*backend, error) {
 	if len(cfg.Targets) == 0 {
 		return nil, fmt.Errorf("targets must not be empty")
@@ -78,6 +96,19 @@ func newBackend(cfg backendConfig) (*backend, error) {
 	}
 	if tries < 1 || tries > len(cfg.Targets) {
 		return nil, fmt.Errorf("tries must be between 1 and the target count")
+	}
+	var retryStatuses map[int]struct{}
+	if cfg.Retry != nil {
+		if tries <= 1 {
+			return nil, fmt.Errorf("retry requires tries greater than one")
+		}
+		if err := validateRetryStatuses(cfg.Retry.Status); err != nil {
+			return nil, fmt.Errorf("retry.status: %w", err)
+		}
+		retryStatuses = make(map[int]struct{}, len(cfg.Retry.Status))
+		for _, status := range cfg.Retry.Status {
+			retryStatuses[status] = struct{}{}
+		}
 	}
 	dialTimeout := cfg.Timeout.Dial
 	if dialTimeout == 0 {
@@ -106,9 +137,10 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		targets[index] = target
 	}
 	return &backend{
-		targets:   targets,
-		tries:     tries,
-		transport: newProxyTransport(dialTimeout, responseHeaderTimeout),
+		targets:       targets,
+		tries:         tries,
+		retryStatuses: retryStatuses,
+		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
 	}, nil
 }
 
@@ -138,33 +170,44 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 		return b.transport.RoundTrip(request)
 	}
 
-	response, lastErr := b.transport.RoundTrip(request)
-	if lastErr == nil {
-		return response, nil
-	}
-	if state.informational.Load() || request.Context().Err() != nil {
-		return nil, lastErr
-	}
+	for attempt := 0; attempt < b.tries; attempt++ {
+		current := request
+		if attempt > 0 {
+			state.informational.Store(false)
+			outgoing := request.Clone(request.Context())
+			requestURL := *request.URL
+			target := b.targets[(state.start+attempt)%len(b.targets)]
+			requestURL.Scheme = target.Scheme
+			requestURL.Host = target.Host
+			outgoing.URL = &requestURL
+			current = outgoing
+		}
 
-	for attempt := 1; attempt < b.tries; attempt++ {
-		state.informational.Store(false)
-		outgoing := request.Clone(request.Context())
-		requestURL := *request.URL
-		target := b.targets[(state.start+attempt)%len(b.targets)]
-		requestURL.Scheme = target.Scheme
-		requestURL.Host = target.Host
-		outgoing.URL = &requestURL
+		response, err := b.transport.RoundTrip(current)
+		if err != nil {
+			if state.informational.Load() || request.Context().Err() != nil || attempt+1 == b.tries {
+				return nil, err
+			}
+			continue
+		}
 
-		response, err := b.transport.RoundTrip(outgoing)
-		if err == nil {
+		if attempt+1 == b.tries || state.informational.Load() {
 			return response, nil
 		}
-		lastErr = err
-		if state.informational.Load() || request.Context().Err() != nil {
-			break
+		if b.retryStatuses == nil {
+			return response, nil
+		}
+		if _, retry := b.retryStatuses[response.StatusCode]; !retry {
+			return response, nil
+		}
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
+		if err := request.Context().Err(); err != nil {
+			return nil, err
 		}
 	}
-	return nil, lastErr
+	return nil, context.Canceled
 }
 
 func withBackendRetry(request *http.Request, start int) *http.Request {
