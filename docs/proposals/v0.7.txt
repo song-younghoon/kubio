@@ -1,20 +1,23 @@
-Kubio kubio.json v0.6 Proposal
+Kubio kubio.json v0.7 Proposal
 Status: Deferred features; discussion not started
-Base: v0.5
+Base: v0.6
 
 
 1. Purpose
 
-This proposal carries every candidate deferred by v0.5. It defines no agreed
-behavior yet. Its scope must be narrowed before promotion.
+This proposal carries every candidate deferred by v0.6. Sections 2 through 8
+are the exhaustive carried set. They define no agreed behavior yet, and the
+scope must be narrowed before promotion.
 
 
-2. Backend resilience and upstream transport
+2. Remaining backend resilience and upstream transport
 
-- Retry and failover rules.
 - Active or passive health checks.
 - Weighted target selection.
-- Per-backend connection and response-header timeouts.
+- Status-based retry policies.
+- Request-body replay and explicit idempotency policies.
+- Retry backoff, total deadlines, and retry budgets.
+- Direct-target timeout options and response-body timeouts.
 - HTTPS upstream CA and SNI settings.
 
 

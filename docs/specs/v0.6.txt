@@ -1,0 +1,264 @@
+Kubio kubio.json v0.6 Specification
+Status: Agreed specification
+Base: v0.5
+
+
+1. Scope
+
+v0.6 adds bounded transport retries and configurable upstream timeouts to
+named backends. The new backend fields are `tries` and `timeout`, with
+`timeout.dial` and `timeout.header` as its only members.
+
+This is the complete v0.6 configuration scope. Direct targets retain the v0.1
+fixed timeout and single-attempt behavior. Health checks, weighted targets,
+status-based retries, backoff, and upstream TLS configuration remain deferred.
+Every valid v0.5 configuration remains valid and has the same effective
+behavior.
+
+The short option names are intentional. Kubio has not had a stable release,
+and no compatibility aliases are introduced.
+
+
+2. Backend configuration
+
+A backend may add `tries` and `timeout` beside its required `targets` field:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": [
+            "http://app-1:3000",
+            "http://app-2:3000",
+            "http://app-3:3000"
+          ],
+          "tries": 3,
+          "timeout": {
+            "dial": "2s",
+            "header": "15s"
+          }
+        }
+      },
+      "sites": [
+        {
+          "hosts": ["example.com"],
+          "backend": "app"
+        }
+      ]
+    }
+
+`tries` is the maximum total number of Kubio-level upstream attempts, as
+defined in section 4, for one eligible request. It includes the initial
+attempt and is not the number of retries. Therefore, `tries: 3` permits one
+initial attempt and at most two retries.
+
+When absent, `tries` defaults to 1. Its value must be a JSON integer from 1
+through the number of targets in that backend, inclusive. It must be written
+without a decimal point or exponent; `1.0` and `1e0` are invalid. Limiting it
+to the target count guarantees that Kubio never selects the same target-array
+index twice in one Kubio-level attempt sequence.
+
+`timeout` is optional. When present, it must be a non-null object containing at
+least one of these fields:
+
+- `dial`: maximum duration for one new upstream connection establishment.
+- `header`: maximum duration to wait for upstream response headers after the
+  request has been written.
+
+Each field is optional within a present `timeout` object. An omitted `dial`
+uses the v0.1 default of 5s, and an omitted `header` uses the v0.1 default of
+30s. Omitting the entire object uses both defaults.
+
+Both values are JSON strings in the syntax accepted by Go's
+`time.ParseDuration`, such as `250ms`, `2s`, `1m30s`, or `1h`. The parsed
+duration must be greater than zero. Values are case-sensitive, are not trimmed,
+and do not support environment-variable expansion.
+
+Unknown backend or timeout fields are configuration errors. The v0.2 backend
+name, target, duplicate-target, reference, and strict JSON rules remain
+unchanged.
+
+
+3. Timeout behavior
+
+The configured backend timeouts apply to every request that selects that
+backend, whether or not the request is eligible for retry.
+
+`dial` applies whenever Kubio must create a connection to an upstream target.
+One use of the duration limits the complete DNS and TCP dialing operation,
+including all resolved-address connection attempts made by that operation. For
+an HTTPS target, the TLS handshake then receives a separate full use of the
+same duration. `dial` has no effect when an existing pooled connection is
+reused.
+
+`header` applies independently to each attempt. It runs continuously from the
+completion of the outbound request write, including any request body, until a
+terminal upstream response's headers arrive. A nonterminal informational 1xx
+response neither satisfies nor resets this duration. `header` does not limit
+response-body streaming. Existing client cancellation and request-context
+cancellation stop an in-progress attempt regardless of these values.
+
+Each retry receives fresh `dial` and `header` limits. These options do not
+impose a total attempt or request deadline. Request writing and request-body
+streaming have no v0.6 timeout, and standard transport recovery described in
+section 4 may repeat a connection stage. v0.6 adds no retry delay or backoff.
+
+Direct site or route `target` values continue to use a 5s connection and TLS
+handshake timeout, a 30s response-header timeout, and no response-body timeout.
+There is no site-level, route-level, or global timeout option in v0.6.
+
+
+4. Backend selection and attempt order
+
+A Kubio-level attempt is one target-array index selected by Kubio and one call
+to the standard upstream transport for that target. `tries` limits these
+Kubio-level attempts, not individual DNS queries, addresses, connections, or
+wire transmissions inside the standard transport.
+
+The standard Go transport may transparently recover a stale pooled connection
+or a protocol event by reconnecting to the same selected target. Such internal
+recovery remains part of one Kubio-level attempt, may contact the same target
+again, and does not consume `tries`.
+
+Each request selecting a named backend consumes exactly one v0.2 round-robin
+starting selection. That selection determines the first target and advances
+the shared backend selector once. Additional Kubio-level attempts do not
+advance the shared selector.
+
+If the selected starting index is S and the backend has N targets, attempt K
+uses index `(S + K) mod N`, where K starts at zero. Because `tries` cannot
+exceed N, all target-array indexes selected by Kubio for one request are
+distinct.
+
+For targets A, B, and C with `tries: 3`, requests whose initial round-robin
+selections are A, B, and C have these possible attempt orders:
+
+    A, B, C
+    B, C, A
+    C, A, B
+
+An attempt order may stop early as defined in section 5. Concurrent requests
+may select the same target at the same time. Their initial selections still
+form the single atomic v0.2 A, B, C sequence; additional attempts are local to
+each request and create no additional global selections.
+
+`tries: 1` is exactly the v0.2 single-selection behavior. An ineligible request
+also makes exactly one attempt even when its backend configures a larger value.
+
+
+5. Retry eligibility and stopping rules
+
+Kubio retries only when all of these conditions hold:
+
+- The selected backend has remaining attempts under `tries`.
+- The request method is exactly GET, HEAD, OPTIONS, or TRACE.
+- The received request's Go `ContentLength` is exactly zero, its
+  `TransferEncoding` and `Trailer` collections are empty, and its `Body` is nil
+  or `http.NoBody`. Both an absent Content-Length field and an explicit
+  Content-Length: 0 qualify. Unknown length, any transfer encoding, an
+  announced trailer, or any body makes the request ineligible.
+- The request is not an HTTP/1 upgrade: the Connection field does not contain
+  the Upgrade token case-insensitively together with a non-empty Upgrade
+  protocol. CONNECT is already ineligible by method, including an HTTP/2 or
+  HTTP/3 extended CONNECT.
+- No upstream response headers, including informational 1xx headers, have
+  been received for the failed attempt.
+- The client/request context has not been canceled or reached its deadline.
+- The upstream attempt ended with a transport error rather than an HTTP
+  response.
+
+Eligible transport errors include name-resolution, connection, TLS, request
+write, response-header timeout, protocol, and unusable-response failures that
+occur before any response headers. A retry starts immediately at the next
+target in section 4. A nonterminal 1xx response is forwarded under the prior
+specifications; if its attempt later fails, that request cannot retry.
+
+Kubio never retries in v0.6:
+
+- POST, PUT, PATCH, DELETE, CONNECT, a nonstandard method, or a case variant of
+  an eligible method at the Kubio target-selection layer.
+- A request carrying or streaming a body, even if it might be replayable.
+- A WebSocket or other upgrade request.
+- A failure after any informational or final response headers were received.
+- An upstream HTTP status, including 408, 421, 425, 429, 500, 502, 503, or 504.
+- A direct site or route `target` selection.
+
+These restrictions govern additional Kubio target selections and avoid
+replaying potentially state-changing work across targets or mixing their
+response bytes. Kubio does not inspect Idempotency-Key or another request
+header to broaden this eligibility. The standard transport's internal recovery
+from section 4 remains inherited behavior and may use such a header without
+selecting another target.
+
+A usable response is a successfully parsed terminal upstream response: 101
+Switching Protocols or any response with status 200 or greater. Every such
+status, including the listed error statuses, stops the attempt sequence and is
+forwarded unchanged except for the existing selected response policy. Response
+policies run once on that terminal response. Failed attempts contribute no
+final status, headers, trailers, or body bytes; a forwarded nonterminal 1xx is
+the sole exception already described above.
+
+
+6. Exhaustion and errors
+
+If no attempt returns a usable response, Kubio handles the last attempt's
+error using the v0.1 rules:
+
+- A connection, TLS, response-header, or other timeout produces 504.
+- Another upstream transport or protocol failure produces 502.
+
+The final classification depends on the final attempted error, not an earlier
+error. Error bodies remain Kubio-generated responses, so site and route
+`response` policies do not modify them under v0.5.
+
+If an attempt forwards a nonterminal 1xx and then fails, Kubio performs no
+additional target attempt. It sends the v0.1 502 or 504 final error response
+when the downstream connection still permits it; the already forwarded 1xx is
+not withdrawn and does not affect final error classification.
+
+Kubio does not expose attempted target addresses or detailed transport errors
+to the client. An exhausted request consumes only its one initial backend
+selection, regardless of the number of targets attempted.
+
+
+7. Reload and concurrency
+
+The v0.1 atomic reload rules continue to apply. A failed reload retains the
+complete active router, backend selectors, retry settings, timeout settings,
+and connection pools.
+
+A successful reload creates new backend selectors and transport settings. Each
+new selector starts at target index 0 as in v0.2. Requests already using the old
+router complete under its old attempt and timeout settings; new requests use
+the new settings without downtime. Idle connections belonging only to the old
+router may be closed after the swap, but active connections and response-body
+streams are not interrupted.
+
+Retry state is request-local. Apart from the existing atomic starting selector,
+v0.6 adds no shared mutable health or failure state. One request's failure does
+not mark a target unavailable for another request.
+
+
+8. Validation summary
+
+In addition to the prior specifications, configuration loading rejects:
+
+- `tries` that is null, is not a JSON number written without a decimal point
+  or exponent, is less than 1, or is greater than the backend's target count.
+- `timeout` that is null, not an object, empty, or contains an unknown field.
+- `dial` or `header` that is null, not a string, not accepted by
+  `time.ParseDuration`, or parses to a duration less than or equal to zero.
+
+Invalid startup configuration exits before listening. An invalid reload logs a
+sanitized error and retains the entire prior configuration. Duration values
+and target URLs need not be included in an error message; a message may name
+the backend, option, and error category.
+
+
+9. Deferred features
+
+v0.6 does not add health checks, weighted targets, status-based retries,
+request-body replay, retry backoff or budgets, direct-target timeout options,
+response-body timeouts, upstream CA/SNI options, or any candidate outside
+backend transport resilience. The exhaustive deferred set carried from the
+former v0.6 proposal is recorded in v0.7 sections 2 through 8.
