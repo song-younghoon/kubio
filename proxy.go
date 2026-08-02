@@ -418,6 +418,18 @@ func withBackendRetry(request *http.Request, start int) *http.Request {
 }
 
 func retryableBackendRequest(request *http.Request, methods map[string]struct{}, bodyMax int64) bool {
+	if methods == nil && bodyMax == 0 {
+		switch request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		default:
+			return false
+		}
+		if request.ContentLength != 0 || len(request.TransferEncoding) != 0 || len(request.Trailer) != 0 ||
+			request.Body != nil && request.Body != http.NoBody {
+			return false
+		}
+		return !upgradeRequest(request)
+	}
 	if request.Method == http.MethodConnect {
 		return false
 	}
@@ -459,7 +471,14 @@ func prepareRetryBody(request *http.Request, max int64) error {
 		}
 		return fail(errRetryBodyTooLarge)
 	}
-	payload := make([]byte, 0, minInt64(max, int64(proxyBufferSize)))
+	capacity := int64(proxyBufferSize)
+	if max < capacity {
+		capacity = max
+	}
+	if request.ContentLength > 0 && request.ContentLength < capacity {
+		capacity = request.ContentLength
+	}
+	payload := make([]byte, 0, int(capacity))
 	chunk := make([]byte, proxyBufferSize)
 	emptyReads := 0
 	for {
@@ -504,13 +523,6 @@ func prepareRetryBody(request *http.Request, max int64) error {
 	request.TransferEncoding = nil
 	request.Trailer = nil
 	return nil
-}
-
-func minInt64(left, right int64) int {
-	if left < right {
-		return int(left)
-	}
-	return int(right)
 }
 
 func releaseRetryBody(request *http.Request) {
@@ -581,7 +593,7 @@ func newBackendProxy(
 		start := backend.nextTargetIndex()
 		rewriteProxyRequest(request, backend.targets[start], headers, trustProxies)
 		if retryableBackendRequest(request.In, backend.retryMethods, backend.retryBodyMax) {
-			if request.In.Body != nil && request.In.Body != http.NoBody {
+			if backend.retryBodyMax > 0 && request.In.Body != nil && request.In.Body != http.NoBody {
 				request.Out.Body = request.In.Body
 			}
 			request.Out = withBackendRetry(request.Out, start)
