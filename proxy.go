@@ -91,7 +91,12 @@ func (b *backend) nextTarget() *url.URL {
 	}
 }
 
-func newProxy(raw string, headers, responseHeaders map[string]string, trustProxies []netip.Prefix) (*httputil.ReverseProxy, error) {
+func newProxy(
+	raw string,
+	headers map[string]string,
+	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
+	trustProxies []netip.Prefix,
+) (*httputil.ReverseProxy, error) {
 	target, err := parseTarget(raw)
 	if err != nil {
 		return nil, err
@@ -99,63 +104,86 @@ func newProxy(raw string, headers, responseHeaders map[string]string, trustProxi
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}, responseHeaders), nil
+	}, siteResponseHeaders, routeResponseHeaders), nil
 }
 
-func newBackendProxy(backend *backend, headers, responseHeaders map[string]string, trustProxies []netip.Prefix) *httputil.ReverseProxy {
+func newBackendProxy(
+	backend *backend,
+	headers map[string]string,
+	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
+	trustProxies []netip.Prefix,
+) *httputil.ReverseProxy {
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
-	}, responseHeaders)
+	}, siteResponseHeaders, routeResponseHeaders)
 }
 
-func newReverseProxy(rewrite func(*httputil.ProxyRequest), responseHeaders map[string]string) *httputil.ReverseProxy {
+func newReverseProxy(
+	rewrite func(*httputil.ProxyRequest),
+	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
+) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Rewrite:      rewrite,
 		Transport:    proxyTransport,
 		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
-	if len(responseHeaders) > 0 {
+	if !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
 		proxy.ModifyResponse = func(response *http.Response) error {
-			replaceResponseHeaders(response, responseHeaders)
+			applyResponseHeaders(response, siteResponseHeaders)
+			applyResponseHeaders(response, routeResponseHeaders)
 			return nil
 		}
 	}
 	return proxy
 }
 
-func replaceResponseHeaders(response *http.Response, configured map[string]string) {
-	if response.Header == nil {
-		response.Header = make(http.Header, len(configured))
-	}
-	canonical := true
-	for name := range configured {
-		if http.CanonicalHeaderKey(name) != name {
-			canonical = false
-			break
+func emptyResponseHeaderPolicy(policy responseHeaderPolicy) bool {
+	return len(policy.Set) == 0 && len(policy.Add) == 0 && len(policy.Remove) == 0
+}
+
+func applyResponseHeaders(response *http.Response, policy responseHeaderPolicy) {
+	for _, name := range policy.Remove {
+		if !containsHeaderName(response.Trailer, name) {
+			deleteResponseHeader(response.Header, name)
 		}
 	}
-	if canonical {
-		for name := range response.Header {
-			if http.CanonicalHeaderKey(name) != name {
-				canonical = false
-				break
-			}
-		}
+	if response.Header == nil && (len(policy.Set) > 0 || len(policy.Add) > 0) {
+		response.Header = make(http.Header, len(policy.Set)+len(policy.Add))
 	}
-	for name, value := range configured {
+	for name, values := range policy.Set {
 		if containsHeaderName(response.Trailer, name) {
 			continue
 		}
-		if !canonical {
-			for existing := range response.Header {
-				if strings.EqualFold(existing, name) {
-					delete(response.Header, existing)
-				}
-			}
-		}
-		response.Header[name] = []string{value}
+		deleteResponseHeader(response.Header, name)
+		response.Header[name] = append([]string(nil), values...)
 	}
+	for name, values := range policy.Add {
+		if containsHeaderName(response.Trailer, name) {
+			continue
+		}
+		response.Header[name] = append(headerValuesFor(response.Header, name), values...)
+	}
+}
+
+func deleteResponseHeader(headers http.Header, name string) {
+	for existing := range headers {
+		if strings.EqualFold(existing, name) {
+			delete(headers, existing)
+		}
+	}
+}
+
+func headerValuesFor(headers http.Header, name string) []string {
+	values := append([]string(nil), headers[name]...)
+	delete(headers, name)
+	for existing, existingValues := range headers {
+		if strings.EqualFold(existing, name) {
+			values = append(values, existingValues...)
+			delete(headers, existing)
+		}
+	}
+	return values
 }
 
 func containsHeaderName(headers http.Header, name string) bool {

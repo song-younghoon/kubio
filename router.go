@@ -122,10 +122,18 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 	}
 	siteResponseHeaders, err := resolveResponseHeaders(cfg.ResponseHeaders)
 	if err != nil {
-		return site{}, fmt.Errorf("responseHeaders.set: %w", err)
+		return site{}, fmt.Errorf("response: %w", err)
 	}
 
-	proxy, err := newProxyForSelection(cfg.Target, cfg.Backend, siteHeaders, siteResponseHeaders, trustProxies, backends)
+	proxy, err := newProxyForSelection(
+		cfg.Target,
+		cfg.Backend,
+		siteHeaders,
+		siteResponseHeaders,
+		responseHeaderPolicy{},
+		trustProxies,
+		backends,
+	)
 	if err != nil {
 		return site{}, err
 	}
@@ -150,7 +158,7 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		}
 		routeResponseHeaders, err := resolveResponseHeaders(routeConfig.ResponseHeaders)
 		if err != nil {
-			return site{}, fmt.Errorf("routes[%d].responseHeaders.set: %w", routeIndex, err)
+			return site{}, fmt.Errorf("routes[%d].response: %w", routeIndex, err)
 		}
 
 		target, backendName := cfg.Target, cfg.Backend
@@ -161,7 +169,8 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 			target,
 			backendName,
 			mergeHeaders(siteHeaders, routeHeaders),
-			mergeHeaders(siteResponseHeaders, routeResponseHeaders),
+			siteResponseHeaders,
+			routeResponseHeaders,
 			trustProxies,
 			backends,
 		)
@@ -199,13 +208,19 @@ func newBackends(configs map[string]backendConfig) (map[string]*backend, error) 
 	return backends, nil
 }
 
-func newProxyForSelection(target, backendName string, headers, responseHeaders map[string]string, trustProxies []netip.Prefix, backends map[string]*backend) (*httputil.ReverseProxy, error) {
+func newProxyForSelection(
+	target, backendName string,
+	headers map[string]string,
+	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
+	trustProxies []netip.Prefix,
+	backends map[string]*backend,
+) (*httputil.ReverseProxy, error) {
 	hasTarget, hasBackend := target != "", backendName != ""
 	if hasTarget == hasBackend {
 		return nil, fmt.Errorf("must set exactly one of target or backend")
 	}
 	if hasTarget {
-		proxy, err := newProxy(target, headers, responseHeaders, trustProxies)
+		proxy, err := newProxy(target, headers, siteResponseHeaders, routeResponseHeaders, trustProxies)
 		if err != nil {
 			return nil, fmt.Errorf("target: %w", err)
 		}
@@ -215,7 +230,7 @@ func newProxyForSelection(target, backendName string, headers, responseHeaders m
 	if !ok {
 		return nil, fmt.Errorf("backend %q is not defined", backendName)
 	}
-	return newBackendProxy(backend, headers, responseHeaders, trustProxies), nil
+	return newBackendProxy(backend, headers, siteResponseHeaders, routeResponseHeaders, trustProxies), nil
 }
 
 func parseTrustedProxies(raw []string) ([]netip.Prefix, error) {

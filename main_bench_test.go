@@ -120,7 +120,7 @@ func BenchmarkProxyRequest(b *testing.B) {
 	}
 }
 
-func BenchmarkReplaceResponseHeaders(b *testing.B) {
+func BenchmarkApplyResponseHeaders(b *testing.B) {
 	for _, test := range []struct {
 		name            string
 		policyHeaders   int
@@ -131,7 +131,7 @@ func BenchmarkReplaceResponseHeaders(b *testing.B) {
 		{name: "stress_64x128", policyHeaders: 64, upstreamHeaders: 128, trailers: 8},
 	} {
 		b.Run(test.name, func(b *testing.B) {
-			configured := make(map[string]string, test.policyHeaders)
+			configured := make(map[string][]string, test.policyHeaders)
 			headers := make(http.Header, test.policyHeaders+test.upstreamHeaders)
 			trailers := make(http.Header, test.trailers)
 			for index := range test.upstreamHeaders {
@@ -139,19 +139,20 @@ func BenchmarkReplaceResponseHeaders(b *testing.B) {
 			}
 			for index := range test.policyHeaders {
 				name := "X-Policy-" + strconv.Itoa(index)
-				configured[name] = "configured"
+				configured[name] = []string{"configured"}
 				headers[name] = []string{"upstream-a", "upstream-b"}
 				if index < test.trailers {
 					trailers[name] = nil
 				}
 			}
-			configured["X-Policy-"+strconv.Itoa(test.policyHeaders-1)] = ""
+			configured["X-Policy-"+strconv.Itoa(test.policyHeaders-1)] = []string{""}
 			response := &http.Response{Header: headers, Trailer: trailers}
+			policy := responseHeaderPolicy{Set: configured}
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				replaceResponseHeaders(response, configured)
+				applyResponseHeaders(response, policy)
 			}
 			b.StopTimer()
 

@@ -23,22 +23,28 @@ type backendConfig struct {
 }
 
 type siteConfig struct {
-	Hosts           []string          `json:"hosts"`
-	Target          string            `json:"target"`
-	Backend         string            `json:"backend"`
-	Headers         map[string]string `json:"headers"`
-	ResponseHeaders map[string]string `json:"responseHeaders"`
-	Routes          []routeConfig     `json:"routes"`
+	Hosts           []string             `json:"hosts"`
+	Target          string               `json:"target"`
+	Backend         string               `json:"backend"`
+	Headers         map[string]string    `json:"headers"`
+	ResponseHeaders responseHeaderPolicy `json:"response"`
+	Routes          []routeConfig        `json:"routes"`
 }
 
 type routeConfig struct {
-	Path            string            `json:"path"`
-	Methods         []string          `json:"methods"`
-	Target          string            `json:"target"`
-	Backend         string            `json:"backend"`
-	Headers         map[string]string `json:"headers"`
-	ResponseHeaders map[string]string `json:"responseHeaders"`
-	Strip           bool              `json:"strip"`
+	Path            string               `json:"path"`
+	Methods         []string             `json:"methods"`
+	Target          string               `json:"target"`
+	Backend         string               `json:"backend"`
+	Headers         map[string]string    `json:"headers"`
+	ResponseHeaders responseHeaderPolicy `json:"response"`
+	Strip           bool                 `json:"strip"`
+}
+
+type responseHeaderPolicy struct {
+	Set    map[string][]string
+	Add    map[string][]string
+	Remove []string
 }
 
 type rawConfig struct {
@@ -57,7 +63,7 @@ type rawSiteConfig struct {
 	Target          optionalString     `json:"target"`
 	Backend         optionalString     `json:"backend"`
 	Headers         headerMap          `json:"headers"`
-	ResponseHeaders rawResponseHeaders `json:"responseHeaders"`
+	ResponseHeaders rawResponseHeaders `json:"response"`
 	Routes          rawRoutes          `json:"routes"`
 }
 
@@ -67,15 +73,18 @@ type rawRouteConfig struct {
 	Target          optionalString      `json:"target"`
 	Backend         optionalString      `json:"backend"`
 	Headers         headerMap           `json:"headers"`
-	ResponseHeaders rawResponseHeaders  `json:"responseHeaders"`
+	ResponseHeaders rawResponseHeaders  `json:"response"`
 	Strip           strictBool          `json:"strip"`
 }
 
 type rawResponseHeaders struct {
-	Set headerMap `json:"set"`
+	Set    optionalHeaderValues `json:"set"`
+	Add    optionalHeaderValues `json:"add"`
+	Remove optionalStringArray  `json:"remove"`
 }
 
 type headerMap map[string]string
+type headerValues map[string][]string
 
 type stringArray []string
 type rawBackends map[string]rawBackendConfig
@@ -89,6 +98,11 @@ type optionalString struct {
 type optionalStringArray struct {
 	set    bool
 	values stringArray
+}
+
+type optionalHeaderValues struct {
+	set    bool
+	values headerValues
 }
 
 type strictBool bool
@@ -162,13 +176,19 @@ func (h *rawResponseHeaders) UnmarshalJSON(data []byte) error {
 	if err := decoder.Decode(&decoded); err != nil {
 		return err
 	}
-	if decoded.Set == nil {
-		return fmt.Errorf("set must be set")
+	if !decoded.Set.set && !decoded.Add.set && !decoded.Remove.set {
+		return fmt.Errorf("must contain at least one of set, add, or remove")
 	}
-	if len(decoded.Set) == 0 {
+	if decoded.Set.set && len(decoded.Set.values) == 0 {
 		return fmt.Errorf("set must not be empty")
 	}
-	h.Set = decoded.Set
+	if decoded.Add.set && len(decoded.Add.values) == 0 {
+		return fmt.Errorf("add must not be empty")
+	}
+	if decoded.Remove.set && len(decoded.Remove.values) == 0 {
+		return fmt.Errorf("remove must not be empty")
+	}
+	*h = rawResponseHeaders(decoded)
 	return nil
 }
 
@@ -192,6 +212,16 @@ func (a *optionalStringArray) UnmarshalJSON(data []byte) error {
 	}
 	a.set = true
 	a.values = values
+	return nil
+}
+
+func (h *optionalHeaderValues) UnmarshalJSON(data []byte) error {
+	var values headerValues
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	h.set = true
+	h.values = values
 	return nil
 }
 
@@ -268,10 +298,14 @@ func decodeConfig(data []byte) (config, error) {
 		}
 
 		site := siteConfig{
-			Hosts:           append([]string(nil), (*rawSite.Hosts)...),
-			Headers:         map[string]string(rawSite.Headers),
-			ResponseHeaders: map[string]string(rawSite.ResponseHeaders.Set),
-			Routes:          make([]routeConfig, len(rawSite.Routes)),
+			Hosts:   append([]string(nil), (*rawSite.Hosts)...),
+			Headers: map[string]string(rawSite.Headers),
+			ResponseHeaders: responseHeaderPolicy{
+				Set:    map[string][]string(rawSite.ResponseHeaders.Set.values),
+				Add:    map[string][]string(rawSite.ResponseHeaders.Add.values),
+				Remove: append([]string(nil), rawSite.ResponseHeaders.Remove.values...),
+			},
+			Routes: make([]routeConfig, len(rawSite.Routes)),
 		}
 		if rawSite.Target.set {
 			site.Target = rawSite.Target.value
@@ -297,11 +331,15 @@ func decodeConfig(data []byte) (config, error) {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].backend must not be empty", siteIndex, routeIndex)
 			}
 			route := routeConfig{
-				Path:            *rawRoute.Path,
-				Methods:         append([]string(nil), rawRoute.Methods.values...),
-				Headers:         map[string]string(rawRoute.Headers),
-				ResponseHeaders: map[string]string(rawRoute.ResponseHeaders.Set),
-				Strip:           bool(rawRoute.Strip),
+				Path:    *rawRoute.Path,
+				Methods: append([]string(nil), rawRoute.Methods.values...),
+				Headers: map[string]string(rawRoute.Headers),
+				ResponseHeaders: responseHeaderPolicy{
+					Set:    map[string][]string(rawRoute.ResponseHeaders.Set.values),
+					Add:    map[string][]string(rawRoute.ResponseHeaders.Add.values),
+					Remove: append([]string(nil), rawRoute.ResponseHeaders.Remove.values...),
+				},
+				Strip: bool(rawRoute.Strip),
 			}
 			if rawRoute.Target.set {
 				route.Target = rawRoute.Target.value
@@ -432,7 +470,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonAny, nil
 		case "headers":
 			return jsonHeaders, nil
-		case "responseHeaders":
+		case "response":
 			return jsonResponseHeaders, nil
 		case "routes":
 			return jsonRoutes, nil
@@ -444,13 +482,16 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonAny, nil
 		case "headers":
 			return jsonHeaders, nil
-		case "responseHeaders":
+		case "response":
 			return jsonResponseHeaders, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonResponseHeaders:
-		if key == "set" {
+		switch key {
+		case "set", "add":
 			return jsonHeaders, nil
+		case "remove":
+			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	default:
@@ -493,6 +534,40 @@ func (m *headerMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (m *headerValues) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("headers must be an object: %w", err)
+	}
+	if raw == nil {
+		return fmt.Errorf("headers must be an object")
+	}
+
+	values := make(headerValues, len(raw))
+	for name, encoded := range raw {
+		encoded = bytes.TrimSpace(encoded)
+		if len(encoded) > 0 && encoded[0] == '"' {
+			var value string
+			if err := json.Unmarshal(encoded, &value); err != nil {
+				return fmt.Errorf("header %q value must be a string or non-empty array of strings", name)
+			}
+			values[name] = []string{value}
+			continue
+		}
+
+		var array stringArray
+		if err := json.Unmarshal(encoded, &array); err != nil {
+			return fmt.Errorf("header %q value must be a string or non-empty array of strings: %w", name, err)
+		}
+		if len(array) == 0 {
+			return fmt.Errorf("header %q value array must not be empty", name)
+		}
+		values[name] = []string(array)
+	}
+	*m = values
+	return nil
+}
+
 func resolveHeaders(raw map[string]string) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -524,18 +599,82 @@ func resolveHeaders(raw map[string]string) (map[string]string, error) {
 	return headers, nil
 }
 
-func resolveResponseHeaders(raw map[string]string) (map[string]string, error) {
-	headers, err := resolveHeaders(raw)
+func resolveResponseHeaders(raw responseHeaderPolicy) (responseHeaderPolicy, error) {
+	set, err := resolveResponseHeaderValues(raw.Set)
 	if err != nil {
-		return nil, err
+		return responseHeaderPolicy{}, fmt.Errorf("set: %w", err)
 	}
-	for name := range headers {
-		switch name {
-		case "Proxy-Authenticate", "Proxy-Authorization":
-			return nil, fmt.Errorf("header %q is managed by the proxy", name)
+	add, err := resolveResponseHeaderValues(raw.Add)
+	if err != nil {
+		return responseHeaderPolicy{}, fmt.Errorf("add: %w", err)
+	}
+	remove, err := resolveResponseHeaderNames(raw.Remove)
+	if err != nil {
+		return responseHeaderPolicy{}, fmt.Errorf("remove: %w", err)
+	}
+	return responseHeaderPolicy{Set: set, Add: add, Remove: remove}, nil
+}
+
+func resolveResponseHeaderValues(raw map[string][]string) (map[string][]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	headers := make(map[string][]string, len(raw))
+	for rawName, rawValues := range raw {
+		name, err := responseHeaderName(rawName)
+		if err != nil {
+			return nil, err
 		}
+		if _, exists := headers[name]; exists {
+			return nil, fmt.Errorf("duplicate header name %q", name)
+		}
+		if len(rawValues) == 0 {
+			return nil, fmt.Errorf("header %q value array must not be empty", name)
+		}
+
+		values := make([]string, len(rawValues))
+		for index, value := range rawValues {
+			value, err = expandEnv(value)
+			if err != nil {
+				return nil, fmt.Errorf("header %q value %d: %w", name, index, err)
+			}
+			if !validHeaderValue(value) {
+				return nil, fmt.Errorf("header %q value %d contains invalid control characters", name, index)
+			}
+			values[index] = value
+		}
+		headers[name] = values
 	}
 	return headers, nil
+}
+
+func resolveResponseHeaderNames(raw []string) ([]string, error) {
+	names := make([]string, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for index, rawName := range raw {
+		name, err := responseHeaderName(rawName)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: %w", index, err)
+		}
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("contains duplicate header name %q", name)
+		}
+		seen[name] = struct{}{}
+		names[index] = name
+	}
+	return names, nil
+}
+
+func responseHeaderName(name string) (string, error) {
+	if !validHeaderName(name) {
+		return "", fmt.Errorf("invalid header name %q", name)
+	}
+	name = http.CanonicalHeaderKey(name)
+	if restrictedHeader(name) || name == "Proxy-Authenticate" || name == "Proxy-Authorization" {
+		return "", fmt.Errorf("header %q is managed by the proxy", name)
+	}
+	return name, nil
 }
 
 func validHeaderName(name string) bool {
