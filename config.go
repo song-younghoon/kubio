@@ -17,6 +17,8 @@ const (
 	maxRetryBudget             = 1_000_000
 	maxTargetWeight            = 1_000
 	maxTargetWeightTotal       = 10_000
+	maxHealthFailures          = 1_000
+	maxHealthCooldown          = 24 * time.Hour
 )
 
 type config struct {
@@ -34,11 +36,12 @@ type tlsConfig struct {
 }
 
 type backendConfig struct {
-	Targets []string            `json:"targets"`
-	Weights []int               `json:"weights"`
-	Tries   int                 `json:"tries"`
-	Timeout backendTimeout      `json:"timeout"`
-	Retry   *backendRetryConfig `json:"retry"`
+	Targets []string             `json:"targets"`
+	Weights []int                `json:"weights"`
+	Tries   int                  `json:"tries"`
+	Timeout backendTimeout       `json:"timeout"`
+	Health  *backendHealthConfig `json:"health"`
+	Retry   *backendRetryConfig  `json:"retry"`
 }
 
 type backendTimeout struct {
@@ -68,6 +71,11 @@ type backendBackoffConfig struct {
 	Base   time.Duration
 	Cap    time.Duration
 	Jitter bool
+}
+
+type backendHealthConfig struct {
+	Fail int
+	Cool time.Duration
 }
 
 type siteConfig struct {
@@ -121,6 +129,7 @@ type rawBackendConfig struct {
 	Weights optionalIntArray  `json:"weights"`
 	Tries   optionalInt       `json:"tries"`
 	Timeout rawBackendTimeout `json:"timeout"`
+	Health  rawBackendHealth  `json:"health"`
 	Retry   rawBackendRetry   `json:"retry"`
 }
 
@@ -143,6 +152,12 @@ type rawBackendBudget struct {
 	set    bool
 	Max    optionalInt      `json:"max"`
 	Window optionalDuration `json:"window"`
+}
+
+type rawBackendHealth struct {
+	set  bool
+	Fail optionalInt      `json:"fail"`
+	Cool optionalDuration `json:"cool"`
 }
 
 type rawBackendBackoff struct {
@@ -365,6 +380,30 @@ func (b *rawBackendBudget) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("window must be set")
 	}
 	*b = rawBackendBudget{set: true, Max: decoded.Max, Window: decoded.Window}
+	return nil
+}
+
+func (h *rawBackendHealth) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Fail optionalInt      `json:"fail"`
+		Cool optionalDuration `json:"cool"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Fail.set || decoded.Fail.value < 1 || decoded.Fail.value > maxHealthFailures {
+		return fmt.Errorf("fail must be an integer between 1 and %d", maxHealthFailures)
+	}
+	if !decoded.Cool.set || decoded.Cool.value > maxHealthCooldown {
+		return fmt.Errorf("cool must be greater than zero and no greater than %s", maxHealthCooldown)
+	}
+	*h = rawBackendHealth{set: true, Fail: decoded.Fail, Cool: decoded.Cool}
 	return nil
 }
 
@@ -721,6 +760,12 @@ func decodeConfig(data []byte) (config, error) {
 				Dial:   rawBackend.Timeout.Dial.value,
 				Header: rawBackend.Timeout.Header.value,
 			},
+			Health: func() *backendHealthConfig {
+				if !rawBackend.Health.set {
+					return nil
+				}
+				return &backendHealthConfig{Fail: rawBackend.Health.Fail.value, Cool: rawBackend.Health.Cool.value}
+			}(),
 			Retry: retry,
 		}
 	}
@@ -817,6 +862,7 @@ const (
 	jsonBackendRetry
 	jsonBackendBody
 	jsonBackendBudget
+	jsonBackendHealth
 	jsonBackendBackoff
 	jsonSites
 	jsonSite
@@ -916,6 +962,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonBackendRetry, nil
 		case "timeout":
 			return jsonBackendTimeout, nil
+		case "health":
+			return jsonBackendHealth, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackendRetry:
@@ -938,6 +986,12 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 	case jsonBackendBudget:
 		switch key {
 		case "max", "window":
+			return jsonAny, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackendHealth:
+		switch key {
+		case "fail", "cool":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)

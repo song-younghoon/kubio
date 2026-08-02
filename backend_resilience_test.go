@@ -45,6 +45,7 @@ func TestBackendResilienceConfig(t *testing.T) {
       "targets": ["http://app-1:3000", "http://app-2:3000", "http://app-3:3000"],
       "weights": [3, 1, 2],
       "tries": 2,
+      "health": {"fail": 3, "cool": "5s"},
       "retry": {"status": [502, 503, 504], "methods": ["POST", "PUT"], "body": {"max": 1048576}, "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s", "budget": {"max": 100, "window": "1s"}},
       "timeout": {"dial": "250ms", "header": "1m30s"}
     }
@@ -57,6 +58,7 @@ func TestBackendResilienceConfig(t *testing.T) {
 	}
 	backend := cfg.Backends["app"]
 	if !slices.Equal(backend.Weights, []int{3, 1, 2}) || backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second ||
+		backend.Health == nil || backend.Health.Fail != 3 || backend.Health.Cool != 5*time.Second ||
 		!slices.Equal(backend.Retry.Methods, []string{"POST", "PUT"}) || backend.Retry.Body == nil || backend.Retry.Body.Max != 1048576 ||
 		backend.Retry.Backoff == nil || backend.Retry.Backoff.Base != 25*time.Millisecond ||
 		backend.Retry.Backoff.Cap != 50*time.Millisecond || backend.Retry.Backoff.Jitter ||
@@ -96,6 +98,24 @@ func TestBackendResilienceConfig(t *testing.T) {
 		"weights too large":             withBackend(`"weights":[1001,1]`),
 		"weights unknown":               withBackend(`"weight":[1,1]`),
 		"weights duplicate field":       withBackend(`"weights":[1,1],"weights":[2,2]`),
+		"health null":                   withBackend(`"health":null`),
+		"health scalar":                 withBackend(`"health":true`),
+		"health array":                  withBackend(`"health":[]`),
+		"health empty":                  withBackend(`"health":{}`),
+		"health missing fail":           withBackend(`"health":{"cool":"1s"}`),
+		"health missing cool":           withBackend(`"health":{"fail":1}`),
+		"health fail decimal":           withBackend(`"health":{"fail":1.0,"cool":"1s"}`),
+		"health fail exponent":          withBackend(`"health":{"fail":1e0,"cool":"1s"}`),
+		"health fail zero":              withBackend(`"health":{"fail":0,"cool":"1s"}`),
+		"health fail negative":          withBackend(`"health":{"fail":-1,"cool":"1s"}`),
+		"health fail too large":         withBackend(`"health":{"fail":1001,"cool":"1s"}`),
+		"health cool null":              withBackend(`"health":{"fail":1,"cool":null}`),
+		"health cool zero":              withBackend(`"health":{"fail":1,"cool":"0s"}`),
+		"health cool negative":          withBackend(`"health":{"fail":1,"cool":"-1s"}`),
+		"health cool too large":         withBackend(`"health":{"fail":1,"cool":"24h1ns"}`),
+		"health cool environment":       withBackend(`"health":{"fail":1,"cool":"${KUBIO_HEALTH_COOL}"}`),
+		"health unknown":                withBackend(`"health":{"fail":1,"cool":"1s","retry":1}`),
+		"health duplicate field":        withBackend(`"health":{"fail":1,"fail":2,"cool":"1s"}`),
 		"timeout null":                  withBackend(`"timeout":null`),
 		"timeout array":                 withBackend(`"timeout":[]`),
 		"timeout empty":                 withBackend(`"timeout":{}`),
@@ -229,6 +249,9 @@ func TestBackendResilienceDefaultsAndValidation(t *testing.T) {
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Weights: []int{1}},
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Weights: []int{0, 1}},
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Weights: []int{1001, 1}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Health: &backendHealthConfig{Fail: 0, Cool: time.Second}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Health: &backendHealthConfig{Fail: 1, Cool: 0}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Health: &backendHealthConfig{Fail: 1, Cool: 25 * time.Hour}},
 	}
 	for _, cfg := range invalid {
 		if _, err := newBackend(cfg); err == nil {
@@ -665,6 +688,192 @@ func TestRetryBudgetWindowAndContext(t *testing.T) {
 	cancel()
 	if err := budget.reserve(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled reservation error = %v", err)
+	}
+}
+
+func TestBackendPassiveHealthSkipsFailedTargets(t *testing.T) {
+	failed := closedBackendURL(t)
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "healthy")
+	}))
+	defer healthy.Close()
+
+	backend, err := newBackend(backendConfig{
+		Targets: []string{failed, healthy.URL},
+		Health:  &backendHealthConfig{Fail: 1, Cool: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := backend.nextTargetIndex()
+	request := httptest.NewRequest(http.MethodGet, "http://proxy/", nil)
+	request.URL.Scheme = backend.targets[start].Scheme
+	request.URL.Host = backend.targets[start].Host
+	if _, err := backend.RoundTrip(withBackendState(request, start, false)); err == nil {
+		t.Fatal("failed target returned no error")
+	}
+	if got := backend.nextTargetIndex(); got != 1 {
+		t.Fatalf("next target = %d, want healthy target 1", got)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "http://proxy/", nil)
+	request.URL.Scheme = backend.targets[1].Scheme
+	request.URL.Host = backend.targets[1].Host
+	response, err := backend.RoundTrip(withBackendState(request, 1, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	failedAvailable := backend.health.available(0)
+	if response.StatusCode != http.StatusOK || failedAvailable {
+		t.Fatalf("response = %d, failed target available = %v", response.StatusCode, failedAvailable)
+	}
+}
+
+func TestBackendPassiveHealthStateTransitions(t *testing.T) {
+	health := &backendHealth{fail: 1, cool: 20 * time.Millisecond, targets: make([]targetHealth, 1)}
+	ctx := context.Background()
+	err := errors.New("upstream failed")
+	health.observe(0, ctx, false, err)
+	health.targets[0].mu.Lock()
+	firstDeadline := health.targets[0].until
+	health.targets[0].mu.Unlock()
+	if health.available(0) {
+		t.Fatal("ejected target was available")
+	}
+
+	health.observe(0, ctx, false, err)
+	health.targets[0].mu.Lock()
+	extendedDeadline := health.targets[0].until
+	health.targets[0].mu.Unlock()
+	if !extendedDeadline.After(firstDeadline) {
+		t.Fatalf("deadline did not extend: first %v, extended %v", firstDeadline, extendedDeadline)
+	}
+	health.observe(0, ctx, true, err)
+	if !health.available(0) {
+		t.Fatal("response did not restore target")
+	}
+
+	health.observe(0, ctx, true, err)
+	if !health.available(0) {
+		t.Fatal("informational response did not restore target")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	health.observe(0, canceled, false, err)
+	if !health.available(0) {
+		t.Fatal("canceled failure changed healthy target")
+	}
+
+	health.observe(0, ctx, false, err)
+	time.Sleep(30 * time.Millisecond)
+	if !health.available(0) {
+		t.Fatal("expired target remained unavailable")
+	}
+}
+
+func TestBackendHealthFallbackConsumesOneScheduleCycle(t *testing.T) {
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://a:3000", "http://b:3000"},
+		Weights: []int{1, 1},
+		Health:  &backendHealthConfig{Fail: 1, Cool: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range backend.health.targets {
+		backend.health.observe(index, context.Background(), false, errors.New("failed"))
+	}
+	if got := backend.nextTargetIndex(); got != 0 {
+		t.Fatalf("first fallback target = %d, want 0", got)
+	}
+	if got := backend.nextTargetIndex(); got != 0 {
+		t.Fatalf("second fallback target = %d, want 0", got)
+	}
+	if got := backend.nextIndex.Load(); got != 4 {
+		t.Fatalf("schedule cursor = %d, want 4", got)
+	}
+}
+
+func TestBackendHealthTreatsInformationalTransportErrorAsResponse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	done := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer connection.Close()
+		reader := bufio.NewReader(connection)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				done <- err
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		_, err = io.WriteString(connection, "HTTP/1.1 103 Early Hints\r\n\r\n")
+		done <- err
+	}()
+
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://" + listener.Addr().String()},
+		Health:  &backendHealthConfig{Fail: 1, Cool: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://proxy/", nil)
+	start := backend.nextTargetIndex()
+	request.URL.Scheme = backend.targets[start].Scheme
+	request.URL.Host = backend.targets[start].Host
+	if _, err := backend.RoundTrip(withBackendRetry(request, start)); err == nil {
+		t.Fatal("informational transport failure returned no error")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !backend.health.available(0) {
+		t.Fatal("informational response caused ejection")
+	}
+}
+
+func TestBackendHealthObservesIneligibleRequests(t *testing.T) {
+	failed := closedBackendURL(t)
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "healthy")
+	}))
+	defer healthy.Close()
+
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{failed, healthy.URL},
+			Tries:   2,
+			Health:  &backendHealthConfig{Fail: 1, Cool: time.Hour},
+			Retry:   &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}, Methods: []string{http.MethodPost}},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if first.Code != http.StatusBadGateway {
+		t.Fatalf("first response = %d", first.Code)
+	}
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if second.Code != http.StatusOK || second.Body.String() != "healthy" {
+		t.Fatalf("second response = %d %q", second.Code, second.Body.String())
 	}
 }
 

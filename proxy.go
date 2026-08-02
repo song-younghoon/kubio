@@ -55,6 +55,7 @@ type backend struct {
 	backoffJitter bool
 	retryDeadline time.Duration
 	budget        *retryBudget
+	health        *backendHealth
 	transport     *http.Transport
 	nextIndex     atomic.Uint64
 }
@@ -63,7 +64,64 @@ type backendRetryKey struct{}
 
 type backendRetryState struct {
 	start         int
+	retry         bool
 	informational atomic.Bool
+}
+
+type backendHealth struct {
+	fail    int
+	cool    time.Duration
+	targets []targetHealth
+}
+
+type targetHealth struct {
+	mu       sync.Mutex
+	failures int
+	until    time.Time
+}
+
+func (h *backendHealth) available(index int) bool {
+	target := &h.targets[index]
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	now := time.Now()
+	if target.until.IsZero() {
+		return true
+	}
+	if now.Before(target.until) {
+		return false
+	}
+	target.until = time.Time{}
+	target.failures = 0
+	return true
+}
+
+func (h *backendHealth) observe(index int, ctx context.Context, response bool, err error) {
+	target := &h.targets[index]
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if response || err == nil {
+		target.failures = 0
+		target.until = time.Time{}
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	now := time.Now()
+	if !target.until.IsZero() {
+		if now.Before(target.until) {
+			target.until = target.until.Add(h.cool)
+			return
+		}
+		target.until = time.Time{}
+		target.failures = 0
+	}
+	target.failures++
+	if target.failures >= h.fail {
+		target.failures = 0
+		target.until = now.Add(h.cool)
+	}
 }
 
 var errRetryBudgetExceeded = errors.New("retry budget exhausted")
@@ -313,6 +371,20 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		}
 		schedule = buildTargetSchedule(cfg.Weights)
 	}
+	var health *backendHealth
+	if cfg.Health != nil {
+		if cfg.Health.Fail < 1 || cfg.Health.Fail > maxHealthFailures {
+			return nil, fmt.Errorf("health.fail must be between 1 and %d", maxHealthFailures)
+		}
+		if cfg.Health.Cool <= 0 || cfg.Health.Cool > maxHealthCooldown {
+			return nil, fmt.Errorf("health.cool must be greater than zero and no greater than %s", maxHealthCooldown)
+		}
+		health = &backendHealth{
+			fail:    cfg.Health.Fail,
+			cool:    cfg.Health.Cool,
+			targets: make([]targetHealth, len(targets)),
+		}
+	}
 	var backoffDelays []time.Duration
 	var backoffJitter bool
 	var deadline time.Duration
@@ -334,12 +406,12 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		backoffJitter: backoffJitter,
 		retryDeadline: deadline,
 		budget:        budget,
+		health:        health,
 		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
 	}, nil
 }
 
-func (b *backend) nextTargetIndex() int {
-	// Keep this shape small enough for nextTarget to inline.
+func (b *backend) nextScheduledTargetIndex() int {
 	count := len(b.targets)
 	if len(b.schedule) > 0 {
 		count = len(b.schedule)
@@ -358,6 +430,52 @@ func (b *backend) nextTargetIndex() int {
 	return index
 }
 
+func (b *backend) nextTargetIndex() int {
+	if b.health == nil {
+		return b.nextScheduledTargetIndex()
+	}
+	count := len(b.targets)
+	if len(b.schedule) > 0 {
+		count = len(b.schedule)
+	}
+	first := b.nextScheduledTargetIndex()
+	index := first
+	if b.health.available(index) {
+		return index
+	}
+	for attempts := 1; attempts < count; attempts++ {
+		index = b.nextScheduledTargetIndex()
+		if b.health.available(index) {
+			return index
+		}
+	}
+	return first
+}
+
+func (b *backend) retryTargetIndex(start, attempt int) int {
+	index := (start + attempt) % len(b.targets)
+	if b.health == nil {
+		return index
+	}
+	first := index
+	for range len(b.targets) {
+		if b.health.available(index) {
+			return index
+		}
+		index++
+		if index == len(b.targets) {
+			index = 0
+		}
+	}
+	return first
+}
+
+func (b *backend) observeAttempt(index int, ctx context.Context, informational bool, response *http.Response, err error) {
+	if b.health != nil {
+		b.health.observe(index, ctx, informational || response != nil, err)
+	}
+}
+
 func (b *backend) nextTarget() *url.URL {
 	return b.targets[b.nextTargetIndex()]
 }
@@ -367,9 +485,16 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 	if state == nil {
 		return b.transport.RoundTrip(request)
 	}
+	if !state.retry {
+		response, err := b.transport.RoundTrip(request)
+		b.observeAttempt(state.start, request.Context(), state.informational.Load(), response, err)
+		return response, err
+	}
 
 	if b.retryStatuses == nil {
+		targetIndex := state.start
 		response, lastErr := b.transport.RoundTrip(request)
+		b.observeAttempt(targetIndex, request.Context(), state.informational.Load(), response, lastErr)
 		if lastErr == nil {
 			return response, nil
 		}
@@ -381,12 +506,14 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 			state.informational.Store(false)
 			outgoing := request.Clone(request.Context())
 			requestURL := *request.URL
-			target := b.targets[(state.start+attempt)%len(b.targets)]
+			targetIndex = b.retryTargetIndex(state.start, attempt)
+			target := b.targets[targetIndex]
 			requestURL.Scheme = target.Scheme
 			requestURL.Host = target.Host
 			outgoing.URL = &requestURL
 
 			response, err := b.transport.RoundTrip(outgoing)
+			b.observeAttempt(targetIndex, request.Context(), state.informational.Load(), response, err)
 			if err == nil {
 				return response, nil
 			}
@@ -427,6 +554,7 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 
 func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backendRetryState) (*http.Response, error) {
 	ctx := request.Context()
+	targetIndex := state.start
 	for attempt := 0; attempt < b.tries; attempt++ {
 		current := request
 		if attempt > 0 {
@@ -436,7 +564,8 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 				return nil, err
 			}
 			requestURL := *request.URL
-			target := b.targets[(state.start+attempt)%len(b.targets)]
+			targetIndex = b.retryTargetIndex(state.start, attempt)
+			target := b.targets[targetIndex]
 			requestURL.Scheme = target.Scheme
 			requestURL.Host = target.Host
 			outgoing.URL = &requestURL
@@ -444,6 +573,7 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		}
 
 		response, err := b.transport.RoundTrip(current)
+		b.observeAttempt(targetIndex, ctx, state.informational.Load(), response, err)
 		if err != nil {
 			if state.informational.Load() || ctx.Err() != nil || attempt+1 == b.tries {
 				if contextErr := ctx.Err(); contextErr != nil && (b.retryDeadline > 0 || b.budget != nil) {
@@ -538,14 +668,18 @@ func waitRetryBackoff(ctx context.Context, delays []time.Duration, jitter bool, 
 	}
 }
 
-func withBackendRetry(request *http.Request, start int) *http.Request {
-	state := &backendRetryState{start: start}
+func withBackendState(request *http.Request, start int, retry bool) *http.Request {
+	state := &backendRetryState{start: start, retry: retry}
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(int, textproto.MIMEHeader) error {
 		state.informational.Store(true)
 		return nil
 	}}
 	ctx := context.WithValue(request.Context(), backendRetryKey{}, state)
 	return request.WithContext(httptrace.WithClientTrace(ctx, trace))
+}
+
+func withBackendRetry(request *http.Request, start int) *http.Request {
+	return withBackendState(request, start, true)
 }
 
 func retryableBackendRequest(request *http.Request, methods map[string]struct{}, bodyMax int64) bool {
@@ -727,15 +861,16 @@ func newBackendProxy(
 	rewrite := func(request *httputil.ProxyRequest) {
 		start := backend.nextTargetIndex()
 		rewriteProxyRequest(request, backend.targets[start], headers, trustProxies)
-		if retryableBackendRequest(request.In, backend.retryMethods, backend.retryBodyMax) {
-			if backend.retryBodyMax > 0 && request.In.Body != nil && request.In.Body != http.NoBody {
+		retry := retryableBackendRequest(request.In, backend.retryMethods, backend.retryBodyMax)
+		if retry || backend.health != nil {
+			if retry && backend.retryBodyMax > 0 && request.In.Body != nil && request.In.Body != http.NoBody {
 				request.Out.Body = request.In.Body
 			}
-			request.Out = withBackendRetry(request.Out, start)
+			request.Out = withBackendState(request.Out, start, retry)
 		}
 	}
 	transport := http.RoundTripper(backend)
-	if backend.tries == 1 {
+	if backend.tries == 1 && backend.health == nil {
 		rewrite = func(request *httputil.ProxyRequest) {
 			rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
 		}
