@@ -1,0 +1,168 @@
+Kubio kubio.json v0.16 Proposal
+Status: Agreed specification
+Base: v0.15
+
+
+1. Scope
+
+v0.16 adds passive target health tracking and temporary target ejection to
+named backends. Kubio observes the result of ordinary upstream attempts and
+temporarily skips targets that reach a consecutive transport-failure
+threshold.
+
+This version does not add active probes, adaptive backoff, direct-target
+timeout options, HTTPS upstream CA/SNI settings, advanced route conditions,
+client-facing TLS, observability, administration, routing actions, gateway
+features, or additional header policies. Those items move to
+docs/proposals/v0.17.txt.
+
+
+2. Configuration
+
+The named-backend `health` object is optional:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": ["http://app-1:3000", "http://app-2:3000"],
+          "weights": [3, 1],
+          "health": {"fail": 3, "cool": "5s"},
+          "tries": 2,
+          "retry": {
+            "status": [502, 503, 504],
+            "budget": {"max": 1000, "window": "1s"}
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`health` is allowed only inside a named backend. It contains exactly the
+positive JSON integer `fail` and positive Go duration string `cool`.
+`fail` is between 1 and 1000 inclusive. `cool` is greater than zero and no
+greater than 24 hours. Duration strings are case-sensitive, are not trimmed,
+and do not support environment expansion.
+
+Unknown fields, aliases, nulls, missing fields, non-integer numbers, decimal or
+exponent notation, zero or negative values, values outside the limits, and
+duplicate JSON keys are configuration errors. The complete named-backend key
+set is `targets`, `weights`, `tries`, `timeout`, `health`, and `retry`; all
+inherited nested key sets remain unchanged.
+
+
+3. Passive state
+
+Kubio creates one independent health state for each target of each backend
+generation. The state contains a consecutive transport-failure count and an
+optional ejection deadline. It is initially healthy and inactive; no timer or
+background goroutine is created.
+
+An upstream attempt produces one observation at the end of its transport
+round trip. If any upstream response, including an informational response,
+was received, the attempt is classified as a response observation. Otherwise
+it is classified as a transport-error observation. Therefore an informational
+response followed by a later transport error resets health and does not count
+that error.
+
+Every health observation and every target-eligibility check is linearized under
+that target's synchronization point. The attempt context status and one
+monotonic timestamp are sampled at the observation or eligibility
+linearization point. The last observation in that per-target order determines
+the resulting state. A target selected before a concurrent ejection remains
+the selected target for that attempt; the ejection affects only later
+selection decisions.
+
+The state transitions are:
+
+- Any upstream response, including informational, successful, client-error,
+  and server-error responses, resets that target's consecutive failure count
+  and clears its ejection state.
+- A transport error increments the count only when the attempt's context is
+  still active. Errors caused by client cancellation, retry deadline expiry,
+  or another ended request context do not count as upstream failures.
+- When the count reaches `fail`, Kubio ejects the target until `cool` after
+  that failure and clears the count while it is ejected.
+
+When an ejection deadline expires, the target becomes eligible again and its
+next result starts a fresh healthy or failure sequence. Concurrent requests
+may probe an expired target; v0.16 does not limit recovery to one half-open
+probe. At an observation linearization time while an ejection is still active,
+a transport failure extends the deadline by exactly one `cool` interval from
+the existing deadline (`deadline = deadline + cool`). A transport failure at
+or after the deadline first clears the ejection and starts a fresh sequence.
+A response always clears the state.
+
+
+4. Selection and retry behavior
+
+For the first attempt, Kubio retains the v0.15 weighted schedule and advances
+its atomic schedule cursor. Each schedule-slot claim is ordered by the
+cursor's atomic linearization. Kubio checks the claimed target's eligibility
+at that target's synchronization point and skips ejected targets while
+looking for an eligible slot. Skipped slots are consumed. If every target
+examined in one complete schedule cycle is ejected, Kubio uses the first
+claimed candidate from that cycle so the backend can continue making recovery
+probes rather than rejecting the request locally.
+
+For an additional attempt number `k` after the first, where `S` is the
+selected first target's configured index and `N` is the target count, Kubio
+scans candidates in this order: `(S + k) mod N`, then each subsequent
+configured index cyclically. It selects the first currently eligible target;
+if all candidates are ejected, it selects the first candidate in that scan.
+Retries do not advance the weighted schedule cursor. `tries` remains the
+maximum number of attempts; health skipping may cause a target to be selected
+more than once when other targets are ejected.
+
+Kubio completes the health observation immediately after each upstream
+attempt and before retry-status handling, budget admission, backoff, or
+selection of the next attempt. A response that matches `retry.status` is
+still a healthy observation because the upstream responded. A request that is
+ineligible for retry is still observed when health is configured.
+
+Direct site and route targets do not have passive health state. Health state
+does not alter retry status matching, method/body eligibility, backoff,
+deadline, budget admission, header policies, or response visibility.
+
+
+5. Reload and request isolation
+
+Health values are parsed and validated before a backend is constructed. An
+invalid health object rejects startup or the whole config reload. Startup
+errors terminate the program; reload errors are logged and retain the current
+router and backend generation.
+
+A valid reload publishes fresh per-target health state atomically. A request
+that has selected a backend keeps that generation and its target health state
+for every attempt. Reload neither clears nor modifies the old generation;
+old in-flight requests cannot update the new generation's health state.
+
+
+6. Performance constraints
+
+When `health` is absent, target selection and attempt processing retain the
+v0.15 allocation-free selector and do not acquire health locks. When health is
+present, state synchronization is per target rather than global. Healthy
+selection checks are constant-time per candidate; the worst case scans one
+weighted schedule cycle or one target-order cycle when targets are ejected.
+No request-path timer, goroutine, config read, or reload lock is introduced.
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.17:
+
+- Active health checks and configurable probe requests.
+- Adaptive backoff.
+- Direct-target connection, response-header, and response-body timeout
+  options.
+- HTTPS upstream CA and SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  and policies for Kubio-generated or intermediate responses.

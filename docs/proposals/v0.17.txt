@@ -1,17 +1,17 @@
-Kubio kubio.json v0.16 Proposal
+Kubio kubio.json v0.17 Proposal
 Status: Deferred features; discussion not started
-Base: v0.15
+Base: v0.16
 
 
 1. Purpose
 
-This proposal carries the candidates deferred by v0.15. It is not an agreed
+This proposal carries the candidates deferred by v0.16. It is not an agreed
 specification yet and must be narrowed before promotion.
 
 
 2. Backend resilience and upstream transport
 
-- Active and passive health checks and target ejection.
+- Active health checks and configurable probe requests.
 - Adaptive backoff.
 - Direct-target connection, response-header, and response-body timeout
   options.
