@@ -43,11 +43,17 @@ type siteConfig struct {
 type routeConfig struct {
 	Path            string               `json:"path"`
 	Methods         []string             `json:"methods"`
+	Match           *routeMatchConfig    `json:"match"`
 	Target          string               `json:"target"`
 	Backend         string               `json:"backend"`
 	Headers         map[string]string    `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Strip           bool                 `json:"strip"`
+}
+
+type routeMatchConfig struct {
+	Header map[string][]string
+	Query  map[string][]string
 }
 
 type responseHeaderPolicy struct {
@@ -87,6 +93,7 @@ type rawSiteConfig struct {
 type rawRouteConfig struct {
 	Path            *string              `json:"path"`
 	Methods         optionalStringArray  `json:"methods"`
+	Match           rawRouteMatch        `json:"match"`
 	Target          optionalString       `json:"target"`
 	Backend         optionalString       `json:"backend"`
 	Headers         headerMap            `json:"headers"`
@@ -94,8 +101,15 @@ type rawRouteConfig struct {
 	Strip           strictBool           `json:"strip"`
 }
 
+type rawRouteMatch struct {
+	set    bool
+	Header optionalConditionValues
+	Query  optionalConditionValues
+}
+
 type headerMap map[string]string
 type headerValues map[string][]string
+type conditionValues map[string][]string
 
 type stringArray []string
 type rawBackends map[string]rawBackendConfig
@@ -114,6 +128,11 @@ type optionalStringArray struct {
 type optionalHeaderValues struct {
 	set    bool
 	values headerValues
+}
+
+type optionalConditionValues struct {
+	set    bool
+	values conditionValues
 }
 
 type optionalInt struct {
@@ -206,6 +225,33 @@ func (r *rawRoutes) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (m *rawRouteMatch) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Header optionalConditionValues `json:"header"`
+		Query  optionalConditionValues `json:"query"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Header.set && !decoded.Query.set {
+		return fmt.Errorf("must contain header or query")
+	}
+	if decoded.Header.set && len(decoded.Header.values) == 0 {
+		return fmt.Errorf("header must not be empty")
+	}
+	if decoded.Query.set && len(decoded.Query.values) == 0 {
+		return fmt.Errorf("query must not be empty")
+	}
+	*m = rawRouteMatch{set: true, Header: decoded.Header, Query: decoded.Query}
+	return nil
+}
+
 func (h *responseHeaderPolicy) UnmarshalJSON(data []byte) error {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 || data[0] != '{' {
@@ -271,6 +317,16 @@ func (h *optionalHeaderValues) UnmarshalJSON(data []byte) error {
 	}
 	h.set = true
 	h.values = values
+	return nil
+}
+
+func (v *optionalConditionValues) UnmarshalJSON(data []byte) error {
+	var values conditionValues
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	v.set = true
+	v.values = values
 	return nil
 }
 
@@ -428,6 +484,12 @@ func decodeConfig(data []byte) (config, error) {
 				ResponseHeaders: rawRoute.ResponseHeaders,
 				Strip:           bool(rawRoute.Strip),
 			}
+			if rawRoute.Match.set {
+				route.Match = &routeMatchConfig{
+					Header: copyConditionValues(rawRoute.Match.Header.values),
+					Query:  copyConditionValues(rawRoute.Match.Query.values),
+				}
+			}
 			if rawRoute.Target.set {
 				route.Target = rawRoute.Target.value
 			} else if rawRoute.Backend.set {
@@ -469,6 +531,8 @@ const (
 	jsonHeaders
 	jsonResponseHeaders
 	jsonBackendTimeout
+	jsonRouteMatch
+	jsonConditions
 )
 
 func consumeJSONValue(decoder *json.Decoder, schema jsonSchema) error {
@@ -577,6 +641,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "path", "methods", "target", "backend", "strip":
 			return jsonAny, nil
+		case "match":
+			return jsonRouteMatch, nil
 		case "headers":
 			return jsonHeaders, nil
 		case "response":
@@ -591,6 +657,14 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonRouteMatch:
+		switch key {
+		case "header", "query":
+			return jsonConditions, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonConditions:
+		return jsonAny, nil
 	default:
 		return jsonAny, nil
 	}
@@ -662,6 +736,121 @@ func (m *headerValues) UnmarshalJSON(data []byte) error {
 		values[name] = []string(array)
 	}
 	*m = values
+	return nil
+}
+
+func (m *conditionValues) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("must be an object: %w", err)
+	}
+	values := make(conditionValues, len(raw))
+	for name, encoded := range raw {
+		encoded = bytes.TrimSpace(encoded)
+		if len(encoded) > 0 && encoded[0] == '"' {
+			var value string
+			if err := json.Unmarshal(encoded, &value); err != nil {
+				return fmt.Errorf("property %q must be a string or non-empty array of strings", name)
+			}
+			values[name] = []string{value}
+			continue
+		}
+
+		var alternatives stringArray
+		if err := json.Unmarshal(encoded, &alternatives); err != nil {
+			return fmt.Errorf("property %q must be a string or non-empty array of strings: %w", name, err)
+		}
+		if len(alternatives) == 0 {
+			return fmt.Errorf("property %q alternative array must not be empty", name)
+		}
+		seen := make(map[string]struct{}, len(alternatives))
+		for index, alternative := range alternatives {
+			if _, exists := seen[alternative]; exists {
+				return fmt.Errorf("property %q contains duplicate alternative at index %d", name, index)
+			}
+			seen[alternative] = struct{}{}
+		}
+		values[name] = []string(alternatives)
+	}
+	*m = values
+	return nil
+}
+
+func copyConditionValues(values conditionValues) map[string][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	copy := make(map[string][]string, len(values))
+	for name, alternatives := range values {
+		copy[name] = append([]string(nil), alternatives...)
+	}
+	return copy
+}
+
+func resolveRouteMatch(raw *routeMatchConfig) (routeMatchConfig, error) {
+	if raw == nil {
+		return routeMatchConfig{}, nil
+	}
+	if raw.Header != nil && len(raw.Header) == 0 {
+		return routeMatchConfig{}, fmt.Errorf("header must not be empty")
+	}
+	if raw.Query != nil && len(raw.Query) == 0 {
+		return routeMatchConfig{}, fmt.Errorf("query must not be empty")
+	}
+	if len(raw.Header) == 0 && len(raw.Query) == 0 {
+		return routeMatchConfig{}, fmt.Errorf("must contain header or query")
+	}
+
+	match := routeMatchConfig{}
+	if len(raw.Header) > 0 {
+		match.Header = make(map[string][]string, len(raw.Header))
+		for name, alternatives := range raw.Header {
+			if !validHeaderName(name) {
+				return routeMatchConfig{}, fmt.Errorf("header property %q is not a valid field name", name)
+			}
+			name = http.CanonicalHeaderKey(name)
+			if _, exists := match.Header[name]; exists {
+				return routeMatchConfig{}, fmt.Errorf("header contains duplicate field name %q", name)
+			}
+			if err := validateMatchAlternatives(alternatives, true); err != nil {
+				return routeMatchConfig{}, fmt.Errorf("header property %q: %w", name, err)
+			}
+			match.Header[name] = append([]string(nil), alternatives...)
+		}
+	}
+	if len(raw.Query) > 0 {
+		match.Query = make(map[string][]string, len(raw.Query))
+		for name, alternatives := range raw.Query {
+			if name == "" {
+				return routeMatchConfig{}, fmt.Errorf("query property name must not be empty")
+			}
+			if err := validateMatchAlternatives(alternatives, false); err != nil {
+				return routeMatchConfig{}, fmt.Errorf("query property %q: %w", name, err)
+			}
+			match.Query[name] = append([]string(nil), alternatives...)
+		}
+	}
+	return match, nil
+}
+
+func validateMatchAlternatives(alternatives []string, header bool) error {
+	if len(alternatives) == 0 {
+		return fmt.Errorf("alternative array must not be empty")
+	}
+	seen := make(map[string]struct{}, len(alternatives))
+	for index, alternative := range alternatives {
+		if header && !validHeaderValue(alternative) {
+			return fmt.Errorf("alternative %d contains invalid control characters", index)
+		}
+		if _, exists := seen[alternative]; exists {
+			return fmt.Errorf("duplicate alternative at index %d", index)
+		}
+		seen[alternative] = struct{}{}
+	}
 	return nil
 }
 

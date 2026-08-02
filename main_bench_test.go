@@ -340,10 +340,11 @@ func BenchmarkRouteTableSelection(b *testing.B) {
 			if count > routeIndexThreshold {
 				selected.buildRouteIndex()
 			}
+			req := httptest.NewRequest(http.MethodGet, "http://proxy/api/users", nil)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if selected.selectRoute("/api/users", http.MethodGet).route == nil {
+				if selected.selectRoute(req).route == nil {
 					b.Fatal("route not selected")
 				}
 			}
@@ -393,11 +394,12 @@ func BenchmarkMethodRouteSelection(b *testing.B) {
 			if len(test.routes) > routeIndexThreshold {
 				selected.buildRouteIndex()
 			}
+			req := httptest.NewRequest(method, "http://proxy"+test.path, nil)
 			var result routeCandidate
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				result = selected.selectRoute(test.path, method)
+				result = selected.selectRoute(req)
 			}
 			if result.route == nil || result.index != test.want {
 				b.Fatalf("selected route %d, want %d", result.index, test.want)

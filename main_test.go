@@ -697,7 +697,7 @@ func TestRouteMethodPriorityAndFallback(t *testing.T) {
 		{path: "/exact", method: "GET", want: 9},
 		{path: "/none", method: "DELETE", want: -1},
 	} {
-		got := selected.selectRoute(test.path, test.method)
+		got := selected.selectRoute(httptest.NewRequest(test.method, "http://proxy"+test.path, nil))
 		if test.want < 0 {
 			if got.route != nil {
 				t.Errorf("%s %s selected route %d, want none", test.method, test.path, got.index)
@@ -856,8 +856,9 @@ func TestIndexedRouteSelectionMatchesLinearSelection(t *testing.T) {
 		{path: "/health", method: "PUT"},
 		{path: "/other", method: "GET"},
 	} {
-		want := linear.selectRoute(test.path, test.method)
-		got := indexed.selectRoute(test.path, test.method)
+		req := httptest.NewRequest(test.method, "http://proxy"+test.path, nil)
+		want := linear.selectRoute(req)
+		got := indexed.selectRoute(req)
 		if got.route == nil || want.route == nil {
 			if got.route != want.route {
 				t.Errorf("%s %s selected route mismatch", test.method, test.path)

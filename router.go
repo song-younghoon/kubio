@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
+	"net/url"
 	"strings"
 )
 
@@ -32,8 +33,16 @@ type site struct {
 type route struct {
 	pattern pathPattern
 	methods []string
+	match   routeMatchConfig
 	proxy   *httputil.ReverseProxy
 	strip   bool
+}
+
+type routeRequest struct {
+	request     *http.Request
+	query       url.Values
+	queryParsed bool
+	queryValid  bool
 }
 
 type pathPattern struct {
@@ -157,6 +166,10 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 				return site{}, fmt.Errorf("routes[%d].methods: %w", routeIndex, err)
 			}
 		}
+		match, err := resolveRouteMatch(routeConfig.Match)
+		if err != nil {
+			return site{}, fmt.Errorf("routes[%d].match: %w", routeIndex, err)
+		}
 		routeHeaders, err := resolveHeaders(routeConfig.Headers)
 		if err != nil {
 			return site{}, fmt.Errorf("routes[%d].headers: %w", routeIndex, err)
@@ -185,6 +198,7 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		s.routes = append(s.routes, route{
 			pattern: pattern,
 			methods: append([]string(nil), routeConfig.Methods...),
+			match:   match,
 			proxy:   routeProxy,
 			strip:   routeConfig.Strip,
 		})
@@ -273,7 +287,7 @@ func (r *router) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	selectedRoute := selected.selectRoute(req.URL.Path, req.Method)
+	selectedRoute := selected.selectRoute(req)
 
 	if selectedRoute.route == nil {
 		selected.proxy.ServeHTTP(w, req)
@@ -311,12 +325,14 @@ func (s *site) buildRouteIndex() {
 	}
 }
 
-func (s *site) selectRoute(path, method string) routeCandidate {
+func (s *site) selectRoute(req *http.Request) routeCandidate {
+	path := req.URL.Path
+	request := routeRequest{request: req}
 	if s.exactRoutes == nil {
 		var selected routeCandidate
 		for index := range s.routes {
 			prefix, ok := s.routes[index].pattern.match(path)
-			if !ok || !s.routes[index].matchesMethod(method) {
+			if !ok || !request.matches(&s.routes[index]) {
 				continue
 			}
 			candidate := s.routeCandidate(index)
@@ -330,7 +346,7 @@ func (s *site) selectRoute(path, method string) routeCandidate {
 
 	var selected routeCandidate
 	for _, index := range s.exactRoutes[path] {
-		if !s.routes[index].matchesMethod(method) {
+		if !request.matches(&s.routes[index]) {
 			continue
 		}
 		candidate := s.routeCandidate(index)
@@ -343,7 +359,7 @@ func (s *site) selectRoute(path, method string) routeCandidate {
 	}
 
 	for _, index := range s.wildcardRoutes[""] {
-		if s.routes[index].matchesMethod(method) {
+		if request.matches(&s.routes[index]) {
 			candidate := s.routeCandidate(index)
 			if selected.route == nil || betterRoute(candidate, selected) {
 				selected = candidate
@@ -355,7 +371,7 @@ func (s *site) selectRoute(path, method string) routeCandidate {
 			continue
 		}
 		for _, routeIndex := range s.wildcardRoutes[path[:index]] {
-			if !s.routes[routeIndex].matchesMethod(method) {
+			if !request.matches(&s.routes[routeIndex]) {
 				continue
 			}
 			candidate := s.routeCandidate(routeIndex)
@@ -365,7 +381,7 @@ func (s *site) selectRoute(path, method string) routeCandidate {
 		}
 	}
 	for _, routeIndex := range s.wildcardRoutes[path] {
-		if !s.routes[routeIndex].matchesMethod(method) {
+		if !request.matches(&s.routes[routeIndex]) {
 			continue
 		}
 		candidate := s.routeCandidate(routeIndex)
@@ -374,6 +390,52 @@ func (s *site) selectRoute(path, method string) routeCandidate {
 		}
 	}
 	return selected
+}
+
+func (m *routeRequest) matches(route *route) bool {
+	if !route.matchesMethod(m.request.Method) {
+		return false
+	}
+	for name, alternatives := range route.match.Header {
+		if name == "Host" {
+			if m.request.Host == "" || !matchesAny([]string{m.request.Host}, alternatives) {
+				return false
+			}
+			continue
+		}
+		if !matchesAny(m.request.Header.Values(name), alternatives) {
+			return false
+		}
+	}
+	if len(route.match.Query) == 0 {
+		return true
+	}
+	if !m.queryParsed {
+		var err error
+		m.query, err = url.ParseQuery(m.request.URL.RawQuery)
+		m.queryValid = err == nil
+		m.queryParsed = true
+	}
+	if !m.queryValid {
+		return false
+	}
+	for name, alternatives := range route.match.Query {
+		if !matchesAny(m.query[name], alternatives) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesAny(values, alternatives []string) bool {
+	for _, value := range values {
+		for _, alternative := range alternatives {
+			if value == alternative {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *route) matchesMethod(method string) bool {
@@ -430,14 +492,34 @@ func betterRoute(candidate, current routeCandidate) bool {
 	if candidate.depth != current.depth {
 		return candidate.depth > current.depth
 	}
-	candidateMethods, currentMethods := len(candidate.route.methods), len(current.route.methods)
-	if (candidateMethods > 0) != (currentMethods > 0) {
-		return candidateMethods > 0
+	candidateConditions, currentConditions := candidate.route.conditionCount(), current.route.conditionCount()
+	if candidateConditions != currentConditions {
+		return candidateConditions > currentConditions
 	}
-	if candidateMethods != currentMethods {
-		return candidateMethods < currentMethods
+	candidateAlternatives, currentAlternatives := candidate.route.alternativeCount(), current.route.alternativeCount()
+	if candidateAlternatives != currentAlternatives {
+		return candidateAlternatives < currentAlternatives
 	}
 	return candidate.index > current.index
+}
+
+func (r *route) conditionCount() int {
+	count := len(r.match.Header) + len(r.match.Query)
+	if len(r.methods) > 0 {
+		count++
+	}
+	return count
+}
+
+func (r *route) alternativeCount() int {
+	count := len(r.methods)
+	for _, alternatives := range r.match.Header {
+		count += len(alternatives)
+	}
+	for _, alternatives := range r.match.Query {
+		count += len(alternatives)
+	}
+	return count
 }
 
 func newPathPattern(raw string) (pathPattern, error) {
