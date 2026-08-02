@@ -23,20 +23,22 @@ type backendConfig struct {
 }
 
 type siteConfig struct {
-	Hosts   []string          `json:"hosts"`
-	Target  string            `json:"target"`
-	Backend string            `json:"backend"`
-	Headers map[string]string `json:"headers"`
-	Routes  []routeConfig     `json:"routes"`
+	Hosts           []string          `json:"hosts"`
+	Target          string            `json:"target"`
+	Backend         string            `json:"backend"`
+	Headers         map[string]string `json:"headers"`
+	ResponseHeaders map[string]string `json:"responseHeaders"`
+	Routes          []routeConfig     `json:"routes"`
 }
 
 type routeConfig struct {
-	Path    string            `json:"path"`
-	Methods []string          `json:"methods"`
-	Target  string            `json:"target"`
-	Backend string            `json:"backend"`
-	Headers map[string]string `json:"headers"`
-	Strip   bool              `json:"strip"`
+	Path            string            `json:"path"`
+	Methods         []string          `json:"methods"`
+	Target          string            `json:"target"`
+	Backend         string            `json:"backend"`
+	Headers         map[string]string `json:"headers"`
+	ResponseHeaders map[string]string `json:"responseHeaders"`
+	Strip           bool              `json:"strip"`
 }
 
 type rawConfig struct {
@@ -51,20 +53,26 @@ type rawBackendConfig struct {
 }
 
 type rawSiteConfig struct {
-	Hosts   *stringArray   `json:"hosts"`
-	Target  optionalString `json:"target"`
-	Backend optionalString `json:"backend"`
-	Headers headerMap      `json:"headers"`
-	Routes  rawRoutes      `json:"routes"`
+	Hosts           *stringArray       `json:"hosts"`
+	Target          optionalString     `json:"target"`
+	Backend         optionalString     `json:"backend"`
+	Headers         headerMap          `json:"headers"`
+	ResponseHeaders rawResponseHeaders `json:"responseHeaders"`
+	Routes          rawRoutes          `json:"routes"`
 }
 
 type rawRouteConfig struct {
-	Path    *string             `json:"path"`
-	Methods optionalStringArray `json:"methods"`
-	Target  optionalString      `json:"target"`
-	Backend optionalString      `json:"backend"`
-	Headers headerMap           `json:"headers"`
-	Strip   strictBool          `json:"strip"`
+	Path            *string             `json:"path"`
+	Methods         optionalStringArray `json:"methods"`
+	Target          optionalString      `json:"target"`
+	Backend         optionalString      `json:"backend"`
+	Headers         headerMap           `json:"headers"`
+	ResponseHeaders rawResponseHeaders  `json:"responseHeaders"`
+	Strip           strictBool          `json:"strip"`
+}
+
+type rawResponseHeaders struct {
+	Set headerMap `json:"set"`
 }
 
 type headerMap map[string]string
@@ -139,6 +147,31 @@ func (r *rawRoutes) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must be an array: %w", err)
 	}
 	*r = routes
+	return nil
+}
+
+func (h *rawResponseHeaders) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	type plain rawResponseHeaders
+	var decoded plain
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if decoded.Set == nil {
+		return fmt.Errorf("set must be set")
+	}
+	if len(decoded.Set) == 0 {
+		return fmt.Errorf("set must not be empty")
+	}
+	if err := validateResponseHeaderSet(decoded.Set); err != nil {
+		return fmt.Errorf("set: %w", err)
+	}
+	h.Set = decoded.Set
 	return nil
 }
 
@@ -238,9 +271,10 @@ func decodeConfig(data []byte) (config, error) {
 		}
 
 		site := siteConfig{
-			Hosts:   append([]string(nil), (*rawSite.Hosts)...),
-			Headers: map[string]string(rawSite.Headers),
-			Routes:  make([]routeConfig, len(rawSite.Routes)),
+			Hosts:           append([]string(nil), (*rawSite.Hosts)...),
+			Headers:         map[string]string(rawSite.Headers),
+			ResponseHeaders: map[string]string(rawSite.ResponseHeaders.Set),
+			Routes:          make([]routeConfig, len(rawSite.Routes)),
 		}
 		if rawSite.Target.set {
 			site.Target = rawSite.Target.value
@@ -266,10 +300,11 @@ func decodeConfig(data []byte) (config, error) {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].backend must not be empty", siteIndex, routeIndex)
 			}
 			route := routeConfig{
-				Path:    *rawRoute.Path,
-				Methods: append([]string(nil), rawRoute.Methods.values...),
-				Headers: map[string]string(rawRoute.Headers),
-				Strip:   bool(rawRoute.Strip),
+				Path:            *rawRoute.Path,
+				Methods:         append([]string(nil), rawRoute.Methods.values...),
+				Headers:         map[string]string(rawRoute.Headers),
+				ResponseHeaders: map[string]string(rawRoute.ResponseHeaders.Set),
+				Strip:           bool(rawRoute.Strip),
 			}
 			if rawRoute.Target.set {
 				route.Target = rawRoute.Target.value
@@ -310,6 +345,7 @@ const (
 	jsonRoutes
 	jsonRoute
 	jsonHeaders
+	jsonResponseHeaders
 )
 
 func consumeJSONValue(decoder *json.Decoder, schema jsonSchema) error {
@@ -399,6 +435,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonAny, nil
 		case "headers":
 			return jsonHeaders, nil
+		case "responseHeaders":
+			return jsonResponseHeaders, nil
 		case "routes":
 			return jsonRoutes, nil
 		}
@@ -408,6 +446,13 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		case "path", "methods", "target", "backend", "strip":
 			return jsonAny, nil
 		case "headers":
+			return jsonHeaders, nil
+		case "responseHeaders":
+			return jsonResponseHeaders, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonResponseHeaders:
+		if key == "set" {
 			return jsonHeaders, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
@@ -482,6 +527,40 @@ func resolveHeaders(raw map[string]string) (map[string]string, error) {
 	return headers, nil
 }
 
+func resolveResponseHeaders(raw map[string]string) (map[string]string, error) {
+	headers, err := resolveHeaders(raw)
+	if err != nil {
+		return nil, err
+	}
+	for name := range headers {
+		if restrictedResponseHeader(name) {
+			return nil, fmt.Errorf("header %q is managed by the proxy", name)
+		}
+	}
+	return headers, nil
+}
+
+func validateResponseHeaderSet(headers map[string]string) error {
+	seen := make(map[string]struct{}, len(headers))
+	for name, value := range headers {
+		if !validHeaderName(name) {
+			return fmt.Errorf("invalid header name %q", name)
+		}
+		name = http.CanonicalHeaderKey(name)
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("duplicate header name %q", name)
+		}
+		seen[name] = struct{}{}
+		if restrictedResponseHeader(name) {
+			return fmt.Errorf("header %q is managed by the proxy", name)
+		}
+		if !validHeaderValue(value) {
+			return fmt.Errorf("header %q contains invalid control characters", name)
+		}
+	}
+	return nil
+}
+
 func validHeaderName(name string) bool {
 	if name == "" {
 		return false
@@ -549,6 +628,18 @@ func restrictedHeader(name string) bool {
 	switch strings.ToLower(name) {
 	case "connection", "proxy-connection", "keep-alive", "transfer-encoding",
 		"te", "trailer", "upgrade", "content-length":
+		return true
+	default:
+		return false
+	}
+}
+
+func restrictedResponseHeader(name string) bool {
+	if restrictedHeader(name) {
+		return true
+	}
+	switch strings.ToLower(name) {
+	case "proxy-authenticate", "proxy-authorization":
 		return true
 	default:
 		return false

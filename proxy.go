@@ -91,7 +91,7 @@ func (b *backend) nextTarget() *url.URL {
 	}
 }
 
-func newProxy(raw string, headers map[string]string, trustProxies []netip.Prefix) (*httputil.ReverseProxy, error) {
+func newProxy(raw string, headers, responseHeaders map[string]string, trustProxies []netip.Prefix) (*httputil.ReverseProxy, error) {
 	target, err := parseTarget(raw)
 	if err != nil {
 		return nil, err
@@ -99,22 +99,55 @@ func newProxy(raw string, headers map[string]string, trustProxies []netip.Prefix
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}), nil
+	}, responseHeaders), nil
 }
 
-func newBackendProxy(backend *backend, headers map[string]string, trustProxies []netip.Prefix) *httputil.ReverseProxy {
+func newBackendProxy(backend *backend, headers, responseHeaders map[string]string, trustProxies []netip.Prefix) *httputil.ReverseProxy {
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
-	})
+	}, responseHeaders)
 }
 
-func newReverseProxy(rewrite func(*httputil.ProxyRequest)) *httputil.ReverseProxy {
-	return &httputil.ReverseProxy{
+func newReverseProxy(rewrite func(*httputil.ProxyRequest), responseHeaders map[string]string) *httputil.ReverseProxy {
+	proxy := &httputil.ReverseProxy{
 		Rewrite:      rewrite,
 		Transport:    proxyTransport,
 		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
+	if len(responseHeaders) > 0 {
+		proxy.ModifyResponse = func(response *http.Response) error {
+			replaceResponseHeaders(response, responseHeaders)
+			return nil
+		}
+	}
+	return proxy
+}
+
+func replaceResponseHeaders(response *http.Response, configured map[string]string) {
+	if response.Header == nil {
+		response.Header = make(http.Header, len(configured))
+	}
+	for name, value := range configured {
+		if containsHeaderName(response.Trailer, name) {
+			continue
+		}
+		for existing := range response.Header {
+			if strings.EqualFold(existing, name) {
+				delete(response.Header, existing)
+			}
+		}
+		response.Header[name] = []string{value}
+	}
+}
+
+func containsHeaderName(headers http.Header, name string) bool {
+	for existing := range headers {
+		if strings.EqualFold(existing, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteProxyRequest(request *httputil.ProxyRequest, target *url.URL, headers map[string]string, trustProxies []netip.Prefix) {
