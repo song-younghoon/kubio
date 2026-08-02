@@ -1,11 +1,11 @@
-Kubio kubio.json v0.9 Proposal
+Kubio kubio.json v0.10 Proposal
 Status: Deferred features; discussion not started
-Base: v0.8
+Base: v0.9
 
 
 1. Purpose
 
-This proposal carries every candidate deferred by v0.8. Sections 2 through 8
+This proposal carries every candidate deferred by v0.9. Sections 2 through 8
 are the exhaustive carried set. They define no agreed behavior yet, and the
 scope must be narrowed before promotion.
 
@@ -31,10 +31,10 @@ scope must be narrowed before promotion.
 
 4. Client-facing TLS
 
-- Manual certificates.
-- Certificate selection by host.
-- HTTP-to-HTTPS redirects.
-- Automatic ACME certificates.
+- Multiple manual certificates and certificate selection by SNI or host.
+- HTTP-to-HTTPS redirects and automatic ACME certificates.
+- Mutual TLS, TLS passthrough, and configurable TLS protocol or algorithm
+  policy.
 
 
 5. Observability and administration

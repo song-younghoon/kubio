@@ -1,0 +1,264 @@
+Kubio kubio.json v0.9 Specification
+Status: Agreed specification
+Base: v0.8
+
+
+1. Scope
+
+v0.9 adds optional downstream TLS termination with one operator-provided
+certificate and private key. The only new configuration is the top-level `tls`
+object with the short required fields `cert` and `key`.
+
+When `tls` is absent, Kubio remains the plaintext HTTP server defined by v0.8.
+When present at startup, the one existing listener accepts HTTPS instead. One
+certificate is available to every full handshake that requires a server
+certificate; site routing still occurs later from the HTTP Host field.
+
+This is the complete v0.9 scope. Multiple certificates, SNI-based certificate
+selection, automatic ACME, HTTP-to-HTTPS redirects, mutual TLS, TLS
+passthrough, and upstream TLS configuration remain deferred. Every valid v0.8
+configuration remains valid and starts in plaintext mode.
+
+The `tls`, `cert`, and `key` names are intentional. Kubio has not had a stable
+release, and no `https`, `certificate`, `privateKey`, or compatibility alias is
+introduced.
+
+
+2. Configuration
+
+`tls` is optional and valid only at the top level:
+
+    {
+      "listen": ":8443",
+      "tls": {
+        "cert": "certs/server.crt",
+        "key": "certs/server.key"
+      },
+      "sites": [
+        {
+          "hosts": ["example.com", "www.example.com"],
+          "target": "http://app:3000"
+        }
+      ]
+    }
+
+When present, `tls` must be a non-null JSON object containing exactly both:
+
+- `cert`: path to a PEM-encoded leaf certificate followed by any intermediate
+  certificate chain.
+- `key`: path to the PEM-encoded private key corresponding to the leaf
+  certificate.
+
+Both values must be non-empty JSON strings. They are used exactly as written:
+Kubio does not trim them or expand environment variables. Relative paths are
+resolved from the process working directory. Absolute paths, symbolic links,
+and equal `cert` and `key` paths are allowed. File permission and ownership
+policy remains the operator's responsibility.
+
+
+3. Startup and listener mode
+
+Kubio loads and validates the certificate pair before opening the listener. A
+missing or unreadable file, malformed PEM, missing certificate or key, or a
+private key that does not match the leaf certificate is a startup error. Kubio
+prints an operational error to standard error and exits before listening.
+
+The presence of `tls` in the startup configuration fixes the listener mode for
+the lifetime of the process:
+
+- Absent: the listener accepts plaintext HTTP as before.
+- Present: the listener performs a TLS handshake before HTTP handling.
+
+The configured `listen` value remains one TCP address and retains the v0.1
+restart rule. v0.9 does not open a second plaintext listener, sniff plaintext
+and TLS on one connection, redirect HTTP, or fall back to plaintext after a
+TLS error.
+
+In TLS mode, Kubio sets the minimum accepted protocol version to TLS 1.2.
+TLS 1.2 and TLS 1.3 algorithm, cipher-suite, curve, session-ticket, and other
+defaults come from the Go standard library in the version used to build Kubio.
+No v0.9 configuration changes those defaults. In particular, Kubio does not
+disable session resumption or rotate session-ticket keys solely because a
+certificate is reloaded.
+
+
+4. Certificate contents and selection
+
+Kubio loads the pair with Go's `tls.LoadX509KeyPair` behavior. The first
+certificate in `cert` is the leaf and subsequent certificates form the chain
+sent to clients. The key may use any format and algorithm accepted by the Go
+standard library and must correspond to that leaf.
+
+For every full handshake that requests a server certificate, the same loaded
+certificate is returned whether SNI is absent, valid, unknown, differently
+cased, or contains a host not present in `sites`. Kubio does not compare SNI
+with HTTP Host and does not reject a handshake because no site will later
+match. Certificate hostname, trust, validity-period, revocation, and policy
+verification remain client responsibilities; Kubio validates only that Go can
+load a matching key pair.
+
+Kubio keeps tls.Config.Certificates empty and obtains the immutable current
+certificate through GetCertificate. This makes SNI-present and SNI-absent full
+handshakes use the same atomic runtime generation. Kubio never mutates a
+tls.Config or tls.Certificate after it may have been used by a connection.
+
+After a successful handshake, v0.1 host selection uses the HTTP Host exactly as
+previously specified. A request whose Host matches no site receives the
+existing 404 over the established TLS connection. SNI never selects a site,
+route, backend, or response policy.
+
+
+5. HTTP and proxy behavior over TLS
+
+The standard Go server may negotiate HTTP/2 through ALPN in TLS mode and
+continues to support HTTP/1.1. Protocol negotiation follows the standard
+library; v0.9 adds no HTTP/2 or ALPN option. Plaintext mode does not add h2c.
+
+For a TLS request:
+
+- Request.TLS is populated by net/http.
+- Kubio's existing generated X-Forwarded-Proto value is `https` for an
+  untrusted direct peer, subject to the existing trusted-proxy rules.
+- X-Forwarded-For, X-Forwarded-Host, request/response policies, routing,
+  retries, streaming, WebSocket upgrades, and errors otherwise retain their
+  prior behavior.
+- The v0.7 access-log `proto` field remains the received HTTP protocol string,
+  such as `HTTP/1.1` or `HTTP/2.0`; v0.9 adds no TLS log field.
+- The server-wide OPTIONS * behavior remains unchanged.
+
+TLS termination does not change direct or backend upstream URLs. An `http`
+target remains plaintext upstream and an `https` target retains the existing
+Go client TLS behavior independently of downstream TLS.
+
+
+6. Configuration and certificate reload
+
+The v0.1 atomic reload rules extend to the certificate pair. On every detected
+kubio.json change, Kubio fully parses and validates the new configuration,
+builds its router, and, when listener mode is TLS, loads the configured
+certificate pair before activating any part of that generation.
+
+A reload that adds `tls` to a plaintext process or removes `tls` from a TLS
+process is rejected with a restart-required operational message. It does not
+change the active router or listener. In TLS mode, changing `cert`, `key`, or
+both is allowed without a restart.
+
+A valid TLS-mode reload atomically publishes the new router and certificate as
+one runtime generation. Full handshakes whose certificate lookup begins after
+publication use the new certificate. A full handshake whose lookup already
+began may complete with the previous certificate. A TLS 1.2 or TLS 1.3 resumed
+handshake may instead resume a session issued under a prior generation and
+omit a new certificate exchange; v0.9 does not invalidate those sessions.
+
+Requests already accepted by the old router finish with that router. Existing
+TLS connections and HTTP keep-alive connections are not closed; a later
+request on an existing connection uses the router generation active when that
+request enters Kubio.
+
+As in v0.2, every successful kubio.json reload creates fresh backend selectors,
+even if only certificate paths or contents changed. A rejected reload retains
+the previous router, selector positions, listener mode, and in-memory
+certificate.
+
+Kubio watches kubio.json, not the referenced certificate files. Replacing or
+editing only `cert` or `key` does not trigger a reload. To load changed file
+contents at unchanged paths, the operator must also update or touch kubio.json
+so its watched metadata changes. Each such reload reads both files again.
+
+
+7. Reload failures and diagnostics
+
+If either file cannot be read or the pair cannot be loaded during reload,
+Kubio writes one sanitized operational error to standard error and continues
+serving with the complete previous generation. It never publishes only a new
+router or only one half of a certificate pair.
+
+Startup and reload errors may identify `tls.cert` or `tls.key`, a configured
+path, and a broad read, PEM, certificate, key, or mismatch category. They must
+not include PEM contents, private-key material, environment values, detailed
+client handshake data, or upstream secrets. A failed client TLS handshake is
+handled by the Go server and never becomes an HTTP response or access-log
+record because no request entered the router.
+
+
+8. Validation summary
+
+In addition to the prior specifications, configuration loading rejects:
+
+- `tls` set to null, a scalar, or an array.
+- A `tls` object missing `cert` or `key`.
+- `cert` or `key` set to null, a non-string value, or an empty string.
+- An unknown field or duplicate key inside `tls`.
+- `tls` placed inside a backend, site, route, match, timeout, or policy.
+- An alias such as `https`, `certificate`, or `privateKey`.
+- A pair that Go cannot load as a certificate and matching private key.
+
+An expired, not-yet-valid, untrusted, self-signed, or hostname-mismatched
+certificate is not rejected solely for that property. Clients may reject it.
+
+
+9. Concurrency and performance constraints
+
+Certificate lookup through GetCertificate is read-only and lock-free on the
+full TLS handshake path. A reload constructs the complete certificate off-path
+and publishes an immutable pointer; it never mutates a certificate or
+tls.Config in use. No certificate file read, PEM parse, router build, or reload
+lock occurs on an HTTP request path.
+
+Plaintext mode must not allocate or synchronize for TLS configuration on an
+HTTP request. v0.9 adds no background certificate-renewal goroutine, file
+watcher, external dependency, or network call beyond client handshakes.
+
+
+10. Deferred features
+
+Every item below moves to v0.10; none is implied by v0.9.
+
+Additional route matching:
+
+- Client-IP conditions, including forwarded client-IP derivation.
+- Presence or absence conditions, negation, regular expressions, wildcard
+  values, numeric comparisons, value capture, and logical OR groups.
+
+Backend resilience and upstream transport:
+
+- Active and passive health checks and weighted target selection.
+- Status-based retries.
+- Request-body replay and explicit idempotency policies.
+- Retry backoff, total deadlines, and retry budgets.
+- Direct-target timeout options and response-body timeouts.
+- HTTPS upstream CA and SNI settings.
+
+Client-facing TLS:
+
+- Multiple manual certificates and certificate selection by SNI or host.
+- HTTP-to-HTTPS redirects and automatic ACME certificates.
+- Mutual TLS, TLS passthrough, and configurable TLS protocol or algorithm
+  policy.
+
+Observability and administration:
+
+- Configurable access-log outputs and formats, custom fields, sampling, and
+  redaction rules.
+- Query-string and request/response-header logging.
+- Request IDs and forwarded client-IP fields.
+- Per-attempt logs and upstream timing fields.
+- Request and upstream metrics.
+- Health and metrics endpoints, general administration endpoints, and reload
+  status reporting.
+
+Proxy protocols and routing actions:
+
+- RFC Forwarded headers and PROXY protocol.
+- URI rewriting, redirect responses, fixed responses, and custom error bodies.
+
+Application gateway features:
+
+- Rate limiting, authentication, response compression, response caching, and
+  service discovery.
+
+Header policy features:
+
+- Response trailer modification and conditional response-header policies.
+- Request-header removal and addition.
+- Response-header policies for Kubio-generated or intermediate responses.
