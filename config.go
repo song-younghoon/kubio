@@ -40,8 +40,14 @@ type backendTimeout struct {
 
 type backendRetryConfig struct {
 	Status   []int
-	Delay    time.Duration
+	Backoff  *backendBackoffConfig
 	Deadline time.Duration
+}
+
+type backendBackoffConfig struct {
+	Base   time.Duration
+	Cap    time.Duration
+	Jitter bool
 }
 
 type siteConfig struct {
@@ -99,9 +105,16 @@ type rawBackendConfig struct {
 
 type rawBackendRetry struct {
 	set      bool
-	Status   optionalIntArray `json:"status"`
-	Delay    optionalDuration `json:"delay"`
-	Deadline optionalDuration `json:"deadline"`
+	Status   optionalIntArray  `json:"status"`
+	Backoff  rawBackendBackoff `json:"backoff"`
+	Deadline optionalDuration  `json:"deadline"`
+}
+
+type rawBackendBackoff struct {
+	set    bool
+	Base   optionalDuration `json:"base"`
+	Cap    optionalDuration `json:"cap"`
+	Jitter optionalString   `json:"jitter"`
 }
 
 type rawBackendTimeout struct {
@@ -252,9 +265,9 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must be an object")
 	}
 	var decoded struct {
-		Status   optionalIntArray `json:"status"`
-		Delay    optionalDuration `json:"delay"`
-		Deadline optionalDuration `json:"deadline"`
+		Status   optionalIntArray  `json:"status"`
+		Backoff  rawBackendBackoff `json:"backoff"`
+		Deadline optionalDuration  `json:"deadline"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -264,7 +277,39 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 	if !decoded.Status.set || len(decoded.Status.values) == 0 {
 		return fmt.Errorf("status must be a non-empty array")
 	}
-	*r = rawBackendRetry{set: true, Status: decoded.Status, Delay: decoded.Delay, Deadline: decoded.Deadline}
+	*r = rawBackendRetry{set: true, Status: decoded.Status, Backoff: decoded.Backoff, Deadline: decoded.Deadline}
+	return nil
+}
+
+func (b *rawBackendBackoff) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Base   optionalDuration `json:"base"`
+		Cap    optionalDuration `json:"cap"`
+		Jitter optionalString   `json:"jitter"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Base.set || !decoded.Cap.set {
+		return fmt.Errorf("base and cap must be set")
+	}
+	if decoded.Cap.value < decoded.Base.value {
+		return fmt.Errorf("cap must be greater than or equal to base")
+	}
+	jitter := "none"
+	if decoded.Jitter.set {
+		jitter = decoded.Jitter.value
+	}
+	if jitter != "none" && jitter != "full" {
+		return fmt.Errorf("jitter must be none or full")
+	}
+	*b = rawBackendBackoff{set: true, Base: decoded.Base, Cap: decoded.Cap, Jitter: optionalString{set: true, value: jitter}}
 	return nil
 }
 
@@ -536,10 +581,13 @@ func decodeConfig(data []byte) (config, error) {
 			if err := validateRetryStatuses(rawBackend.Retry.Status.values); err != nil {
 				return config{}, fmt.Errorf("backends[%q].retry.status: %w", name, err)
 			}
-			retry = &backendRetryConfig{
-				Status:   append([]int(nil), rawBackend.Retry.Status.values...),
-				Delay:    rawBackend.Retry.Delay.value,
-				Deadline: rawBackend.Retry.Deadline.value,
+			retry = &backendRetryConfig{Status: append([]int(nil), rawBackend.Retry.Status.values...), Deadline: rawBackend.Retry.Deadline.value}
+			if rawBackend.Retry.Backoff.set {
+				retry.Backoff = &backendBackoffConfig{
+					Base:   rawBackend.Retry.Backoff.Base.value,
+					Cap:    rawBackend.Retry.Backoff.Cap.value,
+					Jitter: rawBackend.Retry.Backoff.Jitter.value == "full",
+				}
 			}
 		}
 		cfg.Backends[name] = backendConfig{
@@ -643,6 +691,7 @@ const (
 	jsonBackends
 	jsonBackend
 	jsonBackendRetry
+	jsonBackendBackoff
 	jsonSites
 	jsonSite
 	jsonRoutes
@@ -745,7 +794,15 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackendRetry:
 		switch key {
-		case "status", "delay", "deadline":
+		case "status", "deadline":
+			return jsonAny, nil
+		case "backoff":
+			return jsonBackendBackoff, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackendBackoff:
+		switch key {
+		case "base", "cap", "jitter":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)

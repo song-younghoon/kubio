@@ -32,7 +32,7 @@ func TestBackendResilienceConfig(t *testing.T) {
     "app": {
       "targets": ["http://app-1:3000", "http://app-2:3000", "http://app-3:3000"],
       "tries": 2,
-      "retry": {"status": [502, 503, 504], "delay": "25ms", "deadline": "2s"},
+      "retry": {"status": [502, 503, 504], "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s"},
       "timeout": {"dial": "250ms", "header": "1m30s"}
     }
   },
@@ -44,7 +44,9 @@ func TestBackendResilienceConfig(t *testing.T) {
 	}
 	backend := cfg.Backends["app"]
 	if backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second ||
-		backend.Retry.Delay != 25*time.Millisecond || backend.Retry.Deadline != 2*time.Second ||
+		backend.Retry.Backoff == nil || backend.Retry.Backoff.Base != 25*time.Millisecond ||
+		backend.Retry.Backoff.Cap != 50*time.Millisecond || backend.Retry.Backoff.Jitter ||
+		backend.Retry.Deadline != 2*time.Second ||
 		!slices.Equal(backend.Retry.Status, []int{502, 503, 504}) {
 		t.Fatalf("decoded backend = %+v", backend)
 	}
@@ -61,60 +63,71 @@ func TestBackendResilienceConfig(t *testing.T) {
 		return `{"listen":":8080","backends":{"app":{"targets":["http://a:3000","http://b:3000"],` + fields + `}},"sites":[{"hosts":["*"],"backend":"app"}]}`
 	}
 	invalid := map[string]string{
-		"tries null":                withBackend(`"tries":null`),
-		"tries string":              withBackend(`"tries":"1"`),
-		"tries boolean":             withBackend(`"tries":true`),
-		"tries decimal":             withBackend(`"tries":1.0`),
-		"tries exponent":            withBackend(`"tries":1e0`),
-		"tries zero":                withBackend(`"tries":0`),
-		"tries negative":            withBackend(`"tries":-1`),
-		"tries above targets":       withBackend(`"tries":3`),
-		"timeout null":              withBackend(`"timeout":null`),
-		"timeout array":             withBackend(`"timeout":[]`),
-		"timeout empty":             withBackend(`"timeout":{}`),
-		"timeout unknown":           withBackend(`"timeout":{"read":"1s"}`),
-		"dial null":                 withBackend(`"timeout":{"dial":null}`),
-		"dial number":               withBackend(`"timeout":{"dial":1}`),
-		"dial empty":                withBackend(`"timeout":{"dial":""}`),
-		"dial zero":                 withBackend(`"timeout":{"dial":"0s"}`),
-		"dial negative":             withBackend(`"timeout":{"dial":"-1s"}`),
-		"dial whitespace":           withBackend(`"timeout":{"dial":" 1s"}`),
-		"header invalid":            withBackend(`"timeout":{"header":"soon"}`),
-		"duration environment":      withBackend(`"timeout":{"header":"${KUBIO_TIMEOUT}"}`),
-		"duplicate timeout field":   withBackend(`"timeout":{"dial":"1s","dial":"2s"}`),
-		"retry null":                withBackend(`"tries":2,"retry":null`),
-		"retry scalar":              withBackend(`"tries":2,"retry":true`),
-		"retry array":               withBackend(`"tries":2,"retry":[]`),
-		"retry empty":               withBackend(`"tries":2,"retry":{}`),
-		"retry missing tries":       withBackend(`"retry":{"status":[503]}`),
-		"retry one try":             withBackend(`"tries":1,"retry":{"status":[503]}`),
-		"retry null status":         withBackend(`"tries":2,"retry":{"status":null}`),
-		"retry scalar status":       withBackend(`"tries":2,"retry":{"status":503}`),
-		"retry empty status":        withBackend(`"tries":2,"retry":{"status":[]}`),
-		"retry status string":       withBackend(`"tries":2,"retry":{"status":["503"]}`),
-		"retry status decimal":      withBackend(`"tries":2,"retry":{"status":[503.0]}`),
-		"retry status exponent":     withBackend(`"tries":2,"retry":{"status":[5.03e2]}`),
-		"retry status low":          withBackend(`"tries":2,"retry":{"status":[399]}`),
-		"retry status high":         withBackend(`"tries":2,"retry":{"status":[600]}`),
-		"retry duplicate status":    withBackend(`"tries":2,"retry":{"status":[503,503]}`),
-		"retry duplicate field":     withBackend(`"tries":2,"retry":{"status":[503],"status":[504]}`),
-		"retry unknown field":       withBackend(`"tries":2,"retry":{"status":[503],"codes":[503]}`),
-		"retry alias":               withBackend(`"tries":2,"retries":{"status":[503]}`),
-		"retry delay null":          withBackend(`"tries":2,"retry":{"status":[503],"delay":null}`),
-		"retry delay number":        withBackend(`"tries":2,"retry":{"status":[503],"delay":1}`),
-		"retry delay empty":         withBackend(`"tries":2,"retry":{"status":[503],"delay":""}`),
-		"retry delay zero":          withBackend(`"tries":2,"retry":{"status":[503],"delay":"0s"}`),
-		"retry delay negative":      withBackend(`"tries":2,"retry":{"status":[503],"delay":"-1s"}`),
-		"retry delay whitespace":    withBackend(`"tries":2,"retry":{"status":[503],"delay":" 1s"}`),
-		"retry deadline null":       withBackend(`"tries":2,"retry":{"status":[503],"deadline":null}`),
-		"retry deadline number":     withBackend(`"tries":2,"retry":{"status":[503],"deadline":1}`),
-		"retry deadline empty":      withBackend(`"tries":2,"retry":{"status":[503],"deadline":""}`),
-		"retry deadline zero":       withBackend(`"tries":2,"retry":{"status":[503],"deadline":"0s"}`),
-		"retry deadline negative":   withBackend(`"tries":2,"retry":{"status":[503],"deadline":"-1s"}`),
-		"retry deadline whitespace": withBackend(`"tries":2,"retry":{"status":[503],"deadline":" 1s"}`),
-		"retry duplicate delay":     withBackend(`"tries":2,"retry":{"status":[503],"delay":"1s","delay":"2s"}`),
-		"site timeout":              `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"dial":"1s"}}]}`,
-		"site retry":                `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","retry":{"status":[503]}}]}`,
+		"tries null":                    withBackend(`"tries":null`),
+		"tries string":                  withBackend(`"tries":"1"`),
+		"tries boolean":                 withBackend(`"tries":true`),
+		"tries decimal":                 withBackend(`"tries":1.0`),
+		"tries exponent":                withBackend(`"tries":1e0`),
+		"tries zero":                    withBackend(`"tries":0`),
+		"tries negative":                withBackend(`"tries":-1`),
+		"tries above targets":           withBackend(`"tries":3`),
+		"timeout null":                  withBackend(`"timeout":null`),
+		"timeout array":                 withBackend(`"timeout":[]`),
+		"timeout empty":                 withBackend(`"timeout":{}`),
+		"timeout unknown":               withBackend(`"timeout":{"read":"1s"}`),
+		"dial null":                     withBackend(`"timeout":{"dial":null}`),
+		"dial number":                   withBackend(`"timeout":{"dial":1}`),
+		"dial empty":                    withBackend(`"timeout":{"dial":""}`),
+		"dial zero":                     withBackend(`"timeout":{"dial":"0s"}`),
+		"dial negative":                 withBackend(`"timeout":{"dial":"-1s"}`),
+		"dial whitespace":               withBackend(`"timeout":{"dial":" 1s"}`),
+		"header invalid":                withBackend(`"timeout":{"header":"soon"}`),
+		"duration environment":          withBackend(`"timeout":{"header":"${KUBIO_TIMEOUT}"}`),
+		"duplicate timeout field":       withBackend(`"timeout":{"dial":"1s","dial":"2s"}`),
+		"retry null":                    withBackend(`"tries":2,"retry":null`),
+		"retry scalar":                  withBackend(`"tries":2,"retry":true`),
+		"retry array":                   withBackend(`"tries":2,"retry":[]`),
+		"retry empty":                   withBackend(`"tries":2,"retry":{}`),
+		"retry missing tries":           withBackend(`"retry":{"status":[503]}`),
+		"retry one try":                 withBackend(`"tries":1,"retry":{"status":[503]}`),
+		"retry null status":             withBackend(`"tries":2,"retry":{"status":null}`),
+		"retry scalar status":           withBackend(`"tries":2,"retry":{"status":503}`),
+		"retry empty status":            withBackend(`"tries":2,"retry":{"status":[]}`),
+		"retry status string":           withBackend(`"tries":2,"retry":{"status":["503"]}`),
+		"retry status decimal":          withBackend(`"tries":2,"retry":{"status":[503.0]}`),
+		"retry status exponent":         withBackend(`"tries":2,"retry":{"status":[5.03e2]}`),
+		"retry status low":              withBackend(`"tries":2,"retry":{"status":[399]}`),
+		"retry status high":             withBackend(`"tries":2,"retry":{"status":[600]}`),
+		"retry duplicate status":        withBackend(`"tries":2,"retry":{"status":[503,503]}`),
+		"retry duplicate field":         withBackend(`"tries":2,"retry":{"status":[503],"status":[504]}`),
+		"retry unknown field":           withBackend(`"tries":2,"retry":{"status":[503],"codes":[503]}`),
+		"retry alias":                   withBackend(`"tries":2,"retries":{"status":[503]}`),
+		"retry delay null":              withBackend(`"tries":2,"retry":{"status":[503],"delay":null}`),
+		"retry delay number":            withBackend(`"tries":2,"retry":{"status":[503],"delay":1}`),
+		"retry delay empty":             withBackend(`"tries":2,"retry":{"status":[503],"delay":""}`),
+		"retry delay zero":              withBackend(`"tries":2,"retry":{"status":[503],"delay":"0s"}`),
+		"retry delay negative":          withBackend(`"tries":2,"retry":{"status":[503],"delay":"-1s"}`),
+		"retry delay whitespace":        withBackend(`"tries":2,"retry":{"status":[503],"delay":" 1s"}`),
+		"retry deadline null":           withBackend(`"tries":2,"retry":{"status":[503],"deadline":null}`),
+		"retry deadline number":         withBackend(`"tries":2,"retry":{"status":[503],"deadline":1}`),
+		"retry deadline empty":          withBackend(`"tries":2,"retry":{"status":[503],"deadline":""}`),
+		"retry deadline zero":           withBackend(`"tries":2,"retry":{"status":[503],"deadline":"0s"}`),
+		"retry deadline negative":       withBackend(`"tries":2,"retry":{"status":[503],"deadline":"-1s"}`),
+		"retry deadline whitespace":     withBackend(`"tries":2,"retry":{"status":[503],"deadline":" 1s"}`),
+		"retry duplicate delay":         withBackend(`"tries":2,"retry":{"status":[503],"delay":"1s","delay":"2s"}`),
+		"retry backoff null":            withBackend(`"tries":2,"retry":{"status":[503],"backoff":null}`),
+		"retry backoff scalar":          withBackend(`"tries":2,"retry":{"status":[503],"backoff":true}`),
+		"retry backoff empty":           withBackend(`"tries":2,"retry":{"status":[503],"backoff":{}}`),
+		"retry backoff missing base":    withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"cap":"1s"}}`),
+		"retry backoff missing cap":     withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s"}}`),
+		"retry backoff base invalid":    withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"soon","cap":"1s"}}`),
+		"retry backoff cap invalid":     withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"soon"}}`),
+		"retry backoff cap low":         withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"2s","cap":"1s"}}`),
+		"retry backoff jitter invalid":  withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s","jitter":"random"}}`),
+		"retry backoff duplicate field": withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s"},"backoff":{"base":"2s","cap":"2s"}}`),
+		"retry backoff duplicate base":  withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","base":"2s","cap":"2s"}}`),
+		"site timeout":                  `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"dial":"1s"}}]}`,
+		"site retry":                    `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","retry":{"status":[503]}}]}`,
 	}
 	for name, data := range invalid {
 		t.Run(name, func(t *testing.T) {
@@ -159,7 +172,7 @@ func TestBackendResilienceDefaultsAndValidation(t *testing.T) {
 		{Targets: []string{"http://a:3000"}, Tries: 2},
 		{Targets: []string{"http://a:3000"}, Timeout: backendTimeout{Dial: -time.Second}},
 		{Targets: []string{"http://a:3000"}, Timeout: backendTimeout{Header: -time.Second}},
-		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Delay: -time.Second}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Backoff: &backendBackoffConfig{Base: -time.Second, Cap: time.Second}}},
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Deadline: -time.Second}},
 	}
 	for _, cfg := range invalid {
@@ -275,7 +288,7 @@ func TestBackendRetriesConfiguredStatuses(t *testing.T) {
 	}
 }
 
-func TestBackendRetryDelayAppliesBeforeNextAttempt(t *testing.T) {
+func TestBackendRetryBackoffAppliesBeforeNextAttempt(t *testing.T) {
 	const delay = 30 * time.Millisecond
 
 	t.Run("status response", func(t *testing.T) {
@@ -289,7 +302,7 @@ func TestBackendRetryDelayAppliesBeforeNextAttempt(t *testing.T) {
 		handler, err := newRouter(config{
 			Backends: map[string]backendConfig{"app": {
 				Targets: []string{first.URL, second.URL}, Tries: 2,
-				Retry: &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}, Delay: delay},
+				Retry: &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}, Backoff: &backendBackoffConfig{Base: delay, Cap: delay}},
 			}},
 			Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
 		})
@@ -312,7 +325,7 @@ func TestBackendRetryDelayAppliesBeforeNextAttempt(t *testing.T) {
 		handler, err := newRouter(config{
 			Backends: map[string]backendConfig{"app": {
 				Targets: []string{first, second.URL}, Tries: 2,
-				Retry: &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}, Delay: delay},
+				Retry: &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}, Backoff: &backendBackoffConfig{Base: delay, Cap: delay}},
 			}},
 			Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
 		})
@@ -329,7 +342,43 @@ func TestBackendRetryDelayAppliesBeforeNextAttempt(t *testing.T) {
 	})
 }
 
-func TestBackendRetryDelayStopsWhenContextIsCanceled(t *testing.T) {
+func TestBackendRetryBackoffIsExponentialAndCapped(t *testing.T) {
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer second.Close()
+	third := newTextBackend(t, "healthy")
+	defer third.Close()
+
+	const base = 20 * time.Millisecond
+	const capDelay = 30 * time.Millisecond
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{first.URL, second.URL, third.URL}, Tries: 3,
+			Retry: &backendRetryConfig{
+				Status:  []int{http.StatusServiceUnavailable},
+				Backoff: &backendBackoffConfig{Base: base, Cap: capDelay},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if got := proxyResponse(t, handler, "proxy", "/"); got != "healthy" {
+		t.Fatalf("response = %q", got)
+	}
+	if elapsed := time.Since(started); elapsed < base+capDelay-8*time.Millisecond {
+		t.Fatalf("retry elapsed = %s, want at least %s", elapsed, base+capDelay-8*time.Millisecond)
+	}
+}
+
+func TestBackendRetryBackoffStopsWhenContextIsCanceled(t *testing.T) {
 	firstDone := make(chan struct{})
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -344,7 +393,7 @@ func TestBackendRetryDelayStopsWhenContextIsCanceled(t *testing.T) {
 
 	backend, err := newBackend(backendConfig{
 		Targets: []string{first.URL, second.URL}, Tries: 2,
-		Retry: &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}, Delay: time.Second},
+		Retry: &backendRetryConfig{Status: []int{http.StatusServiceUnavailable}, Backoff: &backendBackoffConfig{Base: time.Second, Cap: time.Second}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	rand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -46,7 +47,7 @@ type backend struct {
 	targets       []*url.URL
 	tries         int
 	retryStatuses map[int]struct{}
-	retryDelay    time.Duration
+	backoff       *backendBackoffConfig
 	retryDeadline time.Duration
 	transport     *http.Transport
 	nextIndex     atomic.Uint64
@@ -138,11 +139,16 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		if tries <= 1 {
 			return nil, fmt.Errorf("retry requires tries greater than one")
 		}
-		if cfg.Retry.Delay < 0 {
-			return nil, fmt.Errorf("retry.delay must be greater than zero")
-		}
 		if cfg.Retry.Deadline < 0 {
 			return nil, fmt.Errorf("retry.deadline must be greater than zero")
+		}
+		if cfg.Retry.Backoff != nil {
+			if cfg.Retry.Backoff.Base <= 0 {
+				return nil, fmt.Errorf("retry.backoff.base must be greater than zero")
+			}
+			if cfg.Retry.Backoff.Cap < cfg.Retry.Backoff.Base {
+				return nil, fmt.Errorf("retry.backoff.cap must be greater than or equal to base")
+			}
 		}
 		var err error
 		retryStatuses, err = buildRetryStatuses(cfg.Retry.Status)
@@ -176,16 +182,20 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		}
 		targets[index] = target
 	}
-	var delay, deadline time.Duration
+	var backoff *backendBackoffConfig
+	var deadline time.Duration
 	if cfg.Retry != nil {
-		delay = cfg.Retry.Delay
+		if cfg.Retry.Backoff != nil {
+			configured := *cfg.Retry.Backoff
+			backoff = &configured
+		}
 		deadline = cfg.Retry.Deadline
 	}
 	return &backend{
 		targets:       targets,
 		tries:         tries,
 		retryStatuses: retryStatuses,
-		retryDelay:    delay,
+		backoff:       backoff,
 		retryDeadline: deadline,
 		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
 	}, nil
@@ -290,8 +300,8 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 				}
 				return nil, err
 			}
-			if b.retryDelay > 0 {
-				if err := waitRetryDelay(ctx, b.retryDelay); err != nil {
+			if b.backoff != nil {
+				if err := waitRetryBackoff(ctx, b.backoff, attempt+1); err != nil {
 					return nil, err
 				}
 			}
@@ -310,8 +320,8 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if b.retryDelay > 0 {
-			if err := waitRetryDelay(ctx, b.retryDelay); err != nil {
+		if b.backoff != nil {
+			if err := waitRetryBackoff(ctx, b.backoff, attempt+1); err != nil {
 				return nil, err
 			}
 		}
@@ -319,7 +329,18 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 	return nil, errors.New("backend retry attempts exhausted")
 }
 
-func waitRetryDelay(ctx context.Context, delay time.Duration) error {
+func waitRetryBackoff(ctx context.Context, backoff *backendBackoffConfig, attempt int) error {
+	delay := backoff.Base
+	for index := 1; index < attempt && delay < backoff.Cap; index++ {
+		if delay > backoff.Cap/2 {
+			delay = backoff.Cap
+			break
+		}
+		delay *= 2
+	}
+	if backoff.Jitter {
+		delay = time.Duration(rand.Int64N(int64(delay)))
+	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
