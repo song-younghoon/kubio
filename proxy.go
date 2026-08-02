@@ -176,28 +176,19 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		}
 		targets[index] = target
 	}
+	var delay, deadline time.Duration
+	if cfg.Retry != nil {
+		delay = cfg.Retry.Delay
+		deadline = cfg.Retry.Deadline
+	}
 	return &backend{
 		targets:       targets,
 		tries:         tries,
 		retryStatuses: retryStatuses,
-		retryDelay:    retryDelay(cfg.Retry),
-		retryDeadline: retryDeadline(cfg.Retry),
+		retryDelay:    delay,
+		retryDeadline: deadline,
 		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
 	}, nil
-}
-
-func retryDelay(retry *backendRetryConfig) time.Duration {
-	if retry == nil {
-		return 0
-	}
-	return retry.Delay
-}
-
-func retryDeadline(retry *backendRetryConfig) time.Duration {
-	if retry == nil {
-		return 0
-	}
-	return retry.Deadline
 }
 
 func (b *backend) nextTargetIndex() int {
@@ -329,9 +320,6 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 }
 
 func waitRetryDelay(ctx context.Context, delay time.Duration) error {
-	if delay == 0 {
-		return nil
-	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
