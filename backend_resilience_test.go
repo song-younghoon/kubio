@@ -15,6 +15,14 @@ import (
 	"time"
 )
 
+func closedBackendURL(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := server.URL
+	server.Close()
+	return url
+}
+
 func TestBackendResilienceConfig(t *testing.T) {
 	valid := `{
   "listen": ":8080",
@@ -92,7 +100,7 @@ func TestBackendResilienceDefaultsAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if backend.tries != 1 || backend.transport.TLSHandshakeTimeout != proxyDialTimeout ||
-		backend.transport.ResponseHeaderTimeout != proxyResponseHeaderLimit {
+		backend.transport.ResponseHeaderTimeout != proxyResponseHeaderTimeout {
 		t.Fatalf("default backend = tries %d, TLS %s, header %s", backend.tries, backend.transport.TLSHandshakeTimeout, backend.transport.ResponseHeaderTimeout)
 	}
 
@@ -130,9 +138,7 @@ func TestBackendRetriesDistinctTargetsWithoutAdvancingSelector(t *testing.T) {
 		_, _ = io.WriteString(w, "healthy")
 	}))
 	defer healthy.Close()
-	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	closedURL := closed.URL
-	closed.Close()
+	closedURL := closedBackendURL(t)
 
 	handler, err := newRouter(config{
 		Backends: map[string]backendConfig{"app": {Targets: []string{closedURL, healthy.URL}, Tries: 2}},
@@ -247,9 +253,7 @@ func TestBackendDoesNotRetryIneligibleRequests(t *testing.T) {
 		healthyHits.Add(1)
 	}))
 	defer healthy.Close()
-	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	closedURL := closed.URL
-	closed.Close()
+	closedURL := closedBackendURL(t)
 
 	requests := map[string]func() *http.Request{
 		"method": func() *http.Request {
@@ -337,9 +341,7 @@ func TestBackendHeaderTimeoutRetriesAndClassifiesLastError(t *testing.T) {
 			close(release)
 			slow.Close()
 		}()
-		closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		closedURL := closed.URL
-		closed.Close()
+		closedURL := closedBackendURL(t)
 		handler, err := newRouter(config{
 			Backends: map[string]backendConfig{"app": {
 				Targets: []string{closedURL, slow.URL}, Tries: 2,

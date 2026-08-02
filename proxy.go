@@ -18,13 +18,13 @@ import (
 )
 
 const (
-	proxyDialTimeout         = 5 * time.Second
-	proxyResponseHeaderLimit = 30 * time.Second
-	proxyBufferSize          = 32 * 1024
-	proxyMaxIdleConnsPerHost = 32
+	proxyDialTimeout           = 5 * time.Second
+	proxyResponseHeaderTimeout = 30 * time.Second
+	proxyBufferSize            = 32 * 1024
+	proxyMaxIdleConnsPerHost   = 32
 )
 
-var proxyTransport = newProxyTransport(proxyDialTimeout, proxyResponseHeaderLimit)
+var proxyTransport = newProxyTransport(proxyDialTimeout, proxyResponseHeaderTimeout)
 
 func newProxyTransport(dialTimeout, responseHeaderTimeout time.Duration) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -87,7 +87,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 	}
 	responseHeaderTimeout := cfg.Timeout.Header
 	if responseHeaderTimeout == 0 {
-		responseHeaderTimeout = proxyResponseHeaderLimit
+		responseHeaderTimeout = proxyResponseHeaderTimeout
 	} else if responseHeaderTimeout < 0 {
 		return nil, fmt.Errorf("timeout.header must be greater than zero")
 	}
@@ -224,7 +224,7 @@ func newProxy(
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}, siteResponseHeaders, routeResponseHeaders), nil
+	}, proxyTransport, siteResponseHeaders, routeResponseHeaders), nil
 }
 
 func newBackendProxy(
@@ -233,31 +233,31 @@ func newBackendProxy(
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
 ) *httputil.ReverseProxy {
-	if backend.tries == 1 {
-		proxy := newReverseProxy(func(request *httputil.ProxyRequest) {
-			rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
-		}, siteResponseHeaders, routeResponseHeaders)
-		proxy.Transport = backend.transport
-		return proxy
-	}
-	proxy := newReverseProxy(func(request *httputil.ProxyRequest) {
+	rewrite := func(request *httputil.ProxyRequest) {
 		start := backend.nextTargetIndex()
 		rewriteProxyRequest(request, backend.targets[start], headers, trustProxies)
 		if retryableBackendRequest(request.In) {
 			request.Out = withBackendRetry(request.Out, start)
 		}
-	}, siteResponseHeaders, routeResponseHeaders)
-	proxy.Transport = backend
-	return proxy
+	}
+	transport := http.RoundTripper(backend)
+	if backend.tries == 1 {
+		rewrite = func(request *httputil.ProxyRequest) {
+			rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
+		}
+		transport = backend.transport
+	}
+	return newReverseProxy(rewrite, transport, siteResponseHeaders, routeResponseHeaders)
 }
 
 func newReverseProxy(
 	rewrite func(*httputil.ProxyRequest),
+	transport http.RoundTripper,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 ) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Rewrite:      rewrite,
-		Transport:    proxyTransport,
+		Transport:    transport,
 		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
