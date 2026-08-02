@@ -1,0 +1,220 @@
+Kubio kubio.json v0.7 Specification
+Status: Agreed specification
+Base: v0.6
+
+
+1. Scope
+
+v0.7 adds optional structured access logging. The only new configuration field
+is the top-level boolean `log`. When enabled, Kubio attempts to write one JSON
+object per completed request to standard output; failed writes may drop it.
+
+This is the complete v0.7 configuration scope. Log sinks, alternate formats,
+field customization, sampling, metrics, health endpoints, and reload-status
+endpoints remain deferred. Every valid v0.6 configuration remains valid and
+keeps access logging disabled.
+
+The short `log` name is intentional. Kubio has not had a stable release, and no
+longer-named or compatibility alias is introduced.
+
+
+2. Configuration
+
+`log` is optional at the top level of kubio.json:
+
+    {
+      "listen": ":8080",
+      "log": true,
+      "sites": [
+        {
+          "hosts": ["example.com"],
+          "target": "http://app:3000"
+        }
+      ]
+    }
+
+When absent or false, request access logs are disabled. When true, the fixed
+v0.7 JSON access log described below is enabled. `log` does not control Kubio's
+existing startup, reload, watcher, or fatal operational messages; those remain
+plain text on standard error.
+
+`log` is valid only at the top level. It must be a non-null JSON boolean. It
+does not support environment-variable expansion. No `accessLog`, `logging`, or
+other alias is accepted.
+
+
+3. Logged request scope
+
+When enabled, Kubio builds and attempts to emit exactly one access record for
+every request that enters the active router and finishes or aborts its handler
+execution. This includes:
+
+- A request forwarded to a direct target or named backend.
+- A request that succeeds after a v0.6 backend retry.
+- An upstream-provided response of any terminal status.
+- A Kubio-generated 404, 502, or 504 response.
+- The server-wide OPTIONS * response.
+- A streaming, SSE, or upgraded request when its handler eventually returns.
+- A handler execution that panics; Kubio logs it and then preserves the
+  existing panic behavior.
+
+Failed v0.6 attempts do not create separate records. One downstream request
+always produces at most one access record, regardless of target count,
+informational responses, or retries.
+
+A request uses the `log` setting of the router that accepted it. A long-lived
+request is logged only after its handler returns, even if a successful reload
+has activated a new router in the meantime.
+
+Go's HTTP server normally handles OPTIONS * before invoking its configured
+handler. When v0.7 logging is active or inactive, Kubio instead passes that
+request through the currently loaded router and reproduces the existing 200
+response with Content-Length: 0 there. This preserves the v0.1 wire behavior
+while making the router generation selected at dispatch responsible for the
+record. The existing bounded discard of an OPTIONS * request body is retained.
+
+
+4. JSON record
+
+Each record is one compact JSON object followed by one newline. It has exactly
+these fields:
+
+    {
+      "time": "2026-08-02T09:15:30.123456789Z",
+      "method": "GET",
+      "host": "example.com",
+      "path": "/api/users%2Factive",
+      "proto": "HTTP/1.1",
+      "peer": "192.0.2.10",
+      "status": 200,
+      "bytes": 1234,
+      "durationUs": 827
+    }
+
+Consumers must not depend on JSON object key order. Field meanings are:
+
+- `time`: UTC completion time in RFC 3339 Nano format.
+- `method`: request method exactly as received.
+- `host`: request Host exactly as received, including a port when present.
+- `path`: escaped request path. It is `/` when the URL has an empty path.
+- `proto`: request protocol string as received, such as `HTTP/1.1`.
+- `peer`: the directly connected peer IP without its port. It is an empty
+  string when RemoteAddr cannot be parsed as an IP endpoint.
+- `status`: first terminal status observed by Kubio, implicit 200, or the
+  synthetic panic status defined in section 5.
+- `bytes`: response-body bytes successfully written through the HTTP
+  ResponseWriter, excluding response headers and trailers.
+- `durationUs`: elapsed handler duration in whole microseconds, rounded down.
+
+`path` never includes the query string or fragment. v0.7 also omits request and
+response headers, cookies, bodies, authenticated identity, forwarded client
+chains, route configuration, backend names, upstream target addresses, and
+transport error details. This fixed omission avoids logging common secret
+locations by default.
+
+The `peer` field intentionally represents the direct connection and does not
+interpret X-Forwarded-For, Forwarded, or `trustProxies`. A derived client-IP
+field remains deferred.
+
+All string values are encoded with standard JSON escaping. A request value
+cannot inject a new record or make the output invalid JSON.
+
+
+5. Status and byte observation
+
+Kubio observes the response without changing its HTTP behavior:
+
+- The first terminal WriteHeader status is recorded.
+- Nonterminal 100 through 199 responses other than 101 are not the final
+  recorded status. A later terminal status is recorded.
+- 101 Switching Protocols is terminal and is recorded as 101.
+- A Write before a terminal WriteHeader records the implicit status 200.
+- A Flush or FlushError that causes the underlying writer to commit headers
+  records implicit status 200, regardless of the returned flush error.
+- A normal handler return without a terminal WriteHeader or body also records
+  200, matching net/http's implicit response.
+- Repeated terminal WriteHeader calls do not replace the first terminal status.
+
+`bytes` is the sum of successful byte counts returned by ResponseWriter.Write.
+It includes bytes written before a later write error. It excludes header and
+trailer bytes and any bytes exchanged directly over a hijacked connection after
+the HTTP upgrade. Kubio's only v0.7 hijack path follows a validated upstream 101
+response. A successful Hijack with no previously observed terminal status
+therefore records 101; a failed Hijack does not. An upgraded request normally
+records status 101 and zero HTTP body bytes, and v0.7 does not count tunneled
+traffic.
+
+The observing writer must preserve every capability of the underlying
+ResponseWriter used by Kubio. It must provide response-controller unwrapping,
+observe and forward FlushError and Hijack, preserve streaming and trailer
+headers, and leave any underlying capability reachable through Unwrap.
+Enabling access logs must not buffer a complete request or response and must
+not break WebSocket, SSE, trailers, or 1xx forwarding.
+
+If a panic occurs before any terminal response is observed, the access record
+uses a synthetic status 500 for logging only. net/http may close the connection
+without sending a 500 response. If a terminal status was already observed,
+that status is retained. Kubio then re-panics with the original value so the
+existing net/http panic and connection behavior is unchanged.
+
+
+6. Output, concurrency, and failures
+
+Access records are written only to standard output. Existing operational logs
+remain on standard error, so the two formats are separate under the default
+process streams.
+
+Concurrent requests may finish in any order. One process-wide serializer is
+shared across all active and retired router generations. Successful complete
+JSON lines therefore never interleave with another Kubio access record. Their
+order is successful write-lock order and is not guaranteed to match request
+arrival order.
+
+An access-log encoding or standard-output write failure must not change the
+HTTP response, retry a request, terminate Kubio, or expose request data in a
+client response. Kubio does not retry the write and continues. A partial or
+failed write may leave a truncated line prefix in standard output; that record
+is dropped, and JSON validity, line isolation, and ordering guarantees apply
+only to successful writes. v0.7 adds no log queue, buffer, rotation, retry,
+backpressure policy, or delivery guarantee. A slow standard output may delay
+completion of a request handler that is being logged.
+
+
+7. Reload and disabled-path behavior
+
+The v0.1 atomic reload rules apply. Invalid `log` configuration fails startup
+or rejects a reload while preserving the entire active router and its logging
+behavior.
+
+A successful reload may enable or disable access logs without restarting the
+listener. New requests use the new router's setting. In-flight requests finish
+under the old router and emit or omit their record according to the old
+setting. Reload itself does not emit an access record.
+
+When logging is disabled, Kubio must not wrap the ResponseWriter, capture a
+start timestamp, build a record, encode JSON, or serialize on an access-log
+lock. The disabled request path therefore retains v0.6 behavior and has no
+logging-specific per-request allocation or synchronization.
+
+
+8. Validation summary
+
+In addition to the prior specifications, configuration loading rejects:
+
+- `log` set to null, a string, number, array, or object.
+- `log` placed inside a site, route, backend, timeout, or response policy.
+- An unknown alias such as `accessLog` or `logging`.
+- A duplicate top-level `log` key under the existing strict JSON rules.
+
+Invalid startup configuration exits before listening. An invalid reload logs a
+sanitized operational error to standard error and retains the active access-log
+setting.
+
+
+9. Deferred features
+
+v0.7 does not add configurable log outputs or formats, custom fields, query or
+header logging, sampling, redaction rules, request IDs, forwarded client-IP
+derivation, per-attempt logs, metrics, health endpoints, or admin endpoints.
+These and every candidate not selected from the former v0.7 proposal move to
+v0.8.

@@ -1,11 +1,11 @@
-Kubio kubio.json v0.7 Proposal
+Kubio kubio.json v0.8 Proposal
 Status: Deferred features; discussion not started
-Base: v0.6
+Base: v0.7
 
 
 1. Purpose
 
-This proposal carries every candidate deferred by v0.6. Sections 2 through 8
+This proposal carries every candidate deferred by v0.7. Sections 2 through 8
 are the exhaustive carried set. They define no agreed behavior yet, and the
 scope must be narrowed before promotion.
 
@@ -36,11 +36,16 @@ scope must be narrowed before promotion.
 - Automatic ACME certificates.
 
 
-5. Observability and administration
+5. Remaining observability and administration
 
-- Structured access logs.
+- Configurable access-log outputs and formats.
+- Custom fields, sampling, and redaction rules.
+- Query-string and request/response-header logging.
+- Request IDs and forwarded client-IP derivation.
+- Per-attempt logs and upstream timing fields.
 - Request and upstream metrics.
 - Health and metrics endpoints.
+- General administration endpoints.
 - Reload status reporting.
 
 
