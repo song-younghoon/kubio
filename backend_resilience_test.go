@@ -32,7 +32,7 @@ func TestBackendResilienceConfig(t *testing.T) {
     "app": {
       "targets": ["http://app-1:3000", "http://app-2:3000", "http://app-3:3000"],
       "tries": 2,
-      "retry": {"status": [502, 503, 504], "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s"},
+      "retry": {"status": [502, 503, 504], "methods": ["POST", "PUT"], "body": {"max": 1048576}, "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s"},
       "timeout": {"dial": "250ms", "header": "1m30s"}
     }
   },
@@ -44,6 +44,7 @@ func TestBackendResilienceConfig(t *testing.T) {
 	}
 	backend := cfg.Backends["app"]
 	if backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second ||
+		!slices.Equal(backend.Retry.Methods, []string{"POST", "PUT"}) || backend.Retry.Body == nil || backend.Retry.Body.Max != 1048576 ||
 		backend.Retry.Backoff == nil || backend.Retry.Backoff.Base != 25*time.Millisecond ||
 		backend.Retry.Backoff.Cap != 50*time.Millisecond || backend.Retry.Backoff.Jitter ||
 		backend.Retry.Deadline != 2*time.Second ||
@@ -102,6 +103,20 @@ func TestBackendResilienceConfig(t *testing.T) {
 		"retry duplicate field":         withBackend(`"tries":2,"retry":{"status":[503],"status":[504]}`),
 		"retry unknown field":           withBackend(`"tries":2,"retry":{"status":[503],"codes":[503]}`),
 		"retry alias":                   withBackend(`"tries":2,"retries":{"status":[503]}`),
+		"retry methods null":            withBackend(`"tries":2,"retry":{"status":[503],"methods":null}`),
+		"retry methods empty":           withBackend(`"tries":2,"retry":{"status":[503],"methods":[]}`),
+		"retry methods wildcard":        withBackend(`"tries":2,"retry":{"status":[503],"methods":["POST*"]}`),
+		"retry methods duplicate":       withBackend(`"tries":2,"retry":{"status":[503],"methods":["POST","POST"]}`),
+		"retry body null":               withBackend(`"tries":2,"retry":{"status":[503],"body":null}`),
+		"retry body empty":              withBackend(`"tries":2,"retry":{"status":[503],"body":{}}`),
+		"retry body max null":           withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":null}}`),
+		"retry body max decimal":        withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1.0}}`),
+		"retry body max exponent":       withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1e3}}`),
+		"retry body max zero":           withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":0}}`),
+		"retry body max negative":       withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":-1}}`),
+		"retry body max too large":      withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":67108865}}`),
+		"retry body unknown":            withBackend(`"tries":2,"retry":{"status":[503],"body":{"limit":1}}`),
+		"retry body duplicate max":      withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1,"max":2}}`),
 		"retry delay null":              withBackend(`"tries":2,"retry":{"status":[503],"delay":null}`),
 		"retry delay number":            withBackend(`"tries":2,"retry":{"status":[503],"delay":1}`),
 		"retry delay empty":             withBackend(`"tries":2,"retry":{"status":[503],"delay":""}`),
@@ -378,6 +393,112 @@ func TestBackendRetryBackoffIsExponentialAndCapped(t *testing.T) {
 	}
 }
 
+func TestBackendRetriesReplayableRequestBody(t *testing.T) {
+	const wantBody = "request payload"
+	var firstBody, secondBody string
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		data, _ := io.ReadAll(request.Body)
+		firstBody = string(data)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		data, _ := io.ReadAll(request.Body)
+		secondBody = string(data)
+		_, _ = io.WriteString(w, "healthy")
+	}))
+	defer second.Close()
+
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{first.URL, second.URL}, Tries: 2,
+			Retry: &backendRetryConfig{
+				Status:  []int{http.StatusServiceUnavailable},
+				Methods: []string{http.MethodPost},
+				Body:    &backendBodyConfig{Max: 1024},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy/", strings.NewReader(wantBody))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "healthy" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if firstBody != wantBody || secondBody != wantBody {
+		t.Fatalf("upstream bodies = %q and %q, want %q", firstBody, secondBody, wantBody)
+	}
+}
+
+func TestBackendRejectsReplayBodyAboveLimit(t *testing.T) {
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hits.Add(1)
+	}))
+	defer upstream.Close()
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{upstream.URL, closedBackendURL(t)}, Tries: 2,
+			Retry: &backendRetryConfig{
+				Status:  []int{http.StatusServiceUnavailable},
+				Methods: []string{http.MethodPost},
+				Body:    &backendBodyConfig{Max: 3},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://proxy/", strings.NewReader("payload")))
+	if response.Code != http.StatusRequestEntityTooLarge || response.Body.String() != "Request Entity Too Large\n" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "text/plain; charset=utf-8" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("413 headers = %v", response.Header())
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("upstream hits = %d, want 0", hits.Load())
+	}
+}
+
+func TestBackendRetryMethodsRemainExplicit(t *testing.T) {
+	var secondHits atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondHits.Add(1)
+		_, _ = io.WriteString(w, "second")
+	}))
+	defer second.Close()
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{first.URL, second.URL}, Tries: 2,
+			Retry: &backendRetryConfig{
+				Status:  []int{http.StatusServiceUnavailable},
+				Methods: []string{http.MethodPost},
+				Body:    &backendBodyConfig{Max: 1024},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if response.Code != http.StatusServiceUnavailable || secondHits.Load() != 0 {
+		t.Fatalf("response = %d, second hits = %d", response.Code, secondHits.Load())
+	}
+}
+
 func TestBackendRetryBackoffStopsWhenContextIsCanceled(t *testing.T) {
 	firstDone := make(chan struct{})
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -651,7 +772,7 @@ func TestRetryableBackendRequest(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := retryableBackendRequest(test.request); got != test.want {
+			if got := retryableBackendRequest(test.request, nil, 0); got != test.want {
 				t.Fatalf("retryable = %t, want %t", got, test.want)
 			}
 		})

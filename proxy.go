@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -47,6 +48,8 @@ type backend struct {
 	targets       []*url.URL
 	tries         int
 	retryStatuses map[int]struct{}
+	retryMethods  map[string]struct{}
+	retryBodyMax  int64
 	backoffDelays []time.Duration
 	backoffJitter bool
 	retryDeadline time.Duration
@@ -149,6 +152,8 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		return nil, fmt.Errorf("tries must be between 1 and the target count")
 	}
 	var retryStatuses map[int]struct{}
+	var retryMethods map[string]struct{}
+	var retryBodyMax int64
 	if cfg.Retry != nil {
 		if tries <= 1 {
 			return nil, fmt.Errorf("retry requires tries greater than one")
@@ -158,6 +163,21 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		}
 		if err := validateBackoff(cfg.Retry.Backoff); err != nil {
 			return nil, fmt.Errorf("retry.backoff: %w", err)
+		}
+		if len(cfg.Retry.Methods) > 0 {
+			if err := validateRetryMethods(cfg.Retry.Methods); err != nil {
+				return nil, fmt.Errorf("retry.methods: %w", err)
+			}
+			retryMethods = make(map[string]struct{}, len(cfg.Retry.Methods))
+			for _, method := range cfg.Retry.Methods {
+				retryMethods[method] = struct{}{}
+			}
+		}
+		if cfg.Retry.Body != nil {
+			if cfg.Retry.Body.Max < 1 || cfg.Retry.Body.Max > maxRetryBodyBytes {
+				return nil, fmt.Errorf("retry.body.max must be between 1 and %d", maxRetryBodyBytes)
+			}
+			retryBodyMax = cfg.Retry.Body.Max
 		}
 		var err error
 		retryStatuses, err = buildRetryStatuses(cfg.Retry.Status)
@@ -205,6 +225,8 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		targets:       targets,
 		tries:         tries,
 		retryStatuses: retryStatuses,
+		retryMethods:  retryMethods,
+		retryBodyMax:  retryBodyMax,
 		backoffDelays: backoffDelays,
 		backoffJitter: backoffJitter,
 		retryDeadline: deadline,
@@ -267,6 +289,13 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 		}
 		return nil, lastErr
 	}
+	replayBody := b.retryBodyMax > 0 && request.Body != nil && request.Body != http.NoBody
+	if replayBody {
+		if err := prepareRetryBody(request, b.retryBodyMax); err != nil {
+			return nil, err
+		}
+		defer releaseRetryBody(request)
+	}
 
 	if b.retryDeadline == 0 {
 		return b.roundTripWithStatusRetry(request, state)
@@ -294,7 +323,10 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		current := request
 		if attempt > 0 {
 			state.informational.Store(false)
-			outgoing := request.Clone(request.Context())
+			outgoing, err := cloneRetryRequest(request)
+			if err != nil {
+				return nil, err
+			}
 			requestURL := *request.URL
 			target := b.targets[(state.start+attempt)%len(b.targets)]
 			requestURL.Scheme = target.Scheme
@@ -385,17 +417,121 @@ func withBackendRetry(request *http.Request, start int) *http.Request {
 	return request.WithContext(httptrace.WithClientTrace(ctx, trace))
 }
 
-func retryableBackendRequest(request *http.Request) bool {
-	switch request.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
-	default:
+func retryableBackendRequest(request *http.Request, methods map[string]struct{}, bodyMax int64) bool {
+	if request.Method == http.MethodConnect {
 		return false
 	}
-	if request.ContentLength != 0 || len(request.TransferEncoding) != 0 || len(request.Trailer) != 0 ||
-		request.Body != nil && request.Body != http.NoBody {
+	if methods == nil {
+		switch request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		default:
+			return false
+		}
+	} else if _, ok := methods[request.Method]; !ok {
 		return false
 	}
-	return !upgradeRequest(request)
+	if upgradeRequest(request) {
+		return false
+	}
+	body := request.Body != nil && request.Body != http.NoBody
+	if !body {
+		return request.ContentLength == 0 && len(request.TransferEncoding) == 0 && len(request.Trailer) == 0
+	}
+	return bodyMax > 0 && len(request.Trailer) == 0
+}
+
+var errRetryBodyTooLarge = errors.New("retry request body exceeds configured maximum")
+
+func prepareRetryBody(request *http.Request, max int64) error {
+	original := request.Body
+	defer func() { _ = original.Close() }()
+	fail := func(err error) error {
+		request.Body = http.NoBody
+		request.GetBody = nil
+		return err
+	}
+	if err := request.Context().Err(); err != nil {
+		return fail(err)
+	}
+	if request.ContentLength > max {
+		if err := request.Context().Err(); err != nil {
+			return fail(err)
+		}
+		return fail(errRetryBodyTooLarge)
+	}
+	payload := make([]byte, 0, minInt64(max, int64(proxyBufferSize)))
+	chunk := make([]byte, proxyBufferSize)
+	emptyReads := 0
+	for {
+		if err := request.Context().Err(); err != nil {
+			return fail(err)
+		}
+		remaining := max - int64(len(payload))
+		readSize := len(chunk)
+		if remaining+1 < int64(readSize) {
+			readSize = int(remaining + 1)
+		}
+		n, err := original.Read(chunk[:readSize])
+		if contextErr := request.Context().Err(); contextErr != nil {
+			return fail(contextErr)
+		}
+		if int64(n) > remaining {
+			return fail(errRetryBodyTooLarge)
+		}
+		if n > 0 {
+			payload = append(payload, chunk[:n]...)
+		}
+		if n == 0 && err == nil {
+			emptyReads++
+			if emptyReads == 100 {
+				return fail(io.ErrNoProgress)
+			}
+		} else {
+			emptyReads = 0
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fail(err)
+		}
+	}
+	request.Body = io.NopCloser(bytes.NewReader(payload))
+	request.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(payload)), nil
+	}
+	request.ContentLength = int64(len(payload))
+	request.TransferEncoding = nil
+	request.Trailer = nil
+	return nil
+}
+
+func minInt64(left, right int64) int {
+	if left < right {
+		return int(left)
+	}
+	return int(right)
+}
+
+func releaseRetryBody(request *http.Request) {
+	if request.Body != nil && request.Body != http.NoBody {
+		_ = request.Body.Close()
+	}
+	request.Body = http.NoBody
+	request.GetBody = nil
+}
+
+func cloneRetryRequest(request *http.Request) (*http.Request, error) {
+	outgoing := request.Clone(request.Context())
+	if request.GetBody == nil {
+		return outgoing, nil
+	}
+	body, err := request.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	outgoing.Body = body
+	return outgoing, nil
 }
 
 func upgradeRequest(request *http.Request) bool {
@@ -444,7 +580,10 @@ func newBackendProxy(
 	rewrite := func(request *httputil.ProxyRequest) {
 		start := backend.nextTargetIndex()
 		rewriteProxyRequest(request, backend.targets[start], headers, trustProxies)
-		if retryableBackendRequest(request.In) {
+		if retryableBackendRequest(request.In, backend.retryMethods, backend.retryBodyMax) {
+			if request.In.Body != nil && request.In.Body != http.NoBody {
+				request.Out.Body = request.In.Body
+			}
 			request.Out = withBackendRetry(request.Out, start)
 		}
 	}
@@ -595,6 +734,9 @@ func validateTargetPort(target *url.URL) error {
 
 func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
 	status := http.StatusBadGateway
+	if errors.Is(err, errRetryBodyTooLarge) {
+		status = http.StatusRequestEntityTooLarge
+	}
 	var timeout net.Error
 	if errors.As(err, &timeout) && timeout.Timeout() || errors.Is(err, context.DeadlineExceeded) {
 		status = http.StatusGatewayTimeout

@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const maxRetryBodyBytes int64 = 64 << 20
+
 type config struct {
 	Listen       string                   `json:"listen"`
 	Log          bool                     `json:"log"`
@@ -40,8 +42,14 @@ type backendTimeout struct {
 
 type backendRetryConfig struct {
 	Status   []int
+	Methods  []string
+	Body     *backendBodyConfig
 	Backoff  *backendBackoffConfig
 	Deadline time.Duration
+}
+
+type backendBodyConfig struct {
+	Max int64
 }
 
 type backendBackoffConfig struct {
@@ -105,9 +113,16 @@ type rawBackendConfig struct {
 
 type rawBackendRetry struct {
 	set      bool
-	Status   optionalIntArray  `json:"status"`
-	Backoff  rawBackendBackoff `json:"backoff"`
-	Deadline optionalDuration  `json:"deadline"`
+	Status   optionalIntArray    `json:"status"`
+	Methods  optionalStringArray `json:"methods"`
+	Body     rawBackendBody      `json:"body"`
+	Backoff  rawBackendBackoff   `json:"backoff"`
+	Deadline optionalDuration    `json:"deadline"`
+}
+
+type rawBackendBody struct {
+	set bool
+	Max optionalInt64 `json:"max"`
 }
 
 type rawBackendBackoff struct {
@@ -179,6 +194,11 @@ type optionalConditionValues struct {
 type optionalInt struct {
 	set   bool
 	value int
+}
+
+type optionalInt64 struct {
+	set   bool
+	value int64
 }
 
 type optionalIntArray struct {
@@ -265,9 +285,11 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must be an object")
 	}
 	var decoded struct {
-		Status   optionalIntArray  `json:"status"`
-		Backoff  rawBackendBackoff `json:"backoff"`
-		Deadline optionalDuration  `json:"deadline"`
+		Status   optionalIntArray    `json:"status"`
+		Methods  optionalStringArray `json:"methods"`
+		Body     rawBackendBody      `json:"body"`
+		Backoff  rawBackendBackoff   `json:"backoff"`
+		Deadline optionalDuration    `json:"deadline"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -277,7 +299,27 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 	if !decoded.Status.set || len(decoded.Status.values) == 0 {
 		return fmt.Errorf("status must be a non-empty array")
 	}
-	*r = rawBackendRetry{set: true, Status: decoded.Status, Backoff: decoded.Backoff, Deadline: decoded.Deadline}
+	*r = rawBackendRetry{set: true, Status: decoded.Status, Methods: decoded.Methods, Body: decoded.Body, Backoff: decoded.Backoff, Deadline: decoded.Deadline}
+	return nil
+}
+
+func (b *rawBackendBody) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Max optionalInt64 `json:"max"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Max.set || decoded.Max.value < 1 || decoded.Max.value > maxRetryBodyBytes {
+		return fmt.Errorf("max must be an integer between 1 and %d", maxRetryBodyBytes)
+	}
+	*b = rawBackendBody{set: true, Max: decoded.Max}
 	return nil
 }
 
@@ -468,6 +510,20 @@ func (i *optionalInt) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (i *optionalInt64) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("null")) || bytes.ContainsAny(data, ".eE") {
+		return fmt.Errorf("must be an integer without a decimal point or exponent")
+	}
+	var value int64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("must be an integer without a decimal point or exponent")
+	}
+	i.set = true
+	i.value = value
+	return nil
+}
+
 func (a *optionalIntArray) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return fmt.Errorf("must be an array of integers")
@@ -581,7 +637,19 @@ func decodeConfig(data []byte) (config, error) {
 			if err := validateRetryStatuses(rawBackend.Retry.Status.values); err != nil {
 				return config{}, fmt.Errorf("backends[%q].retry.status: %w", name, err)
 			}
-			retry = &backendRetryConfig{Status: append([]int(nil), rawBackend.Retry.Status.values...), Deadline: rawBackend.Retry.Deadline.value}
+			if rawBackend.Retry.Methods.set {
+				if err := validateRetryMethods(rawBackend.Retry.Methods.values); err != nil {
+					return config{}, fmt.Errorf("backends[%q].retry.methods: %w", name, err)
+				}
+			}
+			retry = &backendRetryConfig{
+				Status:   append([]int(nil), rawBackend.Retry.Status.values...),
+				Methods:  append([]string(nil), rawBackend.Retry.Methods.values...),
+				Deadline: rawBackend.Retry.Deadline.value,
+			}
+			if rawBackend.Retry.Body.set {
+				retry.Body = &backendBodyConfig{Max: rawBackend.Retry.Body.Max.value}
+			}
 			if rawBackend.Retry.Backoff.set {
 				retry.Backoff = &backendBackoffConfig{
 					Base:   rawBackend.Retry.Backoff.Base.value,
@@ -691,6 +759,7 @@ const (
 	jsonBackends
 	jsonBackend
 	jsonBackendRetry
+	jsonBackendBody
 	jsonBackendBackoff
 	jsonSites
 	jsonSite
@@ -794,10 +863,17 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackendRetry:
 		switch key {
-		case "status", "deadline":
+		case "status", "methods", "deadline":
 			return jsonAny, nil
+		case "body":
+			return jsonBackendBody, nil
 		case "backoff":
 			return jsonBackendBackoff, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackendBody:
+		if key == "max" {
+			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackendBackoff:
@@ -1181,6 +1257,18 @@ func validateMethods(methods []string) error {
 			return fmt.Errorf("contains duplicate %q", method)
 		}
 		seen[method] = struct{}{}
+	}
+	return nil
+}
+
+func validateRetryMethods(methods []string) error {
+	if err := validateMethods(methods); err != nil {
+		return err
+	}
+	for index, method := range methods {
+		if strings.Contains(method, "*") {
+			return fmt.Errorf("item %d must not contain *", index)
+		}
 	}
 	return nil
 }
