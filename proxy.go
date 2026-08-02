@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -45,6 +46,8 @@ type backend struct {
 	targets       []*url.URL
 	tries         int
 	retryStatuses map[int]struct{}
+	retryDelay    time.Duration
+	retryDeadline time.Duration
 	transport     *http.Transport
 	nextIndex     atomic.Uint64
 }
@@ -54,6 +57,27 @@ type backendRetryKey struct{}
 type backendRetryState struct {
 	start         int
 	informational atomic.Bool
+}
+
+type deadlineBody struct {
+	io.ReadCloser
+	ctx    context.Context
+	cancel func()
+	once   sync.Once
+}
+
+func (b *deadlineBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.once.Do(b.cancel)
+	}
+	return n, err
+}
+
+func (b *deadlineBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.cancel)
+	return err
 }
 
 func (p *proxyBufferPool) Get() []byte {
@@ -114,6 +138,12 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		if tries <= 1 {
 			return nil, fmt.Errorf("retry requires tries greater than one")
 		}
+		if cfg.Retry.Delay < 0 {
+			return nil, fmt.Errorf("retry.delay must be greater than zero")
+		}
+		if cfg.Retry.Deadline < 0 {
+			return nil, fmt.Errorf("retry.deadline must be greater than zero")
+		}
 		var err error
 		retryStatuses, err = buildRetryStatuses(cfg.Retry.Status)
 		if err != nil {
@@ -150,8 +180,24 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		targets:       targets,
 		tries:         tries,
 		retryStatuses: retryStatuses,
+		retryDelay:    retryDelay(cfg.Retry),
+		retryDeadline: retryDeadline(cfg.Retry),
 		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
 	}, nil
+}
+
+func retryDelay(retry *backendRetryConfig) time.Duration {
+	if retry == nil {
+		return 0
+	}
+	return retry.Delay
+}
+
+func retryDeadline(retry *backendRetryConfig) time.Duration {
+	if retry == nil {
+		return 0
+	}
+	return retry.Deadline
 }
 
 func (b *backend) nextTargetIndex() int {
@@ -210,7 +256,24 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 		return nil, lastErr
 	}
 
-	return b.roundTripWithStatusRetry(request, state)
+	if b.retryDeadline == 0 {
+		return b.roundTripWithStatusRetry(request, state)
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), b.retryDeadline)
+	response, err := b.roundTripWithStatusRetry(request.WithContext(ctx), state)
+	if err != nil {
+		cancel()
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, err
+	}
+	if response.Body == nil {
+		cancel()
+		return response, nil
+	}
+	response.Body = &deadlineBody{ReadCloser: response.Body, ctx: ctx, cancel: cancel}
+	return response, nil
 }
 
 func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backendRetryState) (*http.Response, error) {
@@ -230,6 +293,12 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		response, err := b.transport.RoundTrip(current)
 		if err != nil {
 			if state.informational.Load() || request.Context().Err() != nil || attempt+1 == b.tries {
+				if contextErr := request.Context().Err(); contextErr != nil && b.retryDeadline > 0 {
+					return nil, contextErr
+				}
+				return nil, err
+			}
+			if err := waitRetryDelay(request.Context(), b.retryDelay); err != nil {
 				return nil, err
 			}
 			continue
@@ -247,8 +316,25 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		if err := request.Context().Err(); err != nil {
 			return nil, err
 		}
+		if err := waitRetryDelay(request.Context(), b.retryDelay); err != nil {
+			return nil, err
+		}
 	}
 	return nil, errors.New("backend retry attempts exhausted")
+}
+
+func waitRetryDelay(ctx context.Context, delay time.Duration) error {
+	if delay == 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func withBackendRetry(request *http.Request, start int) *http.Request {
@@ -308,7 +394,7 @@ func newProxy(
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}, proxyTransport, siteResponseHeaders, routeResponseHeaders), nil
+	}, proxyTransport, siteResponseHeaders, routeResponseHeaders, 0), nil
 }
 
 func newBackendProxy(
@@ -331,13 +417,14 @@ func newBackendProxy(
 		}
 		transport = backend.transport
 	}
-	return newReverseProxy(rewrite, transport, siteResponseHeaders, routeResponseHeaders)
+	return newReverseProxy(rewrite, transport, siteResponseHeaders, routeResponseHeaders, backend.retryDeadline)
 }
 
 func newReverseProxy(
 	rewrite func(*httputil.ProxyRequest),
 	transport http.RoundTripper,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
+	deadline time.Duration,
 ) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Rewrite:      rewrite,
@@ -345,10 +432,22 @@ func newReverseProxy(
 		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
-	if !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
-		proxy.ModifyResponse = func(response *http.Response) error {
-			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
+	if deadline > 0 || !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
+		deadlineError := func(response *http.Response) error {
+			if deadline == 0 {
+				return nil
+			}
+			if body, ok := response.Body.(*deadlineBody); ok {
+				return body.ctx.Err()
+			}
 			return nil
+		}
+		proxy.ModifyResponse = func(response *http.Response) error {
+			if err := deadlineError(response); err != nil {
+				return err
+			}
+			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
+			return deadlineError(response)
 		}
 	}
 	return proxy

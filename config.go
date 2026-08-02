@@ -39,7 +39,9 @@ type backendTimeout struct {
 }
 
 type backendRetryConfig struct {
-	Status []int `json:"status"`
+	Status   []int
+	Delay    time.Duration
+	Deadline time.Duration
 }
 
 type siteConfig struct {
@@ -96,8 +98,10 @@ type rawBackendConfig struct {
 }
 
 type rawBackendRetry struct {
-	set    bool
-	Status optionalIntArray `json:"status"`
+	set      bool
+	Status   optionalIntArray `json:"status"`
+	Delay    optionalDuration `json:"delay"`
+	Deadline optionalDuration `json:"deadline"`
 }
 
 type rawBackendTimeout struct {
@@ -248,7 +252,9 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must be an object")
 	}
 	var decoded struct {
-		Status optionalIntArray `json:"status"`
+		Status   optionalIntArray `json:"status"`
+		Delay    optionalDuration `json:"delay"`
+		Deadline optionalDuration `json:"deadline"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -258,7 +264,7 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 	if !decoded.Status.set || len(decoded.Status.values) == 0 {
 		return fmt.Errorf("status must be a non-empty array")
 	}
-	*r = rawBackendRetry{set: true, Status: decoded.Status}
+	*r = rawBackendRetry{set: true, Status: decoded.Status, Delay: decoded.Delay, Deadline: decoded.Deadline}
 	return nil
 }
 
@@ -530,7 +536,11 @@ func decodeConfig(data []byte) (config, error) {
 			if err := validateRetryStatuses(rawBackend.Retry.Status.values); err != nil {
 				return config{}, fmt.Errorf("backends[%q].retry.status: %w", name, err)
 			}
-			retry = &backendRetryConfig{Status: append([]int(nil), rawBackend.Retry.Status.values...)}
+			retry = &backendRetryConfig{
+				Status:   append([]int(nil), rawBackend.Retry.Status.values...),
+				Delay:    rawBackend.Retry.Delay.value,
+				Deadline: rawBackend.Retry.Deadline.value,
+			}
 		}
 		cfg.Backends[name] = backendConfig{
 			Targets: append([]string(nil), (*rawBackend.Targets)...),
@@ -734,7 +744,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackendRetry:
-		if key == "status" {
+		switch key {
+		case "status", "delay", "deadline":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
