@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -16,7 +15,7 @@ import (
 const routeIndexThreshold = 8
 
 type router struct {
-	accessLogger  *log.Logger
+	accessLogger  *accessLogger
 	sites         []site
 	trustProxies  []netip.Prefix
 	exactHosts    map[string]int

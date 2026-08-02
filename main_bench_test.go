@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -108,6 +109,34 @@ func BenchmarkProxyRequest(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest(http.MethodGet, "http://proxy/api/users?x=1", nil)
+		req.RemoteAddr = "198.51.100.7:1234"
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusNoContent {
+			b.Fatalf("status = %d", res.Code)
+		}
+	}
+}
+
+func BenchmarkProxyRequestWithAccessLog(b *testing.B) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	handler, err := newRouter(config{Log: true, Sites: []siteConfig{{
+		Hosts:  []string{"*"},
+		Target: backend.URL,
+		Routes: []routeConfig{{Path: "/api/*", Strip: true}},
+	}}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	handler.accessLogger = newAccessLogger(io.Discard)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -234,6 +263,12 @@ func BenchmarkProxyRequestParallel(b *testing.B) {
 	})
 }
 
+func BenchmarkProxyRequestWithAccessLogParallel(b *testing.B) {
+	benchmarkProxyRequestParallel(b, func(target string) config {
+		return config{Log: true, Sites: []siteConfig{{Hosts: []string{"*"}, Target: target}}}
+	})
+}
+
 func BenchmarkBackendProxyRequestParallel(b *testing.B) {
 	benchmarkProxyRequestParallel(b, func(target string) config {
 		sameTarget := "HTTP" + target[len("http"):]
@@ -263,6 +298,9 @@ func benchmarkProxyRequestParallel(b *testing.B, configForTarget func(string) co
 	handler, err := newRouter(configForTarget(backend.URL))
 	if err != nil {
 		b.Fatal(err)
+	}
+	if handler.accessLogger != nil {
+		handler.accessLogger = newAccessLogger(io.Discard)
 	}
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {

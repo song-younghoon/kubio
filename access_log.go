@@ -4,14 +4,30 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
-	"log"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
-var stdoutAccessLogger = log.New(os.Stdout, "", 0)
+var stdoutAccessLogger = newAccessLogger(os.Stdout)
+
+type accessLogger struct {
+	mu     sync.Mutex
+	output io.Writer
+}
+
+func newAccessLogger(output io.Writer) *accessLogger {
+	return &accessLogger{output: output}
+}
+
+func (l *accessLogger) write(record accessRecord) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_ = json.NewEncoder(l.output).Encode(record)
+}
 
 type accessRecord struct {
 	Time       string `json:"time"`
@@ -61,9 +77,7 @@ func (r *router) serveLogged(w http.ResponseWriter, req *http.Request) {
 			Bytes:      observed.bytes,
 			DurationUs: end.Sub(start).Microseconds(),
 		}
-		if data, err := json.Marshal(record); err == nil {
-			_ = r.accessLogger.Output(2, string(data))
-		}
+		r.accessLogger.write(record)
 		if panicValue != nil {
 			panic(panicValue)
 		}

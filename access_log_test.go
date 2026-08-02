@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -79,7 +78,7 @@ func TestAccessLogRecordsOriginalRequestAndResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	handler.accessLogger = log.New(&output, "", 0)
+	handler.accessLogger = newAccessLogger(&output)
 	req := httptest.NewRequest(http.MethodPost, "http://proxy/api/users%2Factive?token=request-secret", nil)
 	req.Host = "example.com:8443"
 	req.RemoteAddr = "192.0.2.10:1234"
@@ -162,7 +161,7 @@ func TestAccessLogPanicsAreLoggedAndPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	handler.accessLogger = log.New(&output, "", 0)
+	handler.accessLogger = newAccessLogger(&output)
 	want := errors.New("panic marker")
 	handler.sites[0].proxy.Rewrite = func(*httputil.ProxyRequest) { panic(want) }
 	func() {
@@ -188,7 +187,7 @@ func TestAccessLogHandlesOptionsStar(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	handler.accessLogger = log.New(&output, "", 0)
+	handler.accessLogger = newAccessLogger(&output)
 	req := httptest.NewRequest(http.MethodOptions, "http://proxy/", strings.NewReader(strings.Repeat("x", 5<<10)))
 	req.RequestURI = "*"
 	res := httptest.NewRecorder()
@@ -219,7 +218,7 @@ func TestAccessLogReloadKeepsRequestGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	old.accessLogger = log.New(&output, "", 0)
+	old.accessLogger = newAccessLogger(&output)
 	current := newReloadableRouter(old)
 	next, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: "http://localhost:3000"}}})
 	if err != nil {
@@ -244,11 +243,25 @@ func TestAccessLogWriteFailureDoesNotChangeResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler.accessLogger = log.New(failingLogWriter{}, "", 0)
+	handler.accessLogger = newAccessLogger(failingLogWriter{})
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "http://other.test/", nil))
 	if res.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", res.Code)
+	}
+}
+
+func TestAccessLoggerAttemptsAfterWriteFailure(t *testing.T) {
+	output := &failOnceLogWriter{}
+	logger := newAccessLogger(output)
+	logger.write(accessRecord{Status: http.StatusBadGateway})
+	logger.write(accessRecord{Status: http.StatusOK})
+	var record accessRecord
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", record.Status)
 	}
 }
 
@@ -282,6 +295,19 @@ func TestAccessLogBrokenStdoutDoesNotTerminateProcess(t *testing.T) {
 type failingLogWriter struct{}
 
 func (failingLogWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+type failOnceLogWriter struct {
+	bytes.Buffer
+	failed bool
+}
+
+func (w *failOnceLogWriter) Write(data []byte) (int, error) {
+	if !w.failed {
+		w.failed = true
+		return 0, errors.New("write failed")
+	}
+	return w.Buffer.Write(data)
+}
 
 type hijackResponseWriter struct {
 	header     http.Header
