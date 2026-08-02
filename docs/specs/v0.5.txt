@@ -5,18 +5,19 @@ Base: v0.4
 
 1. Scope
 
-v0.5 extends responseHeaders with response header removal, additive values, and
-multiple ordered values for set and add. It also defines operation and
-site-to-route ordering.
+v0.5 renames the site and route responseHeaders field to response, then extends
+the `response` policy with header removal, additive values, and multiple ordered
+values for set and add. It also defines operation and site-to-route ordering.
 
-These are the only features added by v0.5. All v0.4 behavior remains unchanged
-when the new forms are not used, and every valid v0.4 configuration remains
-valid in v0.5.
+These are the only configuration changes added by v0.5. The shorter name is
+intentional: Kubio has not had a stable release, so v0.5 does not retain
+responseHeaders as an alias. All v0.4 runtime behavior remains unchanged for
+an equivalent configuration using a `response` policy.
 
 
 2. Configuration
 
-A site or route responseHeaders object may contain one or more of set, add, and
+A site or route `response` policy may contain one or more of set, add, and
 remove:
 
     {
@@ -25,7 +26,7 @@ remove:
         {
           "hosts": ["example.com"],
           "target": "http://app:3000",
-          "responseHeaders": {
+          "response": {
             "remove": ["Server", "X-Legacy"],
             "set": {
               "Cache-Control": ["private", "no-store"],
@@ -38,7 +39,7 @@ remove:
           "routes": [
             {
               "path": "/private/*",
-              "responseHeaders": {
+              "response": {
                 "remove": ["X-Proxy"],
                 "add": {
                   "X-Proxy": ["kubio-private", "audited"],
@@ -54,7 +55,7 @@ remove:
       ]
     }
 
-responseHeaders remains valid only on site and route objects. When present, it
+The `response` field is valid only on site and route objects. When present, it
 must be a non-null JSON object containing at least one of these fields:
 
 - set: a non-null, non-empty object mapping header names to configured values.
@@ -71,8 +72,11 @@ An empty string is a valid field value. An empty value array is invalid and
 does not mean removal. A set or add object with no entries and a remove array
 with no entries are also invalid. Use remove to remove a header.
 
-Unknown responseHeaders fields are configuration errors. The declaration order
-of set, add, and remove in the JSON object has no effect on behavior.
+Unknown fields inside a `response` policy are configuration errors. At site or
+route level, the old responseHeaders name is an unknown-field error, whether it
+appears alone or alongside response. Either error follows the startup and
+reload failure behavior in section 8. The declaration order of set, add, and
+remove in the JSON object has no effect on behavior.
 
 
 3. Header names, values, and environment expansion
@@ -80,10 +84,10 @@ of set, add, and remove in the JSON object has no effect on behavior.
 3.1 Header names and duplicates
 
 Header names use the v0.4 syntax rules and are compared case-insensitively
-everywhere in responseHeaders. Configured spelling does not determine the
+everywhere in a `response` policy. Configured spelling does not determine the
 field-name spelling used on the downstream wire.
 
-Within one responseHeaders object:
+Within one `response` policy:
 
 - Each set object must have case-insensitively unique header names.
 - Each add object must have case-insensitively unique header names.
@@ -136,8 +140,8 @@ field value even when it contains commas. Array order and duplicate values are
 preserved after expansion.
 
 Header names and remove entries do not support environment-variable expansion.
-Response header values are sent to clients, so operators must not place secrets
-in responseHeaders.
+Configured response header values are sent to clients, so operators must not
+place secrets in a `response` policy.
 
 Kubio validates generic HTTP field-name and field-value syntax. It does not
 validate field-specific grammar or cardinality. Operators are responsible for
@@ -146,13 +150,13 @@ ensuring each configured value is valid for its field and intended use.
 
 4. Operation, inheritance, and value ordering
 
-Kubio applies responseHeaders to the initial header fields of a final upstream
-response. It starts with the field values that v0.4 would otherwise forward,
-then applies policies in this fixed order:
+Kubio applies the selected `response` policies to the initial header fields of
+a final upstream response. It starts with the field values that v0.4 would
+otherwise forward, then applies policies in this fixed order:
 
-1. Apply the selected site's responseHeaders, if present.
-2. Apply the selected route's responseHeaders, if a route is selected and the
-   route has one.
+1. Apply the selected site's `response` policy, if present.
+2. Apply the selected route's `response` policy, if a route is selected and
+   the route has one.
 
 Within each site or route policy, apply operations in this fixed order:
 
@@ -183,7 +187,7 @@ Sequential site-then-route application gives route policies these effects:
 
 Only the selected route contributes a policy. Method-ineligible and otherwise
 unselected routes contribute nothing. If no route is selected, only the site
-policy applies. If responseHeaders is absent at both levels, no response header
+policy applies. If `response` is absent at both levels, no response header
 operation is performed.
 
 For example, suppose an upstream response has X-Trace values ["upstream-1",
@@ -198,10 +202,10 @@ produces the ordered logical values ["site-1", "site-2", "site-3",
 "route-1", "route-2"]. If the route also removes X-Trace, its remove runs
 before its add and the result is ["route-1", "route-2"].
 
-For configurations using only the v0.4 set string form, site set followed by
-route set is equivalent to the v0.4 effective-set overlay: a route value
-replaces the same case-insensitive site name, and every other site value is
-retained.
+After renaming the outer key to `response`, policies using only the former v0.4
+inner set string form retain the v0.4 effective-set result: site set followed
+by route set makes a route value replace the same case-insensitive site name,
+while every other site value is retained.
 
 
 5. Set-Cookie and multiple values
@@ -223,11 +227,11 @@ add multiple cookies, and their order follows section 4.
 
 6. Trailers
 
-responseHeaders modifies only the initial field values of a final upstream
-response. It never modifies response trailers.
+The `response` policy modifies only the initial field values of a final
+upstream response. It never modifies response trailers.
 
 For each announced upstream trailer name, Kubio inspects only the
-responseHeaders policies of the selected site and selected route, if any. If
+`response` policies of the selected site and selected route, if any. If
 either policy references that name in remove, set, or add, every operation for
 that name in both policies is skipped. The upstream initial values and trailer
 for that name follow the v0.4 behavior unchanged. Unselected routes are not
@@ -251,10 +255,10 @@ every final upstream response that Kubio forwards, including:
 Intermediate informational responses, including 100 Continue and 103 Early
 Hints, are not modified.
 
-responseHeaders never applies to a response generated by Kubio. This includes
-the no-matching-site 404, the server-wide OPTIONS * response, and a
-proxy-generated 502 or 504 caused by a connection, TLS, timeout, protocol, or
-unusable-upstream-response failure. Receiving an upstream response before
+The `response` policy never applies to an HTTP response generated by Kubio.
+This includes the no-matching-site 404, the server-wide OPTIONS * response, and
+a proxy-generated 502 or 504 caused by a connection, TLS, timeout, protocol,
+or unusable-upstream-response failure. Receiving an upstream response before
 generating such an error does not make the policy apply.
 
 The policy does not change the response status, body, or trailers. Applying it
@@ -275,14 +279,15 @@ separate and in logical value order during downstream serialization.
 8. Validation, failure safety, concurrency, and reload
 
 The v0.1 strict JSON rules continue to apply. The v0.4 validation rules continue
-except where sections 2 and 3 replace them with the new responseHeaders shapes
+except where sections 2 and 3 replace them with the new `response` shapes
 and value forms. Validation additionally rejects:
 
-- responseHeaders outside a site or route.
-- A null or non-object responseHeaders value.
-- An empty responseHeaders object or one containing none of set, add, and
+- `response` outside a site or route.
+- A site or route `responseHeaders` field, alone or alongside `response`.
+- A null or non-object `response` value.
+- An empty `response` object or one containing none of set, add, and
   remove.
-- An unknown field inside responseHeaders.
+- An unknown field inside `response`.
 - A present set or add that is null, is not an object, or is empty.
 - An invalid, case-insensitively duplicated, or proxy-managed set or add name.
 - A set or add value that is neither a string nor a non-empty array of strings.
@@ -296,7 +301,7 @@ and value forms. Validation additionally rejects:
 A name appearing in different operations or at both site and route level is
 valid and must not be rejected as a duplicate.
 
-Invalid responseHeaders configuration follows the v0.4 startup and reload
+Invalid `response` configuration follows the v0.4 startup and reload
 failure rules. Startup fails before listening. A failed reload logs a sanitized
 error and retains the complete active configuration and response-header
 behavior. No part of an invalid configuration becomes active.
@@ -313,17 +318,20 @@ backend selection, listener behavior, and all other reload behavior remain
 unchanged.
 
 
-9. Backward compatibility
+9. Migration from v0.4
 
-Every valid v0.4 configuration is valid in v0.5 without modification:
+v0.5 intentionally makes one configuration-breaking change: rename every site
+or route `responseHeaders` field to `response`. The old name is not accepted.
 
-- The v0.4 responseHeaders object containing one non-empty set object remains
-  valid.
-- Every v0.4 string set value still represents exactly one field value,
-  including an empty string.
+After that rename:
+
+- The former v0.4 inner object containing one non-empty set object remains
+  valid as the value of `response`.
+- A string set value still represents exactly one field value, including an
+  empty string. The string form remains the concise form for one value.
 - Header validation, managed names, environment expansion, announced-trailer
-  handling, response scope, downstream filtering, and reload behavior retain
-  their v0.4 results for the v0.4 shape.
+  handling, response scope, downstream filtering, and reload behavior produce
+  the same results for the former v0.4 shape.
 - Site and selected-route set-only policies produce the same final values as
   the v0.4 case-insensitive set overlay.
 
