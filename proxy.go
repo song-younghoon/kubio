@@ -419,16 +419,7 @@ func withBackendRetry(request *http.Request, start int) *http.Request {
 
 func retryableBackendRequest(request *http.Request, methods map[string]struct{}, bodyMax int64) bool {
 	if methods == nil && bodyMax == 0 {
-		switch request.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
-		default:
-			return false
-		}
-		if request.ContentLength != 0 || len(request.TransferEncoding) != 0 || len(request.Trailer) != 0 ||
-			request.Body != nil && request.Body != http.NoBody {
-			return false
-		}
-		return !upgradeRequest(request)
+		return retryableBodylessRequest(request)
 	}
 	if request.Method == http.MethodConnect {
 		return false
@@ -450,6 +441,19 @@ func retryableBackendRequest(request *http.Request, methods map[string]struct{},
 		return request.ContentLength == 0 && len(request.TransferEncoding) == 0 && len(request.Trailer) == 0
 	}
 	return bodyMax > 0 && len(request.Trailer) == 0
+}
+
+func retryableBodylessRequest(request *http.Request) bool {
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+	default:
+		return false
+	}
+	if request.ContentLength != 0 || len(request.TransferEncoding) != 0 || len(request.Trailer) != 0 ||
+		request.Body != nil && request.Body != http.NoBody {
+		return false
+	}
+	return !upgradeRequest(request)
 }
 
 var errRetryBodyTooLarge = errors.New("retry request body exceeds configured maximum")

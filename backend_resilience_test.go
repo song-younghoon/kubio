@@ -25,6 +25,18 @@ func closedBackendURL(t *testing.T) string {
 	return url
 }
 
+type countingBody struct {
+	reader *strings.Reader
+	closes atomic.Int32
+}
+
+func (b *countingBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
+
+func (b *countingBody) Close() error {
+	b.closes.Add(1)
+	return nil
+}
+
 func TestBackendResilienceConfig(t *testing.T) {
 	valid := `{
   "listen": ":8080",
@@ -431,6 +443,45 @@ func TestBackendRetriesReplayableRequestBody(t *testing.T) {
 	}
 	if firstBody != wantBody || secondBody != wantBody {
 		t.Fatalf("upstream bodies = %q and %q, want %q", firstBody, secondBody, wantBody)
+	}
+}
+
+func TestBackendReplayBodyWithZeroContentLength(t *testing.T) {
+	const wantBody = "zero-length framing body"
+	var received string
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_, _ = io.ReadAll(request.Body)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		data, _ := io.ReadAll(request.Body)
+		received = string(data)
+		_, _ = io.WriteString(w, "healthy")
+	}))
+	defer second.Close()
+	body := &countingBody{reader: strings.NewReader(wantBody)}
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{first.URL, second.URL}, Tries: 2,
+			Retry: &backendRetryConfig{
+				Status:  []int{http.StatusServiceUnavailable},
+				Methods: []string{http.MethodPost},
+				Body:    &backendBodyConfig{Max: 1024},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy/", nil)
+	request.Body = body
+	request.ContentLength = 0
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || received != wantBody || body.closes.Load() != 1 {
+		t.Fatalf("response = %d, body = %q, closes = %d", response.Code, received, body.closes.Load())
 	}
 }
 
