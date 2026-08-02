@@ -1,13 +1,13 @@
-Kubio kubio.json v0.4 Proposal
+Kubio kubio.json v0.5 Proposal
 Status: Deferred features; discussion not started
-Base: v0.3
+Base: v0.4
 
 
 1. Purpose
 
-This proposal carries every feature from the original v0.3 proposal that was
-not selected for v0.3. It defines no agreed behavior yet. Its scope must be
-narrowed and selected items must be specified before promotion.
+This proposal carries every candidate from the original v0.4 proposal that was
+not selected for v0.4. It defines no agreed behavior yet. Its scope must be
+narrowed before promotion.
 
 
 2. Backend resilience and upstream transport
@@ -18,10 +18,6 @@ narrowed and selected items must be specified before promotion.
 - Per-backend connection and response-header timeouts.
 - HTTPS upstream CA and SNI settings.
 
-Future work must define retry safety, health state, selection priority,
-timeout inheritance, transport ownership, and reload behavior for whichever
-items are selected.
-
 
 3. Additional route matching
 
@@ -29,16 +25,14 @@ items are selected.
 - Query parameter conditions.
 - Client IP conditions.
 
-Future work must define condition syntax, validation, precedence, and
-interaction with v0.3 method matching.
 
+4. Response header extensions
 
-4. Response headers
-
-- Response header set.
 - Response header removal.
-- Multiple response header values.
-- Explicit set, add, and remove operation ordering.
+- Multiple configured values for one response header.
+- Additive response header values that preserve existing values.
+- Explicit ordering among set, add, and remove operations and between site and
+  route operations.
 
 
 5. Client-facing TLS

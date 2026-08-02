@@ -1,0 +1,199 @@
+Kubio kubio.json v0.4 Specification
+Status: Agreed specification
+Base: v0.3
+
+
+1. Scope
+
+v0.4 adds single-value response header replacement for responses received from
+an upstream.
+
+This is the only feature added by v0.4. All v0.3 behavior remains unchanged
+when responseHeaders is absent, and every valid v0.3 configuration remains
+valid in v0.4.
+
+
+2. Configuration
+
+A site or route may contain the optional responseHeaders object. In v0.4 it
+contains exactly one field, set:
+
+    {
+      "listen": ":8080",
+      "sites": [
+        {
+          "hosts": ["example.com"],
+          "target": "http://app:3000",
+          "responseHeaders": {
+            "set": {
+              "X-Content-Type-Options": "nosniff",
+              "X-Proxy": "kubio"
+            }
+          },
+          "routes": [
+            {
+              "path": "/private/*",
+              "responseHeaders": {
+                "set": {
+                  "Cache-Control": "no-store",
+                  "X-Proxy": "kubio-private"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+
+responseHeaders is valid only on site and route objects. It does not apply to
+the top-level object or backend definitions.
+
+When responseHeaders is present:
+
+- It must be a non-null JSON object.
+- set is required and must be a non-null, non-empty JSON object.
+- Every set property maps one response header name to one JSON string.
+- Unknown responseHeaders fields are configuration errors.
+
+An absent responseHeaders field performs no response header replacement.
+
+
+3. Header validation and environment expansion
+
+Header names are validated and compared case-insensitively under the v0.1
+header-name rules. Two set properties whose names differ only by case are a
+configuration error within the same responseHeaders object.
+
+The following response header names are managed by the proxy and cannot be
+configured, regardless of case:
+
+- Connection
+- Proxy-Connection
+- Keep-Alive
+- Proxy-Authenticate
+- Proxy-Authorization
+- Transfer-Encoding
+- TE
+- Trailer
+- Upgrade
+- Content-Length
+
+Each configured value may be an empty string. It must pass the v0.1 header
+value validation and must not contain carriage return, line feed, DEL, or an
+invalid control character.
+
+The v0.1 environment-variable rules apply to response header values exactly as
+they apply to request header values:
+
+- ${NAME} is expanded once while loading kubio.json.
+- An unset environment variable is a configuration error; a set but empty
+  variable is valid.
+- Shell-style \${NAME} represents the literal ${NAME}. In JSON the escaped
+  form is written as "\\${NAME}".
+- Expansion is not recursive, validation occurs after expansion, and expanded
+  values must not be logged.
+
+Response header values are sent to clients. Operators must not place secrets
+in responseHeaders, whether written directly or supplied through environment
+variables.
+
+Header names do not support environment-variable expansion.
+
+
+4. Site and route inheritance
+
+For a request that receives an upstream response, Kubio forms one effective
+set map as follows:
+
+1. Start with every site responseHeaders.set entry, if present.
+2. Overlay every responseHeaders.set entry from the selected route, if
+   present.
+3. A route entry replaces a site entry with the same case-insensitive name.
+
+Site entries therefore apply to every upstream response handled by that site.
+A selected route inherits site entries it does not replace. Only the selected
+route contributes entries; method-ineligible and otherwise unselected routes
+contribute nothing. If no route is selected, only the site entries apply.
+
+Request headers and response headers are independent. The existing site and
+route headers field continues to modify only the upstream request and has no
+precedence relationship with responseHeaders.
+
+
+5. Response behavior
+
+Kubio applies the effective set map to the response header map after receiving
+a final upstream response and before sending response headers to the client.
+For each configured name, except an announced-trailer collision described
+below, Kubio removes every value currently in the map with that
+case-insensitive name and stores exactly one value: the configured string. An
+empty configured string creates one present empty value; it does not remove
+the header.
+
+If the upstream response announces a trailer with the same case-insensitive
+name as a set entry, Kubio skips that set entry. The upstream initial values
+and trailer for that name follow the v0.3 behavior unchanged. An unannounced
+trailer discovered after the response body is also forwarded unchanged and
+does not retroactively change the earlier set decision.
+
+Consequently, configuring Set-Cookie replaces every upstream Set-Cookie value
+with one configured Set-Cookie value. v0.4 cannot configure multiple values for
+one header.
+
+Headers not named by the effective set map retain the v0.3 behavior. Kubio does
+not change the upstream status, body, or trailers because of responseHeaders.
+Response bodies remain streamed without full buffering, and WebSocket upgrades
+remain supported.
+
+The downstream HTTP server still applies normal protocol and status-specific
+header serialization after the map is modified. It may canonicalize, combine,
+or suppress fields as required by the downstream HTTP version and response
+status. In particular, a configured Content-Type is stored in the response
+header map for a 304 Not Modified response but is omitted from the response
+sent to the client.
+
+The effective set map applies only to a final upstream response that Kubio
+forwards, including a forwarded 101 Switching Protocols response and
+upstream-provided 3xx, 4xx, and 5xx responses. An upstream-provided 502 or 504
+is therefore modified normally. Intermediate informational responses such as
+100 and 103 remain unchanged and unmodified.
+
+responseHeaders never applies to a response generated by Kubio, even when
+Kubio received an upstream response that it could not forward. This includes
+the no-matching-site 404, a proxy-generated 502 or 504 caused by a connection,
+TLS, timeout, protocol, or unusable-upstream-response failure, and the
+server-wide OPTIONS * response.
+
+
+6. Validation, failure safety, concurrency, and reload
+
+The v0.1 strict JSON rules continue to apply. Validation additionally rejects:
+
+- responseHeaders outside a site or route.
+- A null or non-object responseHeaders value.
+- A missing, null, non-object, or empty set value.
+- A null or non-string set entry value.
+- An invalid, case-insensitively duplicated, or proxy-managed header name.
+- A value that fails environment expansion or header value validation.
+- An unknown field inside responseHeaders.
+
+Invalid responseHeaders configuration follows the v0.1 startup and reload
+failure rules. Startup fails before listening. A failed reload logs an error
+without expanded response header values and retains the active router,
+response header policy, and backend state.
+
+Concurrent requests must be safe, and applying responseHeaders to one response
+must not change the headers produced for another response.
+
+On a successful reload, new requests use the new response header policy after
+the atomic router swap. In-flight requests finish with the policy from the
+router that accepted them. Backend selectors reset under the v0.2 rules even
+when only responseHeaders changed. The listener and all other reload behavior
+remain unchanged.
+
+
+7. Deferred features
+
+Response header removal, additive response header values, multiple configured
+values for one header, and operation ordering are deferred to v0.5. Every other
+candidate from the previous v0.4 proposal is also carried forward to v0.5.
