@@ -1,13 +1,12 @@
-Kubio kubio.json v0.5 Proposal
+Kubio kubio.json v0.6 Proposal
 Status: Deferred features; discussion not started
-Base: v0.4
+Base: v0.5
 
 
 1. Purpose
 
-This proposal carries every candidate from the original v0.4 proposal that was
-not selected for v0.4. It defines no agreed behavior yet. Its scope must be
-narrowed before promotion.
+This proposal carries every candidate deferred by v0.5. It defines no agreed
+behavior yet. Its scope must be narrowed before promotion.
 
 
 2. Backend resilience and upstream transport
@@ -26,16 +25,7 @@ narrowed before promotion.
 - Client IP conditions.
 
 
-4. Response header extensions
-
-- Response header removal.
-- Multiple configured values for one response header.
-- Additive response header values that preserve existing values.
-- Explicit ordering among set, add, and remove operations and between site and
-  route operations.
-
-
-5. Client-facing TLS
+4. Client-facing TLS
 
 - Manual certificates.
 - Certificate selection by host.
@@ -43,7 +33,7 @@ narrowed before promotion.
 - Automatic ACME certificates.
 
 
-6. Observability and administration
+5. Observability and administration
 
 - Structured access logs.
 - Request and upstream metrics.
@@ -51,7 +41,7 @@ narrowed before promotion.
 - Reload status reporting.
 
 
-7. Additional proxy protocols and routing actions
+6. Additional proxy protocols and routing actions
 
 - RFC Forwarded headers.
 - PROXY protocol.
@@ -61,7 +51,7 @@ narrowed before promotion.
 - Custom error bodies.
 
 
-8. Application gateway features
+7. Application gateway features
 
 These remain candidates only when backed by a concrete use case:
 
@@ -70,3 +60,11 @@ These remain candidates only when backed by a concrete use case:
 - Response compression.
 - Response caching.
 - Service discovery.
+
+
+8. Additional header policy features
+
+- Response trailer modification.
+- Conditional response-header policies.
+- Request-header removal and addition.
+- Response-header policies for Kubio-generated or intermediate responses.
