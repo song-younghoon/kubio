@@ -44,7 +44,7 @@ func TestBackendResilienceConfig(t *testing.T) {
     "app": {
       "targets": ["http://app-1:3000", "http://app-2:3000", "http://app-3:3000"],
       "tries": 2,
-      "retry": {"status": [502, 503, 504], "methods": ["POST", "PUT"], "body": {"max": 1048576}, "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s"},
+      "retry": {"status": [502, 503, 504], "methods": ["POST", "PUT"], "body": {"max": 1048576}, "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s", "budget": {"max": 100, "window": "1s"}},
       "timeout": {"dial": "250ms", "header": "1m30s"}
     }
   },
@@ -59,6 +59,7 @@ func TestBackendResilienceConfig(t *testing.T) {
 		!slices.Equal(backend.Retry.Methods, []string{"POST", "PUT"}) || backend.Retry.Body == nil || backend.Retry.Body.Max != 1048576 ||
 		backend.Retry.Backoff == nil || backend.Retry.Backoff.Base != 25*time.Millisecond ||
 		backend.Retry.Backoff.Cap != 50*time.Millisecond || backend.Retry.Backoff.Jitter ||
+		backend.Retry.Budget == nil || backend.Retry.Budget.Max != 100 || backend.Retry.Budget.Window != time.Second ||
 		backend.Retry.Deadline != 2*time.Second ||
 		!slices.Equal(backend.Retry.Status, []int{502, 503, 504}) {
 		t.Fatalf("decoded backend = %+v", backend)
@@ -129,6 +130,16 @@ func TestBackendResilienceConfig(t *testing.T) {
 		"retry body max too large":      withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":67108865}}`),
 		"retry body unknown":            withBackend(`"tries":2,"retry":{"status":[503],"body":{"limit":1}}`),
 		"retry body duplicate max":      withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1,"max":2}}`),
+		"retry budget null":             withBackend(`"tries":2,"retry":{"status":[503],"budget":null}`),
+		"retry budget empty":            withBackend(`"tries":2,"retry":{"status":[503],"budget":{}}`),
+		"retry budget max decimal":      withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1.0,"window":"1s"}}`),
+		"retry budget max exponent":     withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1e3,"window":"1s"}}`),
+		"retry budget max zero":         withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":0,"window":"1s"}}`),
+		"retry budget max too large":    withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1000001,"window":"1s"}}`),
+		"retry budget window null":      withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":null}}`),
+		"retry budget window zero":      withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":"0s"}}`),
+		"retry budget unknown":          withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":"1s","burst":1}}`),
+		"retry budget duplicate max":    withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"max":2,"window":"1s"}}`),
 		"retry delay null":              withBackend(`"tries":2,"retry":{"status":[503],"delay":null}`),
 		"retry delay number":            withBackend(`"tries":2,"retry":{"status":[503],"delay":1}`),
 		"retry delay empty":             withBackend(`"tries":2,"retry":{"status":[503],"delay":""}`),
@@ -201,6 +212,8 @@ func TestBackendResilienceDefaultsAndValidation(t *testing.T) {
 		{Targets: []string{"http://a:3000"}, Timeout: backendTimeout{Header: -time.Second}},
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Backoff: &backendBackoffConfig{Base: -time.Second, Cap: time.Second}}},
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Deadline: -time.Second}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Budget: &backendBudgetConfig{Max: 0, Window: time.Second}}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Budget: &backendBudgetConfig{Max: 1, Window: 0}}},
 	}
 	for _, cfg := range invalid {
 		if _, err := newBackend(cfg); err == nil {
@@ -547,6 +560,96 @@ func TestBackendRetryMethodsRemainExplicit(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
 	if response.Code != http.StatusServiceUnavailable || secondHits.Load() != 0 {
 		t.Fatalf("response = %d, second hits = %d", response.Code, secondHits.Load())
+	}
+}
+
+func TestBackendRetryBudgetPreservesResponseWhenExhausted(t *testing.T) {
+	var firstHits, secondHits, thirdHits atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		firstHits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "first")
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondHits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "second")
+	}))
+	defer second.Close()
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		thirdHits.Add(1)
+		_, _ = io.WriteString(w, "third")
+	}))
+	defer third.Close()
+
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{first.URL, second.URL, third.URL}, Tries: 3,
+			Retry: &backendRetryConfig{
+				Status: []int{http.StatusServiceUnavailable},
+				Budget: &backendBudgetConfig{Max: 1, Window: time.Hour},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "second" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if firstHits.Load() != 1 || secondHits.Load() != 1 || thirdHits.Load() != 0 {
+		t.Fatalf("hits = %d, %d, %d", firstHits.Load(), secondHits.Load(), thirdHits.Load())
+	}
+}
+
+func TestBackendRetryBudgetStopsTransportRetries(t *testing.T) {
+	first := closedBackendURL(t)
+	second := closedBackendURL(t)
+	var thirdHits atomic.Int32
+	third := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		thirdHits.Add(1)
+	}))
+	defer third.Close()
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{first, second, third.URL}, Tries: 3,
+			Retry: &backendRetryConfig{
+				Status: []int{http.StatusServiceUnavailable},
+				Budget: &backendBudgetConfig{Max: 1, Window: time.Hour},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+	if response.Code != http.StatusBadGateway || thirdHits.Load() != 0 {
+		t.Fatalf("response = %d, third hits = %d", response.Code, thirdHits.Load())
+	}
+}
+
+func TestRetryBudgetWindowAndContext(t *testing.T) {
+	budget := &retryBudget{max: 1, window: 5 * time.Millisecond}
+	if err := budget.reserve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.reserve(context.Background()); !errors.Is(err, errRetryBudgetExceeded) {
+		t.Fatalf("second reservation error = %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := budget.reserve(context.Background()); err != nil {
+		t.Fatalf("window reservation error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := budget.reserve(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reservation error = %v", err)
 	}
 }
 

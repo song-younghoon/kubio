@@ -53,6 +53,7 @@ type backend struct {
 	backoffDelays []time.Duration
 	backoffJitter bool
 	retryDeadline time.Duration
+	budget        *retryBudget
 	transport     *http.Transport
 	nextIndex     atomic.Uint64
 }
@@ -62,6 +63,34 @@ type backendRetryKey struct{}
 type backendRetryState struct {
 	start         int
 	informational atomic.Bool
+}
+
+var errRetryBudgetExceeded = errors.New("retry budget exhausted")
+
+type retryBudget struct {
+	mu      sync.Mutex
+	max     int
+	window  time.Duration
+	started time.Time
+	used    int
+}
+
+func (b *retryBudget) reserve(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	now := time.Now()
+	if b.started.IsZero() || now.Sub(b.started) >= b.window {
+		b.started = now
+		b.used = 0
+	}
+	if b.used >= b.max {
+		return errRetryBudgetExceeded
+	}
+	b.used++
+	return nil
 }
 
 type deadlineBody struct {
@@ -154,6 +183,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 	var retryStatuses map[int]struct{}
 	var retryMethods map[string]struct{}
 	var retryBodyMax int64
+	var budget *retryBudget
 	if cfg.Retry != nil {
 		if tries <= 1 {
 			return nil, fmt.Errorf("retry requires tries greater than one")
@@ -178,6 +208,15 @@ func newBackend(cfg backendConfig) (*backend, error) {
 				return nil, fmt.Errorf("retry.body.max must be between 1 and %d", maxRetryBodyBytes)
 			}
 			retryBodyMax = cfg.Retry.Body.Max
+		}
+		if cfg.Retry.Budget != nil {
+			if cfg.Retry.Budget.Max < 1 || cfg.Retry.Budget.Max > maxRetryBudget {
+				return nil, fmt.Errorf("retry.budget.max must be between 1 and %d", maxRetryBudget)
+			}
+			if cfg.Retry.Budget.Window <= 0 {
+				return nil, fmt.Errorf("retry.budget.window must be greater than zero")
+			}
+			budget = &retryBudget{max: cfg.Retry.Budget.Max, window: cfg.Retry.Budget.Window}
 		}
 		var err error
 		retryStatuses, err = buildRetryStatuses(cfg.Retry.Status)
@@ -230,6 +269,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		backoffDelays: backoffDelays,
 		backoffJitter: backoffJitter,
 		retryDeadline: deadline,
+		budget:        budget,
 		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
 	}, nil
 }
@@ -338,10 +378,18 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		response, err := b.transport.RoundTrip(current)
 		if err != nil {
 			if state.informational.Load() || ctx.Err() != nil || attempt+1 == b.tries {
-				if contextErr := ctx.Err(); contextErr != nil && b.retryDeadline > 0 {
+				if contextErr := ctx.Err(); contextErr != nil && (b.retryDeadline > 0 || b.budget != nil) {
 					return nil, contextErr
 				}
 				return nil, err
+			}
+			if b.budget != nil {
+				if admissionErr := b.budget.reserve(ctx); admissionErr != nil {
+					if errors.Is(admissionErr, errRetryBudgetExceeded) {
+						return nil, err
+					}
+					return nil, admissionErr
+				}
 			}
 			if b.backoffDelays != nil {
 				if err := waitRetryBackoff(ctx, b.backoffDelays, b.backoffJitter, attempt+1); err != nil {
@@ -356,6 +404,23 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		}
 		if _, retry := b.retryStatuses[response.StatusCode]; !retry {
 			return response, nil
+		}
+		if err := ctx.Err(); err != nil {
+			if response.Body != nil {
+				_ = response.Body.Close()
+			}
+			return nil, err
+		}
+		if b.budget != nil {
+			if admissionErr := b.budget.reserve(ctx); admissionErr != nil {
+				if errors.Is(admissionErr, errRetryBudgetExceeded) {
+					return response, nil
+				}
+				if response.Body != nil {
+					_ = response.Body.Close()
+				}
+				return nil, admissionErr
+			}
 		}
 		if response.Body != nil {
 			_ = response.Body.Close()

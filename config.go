@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const maxRetryBodyBytes int64 = 64 << 20
+const (
+	maxRetryBodyBytes int64 = 64 << 20
+	maxRetryBudget          = 1_000_000
+)
 
 type config struct {
 	Listen       string                   `json:"listen"`
@@ -46,10 +49,16 @@ type backendRetryConfig struct {
 	Body     *backendBodyConfig
 	Backoff  *backendBackoffConfig
 	Deadline time.Duration
+	Budget   *backendBudgetConfig
 }
 
 type backendBodyConfig struct {
 	Max int64
+}
+
+type backendBudgetConfig struct {
+	Max    int
+	Window time.Duration
 }
 
 type backendBackoffConfig struct {
@@ -118,11 +127,18 @@ type rawBackendRetry struct {
 	Body     rawBackendBody      `json:"body"`
 	Backoff  rawBackendBackoff   `json:"backoff"`
 	Deadline optionalDuration    `json:"deadline"`
+	Budget   rawBackendBudget    `json:"budget"`
 }
 
 type rawBackendBody struct {
 	set bool
 	Max optionalInt64 `json:"max"`
+}
+
+type rawBackendBudget struct {
+	set    bool
+	Max    optionalInt      `json:"max"`
+	Window optionalDuration `json:"window"`
 }
 
 type rawBackendBackoff struct {
@@ -290,6 +306,7 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 		Body     rawBackendBody      `json:"body"`
 		Backoff  rawBackendBackoff   `json:"backoff"`
 		Deadline optionalDuration    `json:"deadline"`
+		Budget   rawBackendBudget    `json:"budget"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -299,7 +316,7 @@ func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
 	if !decoded.Status.set || len(decoded.Status.values) == 0 {
 		return fmt.Errorf("status must be a non-empty array")
 	}
-	*r = rawBackendRetry{set: true, Status: decoded.Status, Methods: decoded.Methods, Body: decoded.Body, Backoff: decoded.Backoff, Deadline: decoded.Deadline}
+	*r = rawBackendRetry{set: true, Status: decoded.Status, Methods: decoded.Methods, Body: decoded.Body, Backoff: decoded.Backoff, Deadline: decoded.Deadline, Budget: decoded.Budget}
 	return nil
 }
 
@@ -320,6 +337,30 @@ func (b *rawBackendBody) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("max must be an integer between 1 and %d", maxRetryBodyBytes)
 	}
 	*b = rawBackendBody{set: true, Max: decoded.Max}
+	return nil
+}
+
+func (b *rawBackendBudget) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Max    optionalInt      `json:"max"`
+		Window optionalDuration `json:"window"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Max.set || decoded.Max.value < 1 || decoded.Max.value > maxRetryBudget {
+		return fmt.Errorf("max must be an integer between 1 and %d", maxRetryBudget)
+	}
+	if !decoded.Window.set {
+		return fmt.Errorf("window must be set")
+	}
+	*b = rawBackendBudget{set: true, Max: decoded.Max, Window: decoded.Window}
 	return nil
 }
 
@@ -650,6 +691,9 @@ func decodeConfig(data []byte) (config, error) {
 			if rawBackend.Retry.Body.set {
 				retry.Body = &backendBodyConfig{Max: rawBackend.Retry.Body.Max.value}
 			}
+			if rawBackend.Retry.Budget.set {
+				retry.Budget = &backendBudgetConfig{Max: rawBackend.Retry.Budget.Max.value, Window: rawBackend.Retry.Budget.Window.value}
+			}
 			if rawBackend.Retry.Backoff.set {
 				retry.Backoff = &backendBackoffConfig{
 					Base:   rawBackend.Retry.Backoff.Base.value,
@@ -760,6 +804,7 @@ const (
 	jsonBackend
 	jsonBackendRetry
 	jsonBackendBody
+	jsonBackendBudget
 	jsonBackendBackoff
 	jsonSites
 	jsonSite
@@ -867,12 +912,20 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonAny, nil
 		case "body":
 			return jsonBackendBody, nil
+		case "budget":
+			return jsonBackendBudget, nil
 		case "backoff":
 			return jsonBackendBackoff, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackendBody:
 		if key == "max" {
+			return jsonAny, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackendBudget:
+		switch key {
+		case "max", "window":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
