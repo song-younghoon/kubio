@@ -73,17 +73,29 @@ func validateRetryStatuses(statuses []int) error {
 	if len(statuses) == 0 {
 		return fmt.Errorf("must not be empty")
 	}
-	seen := make(map[int]struct{}, len(statuses))
+	var seen [200]bool
 	for index, status := range statuses {
 		if status < 400 || status > 599 {
 			return fmt.Errorf("item %d must be between 400 and 599", index)
 		}
-		if _, exists := seen[status]; exists {
+		statusIndex := status - 400
+		if seen[statusIndex] {
 			return fmt.Errorf("item %d duplicates status %d", index, status)
 		}
-		seen[status] = struct{}{}
+		seen[statusIndex] = true
 	}
 	return nil
+}
+
+func buildRetryStatuses(statuses []int) (map[int]struct{}, error) {
+	if err := validateRetryStatuses(statuses); err != nil {
+		return nil, err
+	}
+	set := make(map[int]struct{}, len(statuses))
+	for _, status := range statuses {
+		set[status] = struct{}{}
+	}
+	return set, nil
 }
 
 func newBackend(cfg backendConfig) (*backend, error) {
@@ -102,12 +114,10 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		if tries <= 1 {
 			return nil, fmt.Errorf("retry requires tries greater than one")
 		}
-		if err := validateRetryStatuses(cfg.Retry.Status); err != nil {
+		var err error
+		retryStatuses, err = buildRetryStatuses(cfg.Retry.Status)
+		if err != nil {
 			return nil, fmt.Errorf("retry.status: %w", err)
-		}
-		retryStatuses = make(map[int]struct{}, len(cfg.Retry.Status))
-		for _, status := range cfg.Retry.Status {
-			retryStatuses[status] = struct{}{}
 		}
 	}
 	dialTimeout := cfg.Timeout.Dial
@@ -200,6 +210,10 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 		return nil, lastErr
 	}
 
+	return b.roundTripWithStatusRetry(request, state)
+}
+
+func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backendRetryState) (*http.Response, error) {
 	for attempt := 0; attempt < b.tries; attempt++ {
 		current := request
 		if attempt > 0 {
@@ -224,9 +238,6 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 		if attempt+1 == b.tries || state.informational.Load() {
 			return response, nil
 		}
-		if b.retryStatuses == nil {
-			return response, nil
-		}
 		if _, retry := b.retryStatuses[response.StatusCode]; !retry {
 			return response, nil
 		}
@@ -237,7 +248,7 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
-	return nil, context.Canceled
+	return nil, errors.New("backend retry attempts exhausted")
 }
 
 func withBackendRetry(request *http.Request, start int) *http.Request {
