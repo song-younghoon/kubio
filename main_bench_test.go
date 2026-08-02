@@ -46,6 +46,37 @@ func BenchmarkBackendSelectionParallel(b *testing.B) {
 	})
 }
 
+func BenchmarkBackendWeightedSelection(b *testing.B) {
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://backend-0:3000", "http://backend-1:3000"},
+		Weights: []int{3, 1},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = backend.nextTarget()
+	}
+}
+
+func BenchmarkBackendWeightedSelectionParallel(b *testing.B) {
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://backend-0:3000", "http://backend-1:3000"},
+		Weights: []int{3, 1},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = backend.nextTarget()
+		}
+	})
+}
+
 func BenchmarkLinearRouteSelection(b *testing.B) {
 	patterns, err := newHostPatterns([]string{
 		"*",
