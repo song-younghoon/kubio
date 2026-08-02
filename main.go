@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,7 +16,12 @@ const (
 )
 
 type reloadableRouter struct {
-	current atomic.Pointer[router]
+	current atomic.Pointer[runtimeGeneration]
+}
+
+type runtimeGeneration struct {
+	router      *router
+	certificate *tls.Certificate
 }
 
 type fileState struct {
@@ -34,37 +40,61 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	certificate, err := loadTLSCertificate(cfg.TLS)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	initial, err := newRouter(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	handler := newReloadableRouter(initial)
-	go watchConfig(configPath, cfg.Listen, initialState, handler)
+	handler := newReloadableRouter(initial, certificate)
+	go watchConfig(configPath, cfg.Listen, cfg.TLS != nil, initialState, handler)
 	server := &http.Server{
 		Addr:                         cfg.Listen,
 		Handler:                      handler,
 		DisableGeneralOptionsHandler: true,
 	}
+	if cfg.TLS != nil {
+		server.TLSConfig = &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: handler.GetCertificate,
+		}
+		log.Fatal(server.ListenAndServeTLS("", ""))
+		return
+	}
 	log.Fatal(server.ListenAndServe())
 }
 
-func newReloadableRouter(initial *router) *reloadableRouter {
+func newReloadableRouter(initial *router, certificate *tls.Certificate) *reloadableRouter {
 	r := &reloadableRouter{}
-	r.current.Store(initial)
+	r.current.Store(&runtimeGeneration{router: initial, certificate: certificate})
 	return r
 }
 
 func (r *reloadableRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	r.current.Load().ServeHTTP(w, req)
+	r.current.Load().router.ServeHTTP(w, req)
 }
 
 func (r *reloadableRouter) Store(next *router) {
-	r.current.Store(next)
+	r.StoreGeneration(next, r.current.Load().certificate)
 }
 
-func watchConfig(path, listen string, last fileState, handler *reloadableRouter) {
+func (r *reloadableRouter) StoreGeneration(next *router, certificate *tls.Certificate) {
+	r.current.Store(&runtimeGeneration{router: next, certificate: certificate})
+}
+
+func (r *reloadableRouter) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	certificate := r.current.Load().certificate
+	if certificate == nil {
+		return nil, fmt.Errorf("tls certificate is unavailable")
+	}
+	return certificate, nil
+}
+
+func watchConfig(path, listen string, tlsEnabled bool, last fileState, handler *reloadableRouter) {
 	ticker := time.NewTicker(configPollInterval)
 	defer ticker.Stop()
 
@@ -88,13 +118,22 @@ func watchConfig(path, listen string, last fileState, handler *reloadableRouter)
 			log.Printf("reload %s rejected: listen changed to %q; restart required", path, cfg.Listen)
 			continue
 		}
+		if (cfg.TLS != nil) != tlsEnabled {
+			log.Printf("reload %s rejected: tls listener mode changed; restart required", path)
+			continue
+		}
+		certificate, err := loadTLSCertificate(cfg.TLS)
+		if err != nil {
+			log.Printf("reload %s failed; keeping current config: %v", path, err)
+			continue
+		}
 
 		next, err := newRouter(cfg)
 		if err != nil {
 			log.Printf("reload %s failed; keeping current config: %v", path, err)
 			continue
 		}
-		handler.Store(next)
+		handler.StoreGeneration(next, certificate)
 		log.Printf("reloaded %s", path)
 	}
 }

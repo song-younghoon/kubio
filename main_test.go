@@ -442,7 +442,7 @@ func TestBackendStateSurvivesFailedReloadAndResetsOnSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := newReloadableRouter(initial)
+	handler := newReloadableRouter(initial, nil)
 	if got := proxyResponse(t, handler, "proxy", "/"); got != "a" {
 		t.Fatalf("initial target = %q, want a", got)
 	}
@@ -504,7 +504,7 @@ func TestInFlightBackendRequestKeepsPreviousRouter(t *testing.T) {
 		}
 		return router
 	}
-	handler := newReloadableRouter(build(oldA.URL, oldB.URL))
+	handler := newReloadableRouter(build(oldA.URL, oldB.URL), nil)
 	oldResult := make(chan string, 1)
 	go func() {
 		oldResult <- proxyResponse(t, handler, "proxy", "/")
@@ -1187,7 +1187,7 @@ func TestReloadableRouterSwitchesConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := newReloadableRouter(first)
+	handler := newReloadableRouter(first, nil)
 	request := func() string {
 		req := httptest.NewRequest(http.MethodGet, "http://proxy/", nil)
 		res := httptest.NewRecorder()

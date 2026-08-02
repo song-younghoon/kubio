@@ -15,9 +15,15 @@ import (
 type config struct {
 	Listen       string                   `json:"listen"`
 	Log          bool                     `json:"log"`
+	TLS          *tlsConfig               `json:"tls"`
 	TrustProxies []string                 `json:"trustProxies"`
 	Backends     map[string]backendConfig `json:"backends"`
 	Sites        []siteConfig             `json:"sites"`
+}
+
+type tlsConfig struct {
+	Cert string `json:"cert"`
+	Key  string `json:"key"`
 }
 
 type backendConfig struct {
@@ -65,9 +71,16 @@ type responseHeaderPolicy struct {
 type rawConfig struct {
 	Listen       *string          `json:"listen"`
 	Log          strictBool       `json:"log"`
+	TLS          rawTLSConfig     `json:"tls"`
 	TrustProxies stringArray      `json:"trustProxies"`
 	Backends     rawBackends      `json:"backends"`
 	Sites        *[]rawSiteConfig `json:"sites"`
+}
+
+type rawTLSConfig struct {
+	set  bool
+	Cert string
+	Key  string
 }
 
 type rawBackendConfig struct {
@@ -156,6 +169,30 @@ func (b *rawBackends) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must be an object: %w", err)
 	}
 	*b = backends
+	return nil
+}
+
+func (t *rawTLSConfig) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Cert optionalString `json:"cert"`
+		Key  optionalString `json:"key"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Cert.set || decoded.Cert.value == "" {
+		return fmt.Errorf("cert must be a non-empty string")
+	}
+	if !decoded.Key.set || decoded.Key.value == "" {
+		return fmt.Errorf("key must be a non-empty string")
+	}
+	*t = rawTLSConfig{set: true, Cert: decoded.Cert.value, Key: decoded.Key.value}
 	return nil
 }
 
@@ -411,6 +448,9 @@ func decodeConfig(data []byte) (config, error) {
 		Backends:     make(map[string]backendConfig, len(raw.Backends)),
 		Sites:        make([]siteConfig, len(*raw.Sites)),
 	}
+	if raw.TLS.set {
+		cfg.TLS = &tlsConfig{Cert: raw.TLS.Cert, Key: raw.TLS.Key}
+	}
 	for name, rawBackend := range raw.Backends {
 		if name == "" {
 			return config{}, fmt.Errorf("backend name must not be empty")
@@ -533,6 +573,7 @@ const (
 	jsonBackendTimeout
 	jsonRouteMatch
 	jsonConditions
+	jsonTLS
 )
 
 func consumeJSONValue(decoder *json.Decoder, schema jsonSchema) error {
@@ -603,6 +644,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "listen", "log", "trustProxies":
 			return jsonAny, nil
+		case "tls":
+			return jsonTLS, nil
 		case "backends":
 			return jsonBackends, nil
 		case "sites":
@@ -665,6 +708,12 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonConditions:
 		return jsonAny, nil
+	case jsonTLS:
+		switch key {
+		case "cert", "key":
+			return jsonAny, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
 	default:
 		return jsonAny, nil
 	}

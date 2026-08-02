@@ -219,7 +219,7 @@ func TestAccessLogReloadKeepsRequestGeneration(t *testing.T) {
 	}
 	var output bytes.Buffer
 	old.accessLogger = newAccessLogger(&output)
-	current := newReloadableRouter(old)
+	current := newReloadableRouter(old, nil)
 	next, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: "http://localhost:3000"}}})
 	if err != nil {
 		t.Fatal(err)
