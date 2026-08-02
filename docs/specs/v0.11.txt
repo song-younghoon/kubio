@@ -1,0 +1,158 @@
+Kubio kubio.json v0.11 Proposal
+Status: Agreed specification
+Base: v0.10
+
+
+1. Scope
+
+v0.11 adds bounded timing controls to the v0.10 named-backend status retry
+policy. `retry.delay` inserts a fixed, context-aware pause between eligible
+attempts. `retry.deadline` limits the complete Kubio attempt sequence,
+including upstream I/O and those pauses.
+
+This is the complete v0.11 scope. It does not add request-body replay,
+configurable idempotency, exponential or jittered backoff, retry budgets,
+health checks, weighted targets, direct-target timeout options, HTTPS upstream
+CA/SNI settings, route conditions, client-facing TLS features, observability,
+routing actions, gateway features, or additional header policies. Those items
+are carried to docs/proposals/v0.12.txt.
+
+
+2. Configuration
+
+The existing named-backend `retry` object may add either or both optional
+fields:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": ["http://app-1:3000", "http://app-2:3000"],
+          "tries": 2,
+          "retry": {
+            "status": [502, 503, 504],
+            "delay": "100ms",
+            "deadline": "2s"
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`retry.status` remains required and retains all v0.10 rules. `delay` and
+`deadline` are JSON strings accepted by Go's `time.ParseDuration`; each must
+be greater than zero when present. Values are case-sensitive, are not
+trimmed, and do not support environment-variable expansion. An absent field
+has no timing effect. Unknown fields, aliases, nulls, numbers, empty strings,
+zero or negative durations, duplicate keys, and placement outside a named
+backend are configuration errors.
+
+
+3. Delay behavior
+
+For a request eligible under v0.10, `retry.delay` is applied before every
+additional Kubio-level attempt, after the previous transport error or after
+the previous matching terminal response has been closed. There is no delay
+before the first attempt. The delay is fixed; v0.11 adds no exponential,
+jittered, or adaptive backoff.
+
+The pause observes the request context. If the context is canceled or its
+deadline expires during the pause, Kubio starts no further attempt and returns
+the context error. A discarded matching response remains discarded.
+
+`delay` applies to both existing transport-error retries and v0.10
+status-based retries. It applies only when the request is eligible for the
+Kubio retry state; unsafe requests and direct targets retain their prior
+behavior.
+
+
+4. Deadline behavior
+
+For a request eligible under v0.10, `retry.deadline` starts immediately before
+the first upstream attempt and covers all upstream dialing, TLS handshake,
+request writing, response-header waiting, response-body reading, response-body
+closing for discarded responses, and configured retry delays in that Kubio
+attempt sequence. It is a single total duration, not a per-attempt timeout.
+
+Kubio derives an attempt context from the incoming request context using the
+configured deadline. The earlier of the incoming context and this configured
+deadline wins. When the derived context ends, the in-progress upstream
+operation is canceled. No further attempt starts, and Kubio returns the
+derived context error through the existing proxy error handling. If a matching
+response has already been received but the deadline ends before the next
+attempt, Kubio closes and discards that response and returns the context error.
+
+If an allowed final attempt returns a response before the deadline, Kubio
+returns that response even if its status is listed for retry; there is no
+remaining attempt to schedule. The deadline remains in force while the final
+upstream response body is read. If it expires during that read, the body read
+ends with the derived context error and Kubio cannot start a retry after the
+response has been returned. An absent `deadline` preserves the v0.10 context
+behavior and imposes no new total timer.
+
+Before downstream response headers are committed, deadline errors use the
+existing proxy error handler. After final response headers are committed,
+expiry during final-body reading only aborts or truncates that body; Kubio
+does not invoke the error handler, write a replacement response, or retry.
+
+When Kubio discards a matching response before another attempt, it calls that
+response body `Close` synchronously exactly once and ignores the close error.
+Deadline expiry during `Close` is observed only after `Close` returns; Kubio
+starts no next attempt before then and returns the derived context error if it
+has expired.
+
+
+5. Interaction with prior retry rules
+
+The v0.10 method, body, upgrade, informational-response, target-order,
+selector, response-discard, and direct-target rules remain unchanged.
+
+When `retry` is absent, the v0.6 transport-error path remains unchanged and
+does not gain a delay or deadline. When `retry` is present, a transport error
+or matching final status can lead to the next target only when the request is
+eligible and the attempt count, context, and deadline allow it. A nonmatching
+status still returns immediately without a delay.
+
+The final response alone reaches response-header policies, the client, and
+the access log. Informational responses already forwarded under earlier
+specifications retain their prior visibility.
+
+
+6. Reload and diagnostics
+
+The timing values are built with the named backend during startup and config
+reload. A valid reload publishes the complete new router and fresh backend
+selectors atomically. An invalid duration or retry policy rejects the whole
+reload and retains the previous generation.
+
+Errors may identify the backend and `retry.delay` or `retry.deadline` category,
+but must not expose unrelated secrets. No request-path config file read,
+duration parsing, or reload lock is introduced.
+
+
+7. Performance constraints
+
+When `retry` is absent, the v0.10 nil-status fast path remains unchanged. When
+`delay` is absent, no timer is created and no sleep occurs. When `deadline` is
+absent, no derived context or deadline timer is created. Configured status
+membership remains O(1), and timing setup occurs only for eligible requests
+that enter the backend retry path.
+
+
+8. Deferred scope
+
+The following remain unresolved and move to v0.12:
+
+- Request-body replay and explicit idempotency policies.
+- Exponential, jittered, or adaptive retry backoff.
+- Retry budgets and health-aware or weighted target selection.
+- Direct-target timeout options, response-body timeouts, and HTTPS upstream
+  CA/SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple client certificates, SNI selection, ACME, redirects, mutual TLS,
+  TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  and additional header policies.

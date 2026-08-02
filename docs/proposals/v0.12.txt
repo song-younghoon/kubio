@@ -1,0 +1,50 @@
+Kubio kubio.json v0.12 Proposal
+Status: Deferred features; discussion not started
+Base: v0.11
+
+
+1. Purpose
+
+This proposal carries the candidates deferred by v0.11. No behavior below is
+agreed yet. The list must be narrowed before promotion.
+
+
+2. Backend resilience and upstream transport
+
+- Request-body replay and explicit idempotency policies.
+- Exponential, jittered, or adaptive retry backoff.
+- Retry budgets.
+- Active and passive health checks.
+- Weighted target selection.
+- Direct-target timeout options, including connection, response-header, and
+  response-body timeouts.
+- HTTPS upstream CA and SNI settings.
+
+
+3. Additional route matching
+
+- Client-IP conditions, including forwarded client-IP derivation.
+- Presence or absence conditions, negation, regular expressions, wildcards,
+  numeric comparisons, value capture, and logical OR groups.
+
+
+4. Client-facing TLS
+
+- Multiple manual certificates and SNI/host certificate selection.
+- HTTP-to-HTTPS redirects, automatic ACME, mutual TLS, TLS passthrough, and
+  configurable TLS protocol or algorithm policy.
+
+
+5. Observability, administration, and routing actions
+
+- Configurable access logs, custom fields, sampling, redaction, request IDs,
+  metrics, health/metrics/admin endpoints, and reload status.
+- RFC Forwarded and PROXY protocols.
+- URI rewriting, redirects, fixed responses, and custom error bodies.
+
+
+6. Application gateway and header policies
+
+- Rate limiting, authentication, compression, caching, and service discovery.
+- Response trailers, conditional response headers, request-header removal or
+  addition, and policies for Kubio-generated or intermediate responses.
