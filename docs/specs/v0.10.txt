@@ -1,0 +1,150 @@
+Kubio kubio.json v0.10 Specification
+Status: Agreed specification
+Base: v0.9
+
+
+1. Scope
+
+v0.10 adds status-aware retries for named backends. It extends the existing
+v0.6 `tries` attempt limit with an optional list of upstream final HTTP status
+codes that should cause the next distinct backend target to be attempted.
+
+This is the complete v0.10 scope. It deliberately does not add request-body
+replay, configurable idempotency, retry backoff, total deadlines, retry
+budgets, health checks, weighted targets, upstream TLS policy, or any client,
+routing, observability, administration, gateway, or header-policy feature.
+Those items are carried to docs/proposals/v0.11.txt.
+
+
+2. Configuration
+
+A named backend may add the optional `retry` object:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": [
+            "http://app-1:3000",
+            "http://app-2:3000",
+            "http://app-3:3000"
+          ],
+          "tries": 3,
+          "retry": {
+            "status": [502, 503, 504]
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`retry` is valid only inside a named backend and must be a non-null object
+containing exactly the required non-empty `status` array. The array contains
+distinct JSON integers from 400 through 599 inclusive. Array order has no
+meaning. Decimal and exponent spellings such as `503.0` and `5.03e2` are
+invalid, as are duplicate values.
+
+`tries` remains the maximum total number of Kubio-level attempts and includes
+the first attempt. When `retry` is present, `tries` must be explicitly greater
+than one and cannot exceed the number of backend targets. When `retry` is
+absent, v0.6 behavior is unchanged and `tries` may be one.
+
+Unknown fields, aliases, duplicate JSON keys, empty arrays, nulls, values
+outside the 400–599 range, and `retry` in a direct target, site, route, or
+any other object are configuration errors. No environment expansion is
+performed.
+
+
+3. Eligible requests
+
+Status retries use exactly the existing v0.6 safe-request eligibility:
+
+- The method is exactly `GET`, `HEAD`, `OPTIONS`, or `TRACE`.
+- `ContentLength` is zero, `TransferEncoding` and `Trailer` are empty, and
+  `Body` is nil or `http.NoBody`.
+- The request is not an HTTP/1 upgrade. `CONNECT` and case variants of the
+  eligible methods remain ineligible.
+
+Requests that are not eligible never receive status retries, even when the
+selected backend configures `retry.status` and `tries` greater than one.
+Request-body replay and a configurable idempotency policy are not part of
+v0.10.
+
+
+4. Status retry behavior
+
+For an eligible request selecting a named backend, Kubio performs attempts in
+the existing v0.6 order. If an attempt receives a terminal upstream response
+whose status code is in `retry.status`, Kubio closes and discards that
+response and immediately attempts the next target, subject to `tries`.
+
+Additional attempts use the same round-robin starting index and do not advance
+the shared backend selector. Target index K is `(start + K) mod targetCount`,
+where K starts at zero. The target indexes selected by one request remain
+distinct because `tries` cannot exceed the target count.
+
+If the matching status is received on the final allowed attempt, Kubio returns
+that response. If an attempt returns a status not listed in `retry.status`,
+Kubio returns it immediately and does not retry. A terminal response discarded
+for retry is never visible to the client or response-header policies. Any
+nonterminal 1xx response already forwarded under v0.6 remains visible.
+
+An informational 1xx response received before the terminal response prevents
+status retry, consistent with v0.6 transport-retry behavior. A canceled or
+deadline-exceeded request also prevents another attempt. If the request is
+canceled after a matching terminal response is received but before the next
+attempt begins, Kubio closes and discards that response and returns the
+request context error; it does not return the discarded response.
+
+Kubio discards a response for retry by calling its body `Close` exactly once,
+without draining it, and ignoring the close error. It forwards no headers,
+body, or trailers from that response. The next attempt starts only after that
+close completes.
+
+Status retries do not apply to direct site or route targets. They do not retry
+an HTTP response when `retry` is absent. Existing transport-error retries,
+timeouts, error classification, forwarding, access logging, and response
+behavior remain unchanged.
+
+
+5. Reload and diagnostics
+
+The new backend policy is built with the router during startup and config
+reload. A valid reload publishes the complete new router and fresh backend
+selectors atomically, as specified by v0.2. An invalid retry policy rejects
+the whole reload and retains the prior generation.
+
+Startup and reload errors may identify the backend name, `retry.status`, and
+the invalid index or category, but need not expose unrelated configuration
+values. No request-path file read, parsing, or reload lock is introduced.
+
+
+6. Performance constraints
+
+When `retry` is absent and `tries` is one, a backend must retain the v0.9
+single-response fast path. When `retry` is absent and `tries` is greater than
+one, it must retain the v0.6 transport-error retry path without a status-map
+lookup or response-body wrapping. When `retry` is present, status membership
+is an O(1) lookup and no allocation is performed solely to inspect the
+response status. The existing request eligibility check remains the only gate
+before retry state is installed.
+
+
+7. Validation and deferred scope
+
+The strict v0.1 JSON rules and all prior validation remain in force. The
+following remain deferred to v0.11:
+
+- Request-body replay, configurable idempotency, retry backoff, total
+  deadlines, and retry budgets.
+- Active/passive health checks and weighted target selection.
+- Direct-target timeout options, including connection and response-header
+  timeouts, response-body timeouts, and HTTPS upstream CA/SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  and additional header policies.
