@@ -277,6 +277,7 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 }
 
 func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backendRetryState) (*http.Response, error) {
+	ctx := request.Context()
 	for attempt := 0; attempt < b.tries; attempt++ {
 		current := request
 		if attempt > 0 {
@@ -292,14 +293,16 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 
 		response, err := b.transport.RoundTrip(current)
 		if err != nil {
-			if state.informational.Load() || request.Context().Err() != nil || attempt+1 == b.tries {
-				if contextErr := request.Context().Err(); contextErr != nil && b.retryDeadline > 0 {
+			if state.informational.Load() || ctx.Err() != nil || attempt+1 == b.tries {
+				if contextErr := ctx.Err(); contextErr != nil && b.retryDeadline > 0 {
 					return nil, contextErr
 				}
 				return nil, err
 			}
-			if err := waitRetryDelay(request.Context(), b.retryDelay); err != nil {
-				return nil, err
+			if b.retryDelay > 0 {
+				if err := waitRetryDelay(ctx, b.retryDelay); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -313,11 +316,13 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		if response.Body != nil {
 			_ = response.Body.Close()
 		}
-		if err := request.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := waitRetryDelay(request.Context(), b.retryDelay); err != nil {
-			return nil, err
+		if b.retryDelay > 0 {
+			if err := waitRetryDelay(ctx, b.retryDelay); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return nil, errors.New("backend retry attempts exhausted")
@@ -432,22 +437,24 @@ func newReverseProxy(
 		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
-	if deadline > 0 || !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
-		deadlineError := func(response *http.Response) error {
-			if deadline == 0 {
-				return nil
+	if deadline > 0 {
+		proxy.ModifyResponse = func(response *http.Response) error {
+			body, _ := response.Body.(*deadlineBody)
+			if body != nil {
+				if err := body.ctx.Err(); err != nil {
+					return err
+				}
 			}
-			if body, ok := response.Body.(*deadlineBody); ok {
+			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
+			if body != nil {
 				return body.ctx.Err()
 			}
 			return nil
 		}
+	} else if !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
 		proxy.ModifyResponse = func(response *http.Response) error {
-			if err := deadlineError(response); err != nil {
-				return err
-			}
 			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
-			return deadlineError(response)
+			return nil
 		}
 	}
 	return proxy
