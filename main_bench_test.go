@@ -262,6 +262,20 @@ func BenchmarkBackendProxyRequestParallel(b *testing.B) {
 	})
 }
 
+func BenchmarkBackendStatusPolicyProxyRequestParallel(b *testing.B) {
+	benchmarkProxyRequestParallel(b, func(target string) config {
+		sameTarget := "HTTP" + target[len("http"):]
+		return config{
+			Backends: map[string]backendConfig{"app": {
+				Targets: []string{target, sameTarget},
+				Tries:   2,
+				Retry:   &backendRetryConfig{Status: []int{502, 503, 504}},
+			}},
+			Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+		}
+	})
+}
+
 func BenchmarkBackendRetryProxyRequestParallel(b *testing.B) {
 	benchmarkProxyRequestParallel(b, func(target string) config {
 		sameTarget := "HTTP" + target[len("http"):]

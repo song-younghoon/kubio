@@ -170,6 +170,36 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 		return b.transport.RoundTrip(request)
 	}
 
+	if b.retryStatuses == nil {
+		response, lastErr := b.transport.RoundTrip(request)
+		if lastErr == nil {
+			return response, nil
+		}
+		if state.informational.Load() || request.Context().Err() != nil {
+			return nil, lastErr
+		}
+
+		for attempt := 1; attempt < b.tries; attempt++ {
+			state.informational.Store(false)
+			outgoing := request.Clone(request.Context())
+			requestURL := *request.URL
+			target := b.targets[(state.start+attempt)%len(b.targets)]
+			requestURL.Scheme = target.Scheme
+			requestURL.Host = target.Host
+			outgoing.URL = &requestURL
+
+			response, err := b.transport.RoundTrip(outgoing)
+			if err == nil {
+				return response, nil
+			}
+			lastErr = err
+			if state.informational.Load() || request.Context().Err() != nil {
+				break
+			}
+		}
+		return nil, lastErr
+	}
+
 	for attempt := 0; attempt < b.tries; attempt++ {
 		current := request
 		if attempt > 0 {
