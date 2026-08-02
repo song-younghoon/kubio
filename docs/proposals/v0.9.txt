@@ -1,31 +1,32 @@
-Kubio kubio.json v0.8 Proposal
+Kubio kubio.json v0.9 Proposal
 Status: Deferred features; discussion not started
-Base: v0.7
+Base: v0.8
 
 
 1. Purpose
 
-This proposal carries every candidate deferred by v0.7. Sections 2 through 8
+This proposal carries every candidate deferred by v0.8. Sections 2 through 8
 are the exhaustive carried set. They define no agreed behavior yet, and the
 scope must be narrowed before promotion.
 
 
-2. Remaining backend resilience and upstream transport
+2. Additional route matching
 
-- Active or passive health checks.
+- Client-IP conditions, including forwarded client-IP derivation.
+- Presence or absence conditions.
+- Negation, regular expressions, wildcard values, and numeric comparisons.
+- Header or query value capture and route-scoped logical OR groups.
+
+
+3. Backend resilience and upstream transport
+
+- Active and passive health checks.
 - Weighted target selection.
-- Status-based retry policies.
+- Status-based retries.
 - Request-body replay and explicit idempotency policies.
 - Retry backoff, total deadlines, and retry budgets.
 - Direct-target timeout options and response-body timeouts.
 - HTTPS upstream CA and SNI settings.
-
-
-3. Additional route matching
-
-- Request header conditions.
-- Query parameter conditions.
-- Client IP conditions.
 
 
 4. Client-facing TLS
@@ -36,12 +37,12 @@ scope must be narrowed before promotion.
 - Automatic ACME certificates.
 
 
-5. Remaining observability and administration
+5. Observability and administration
 
 - Configurable access-log outputs and formats.
 - Custom fields, sampling, and redaction rules.
 - Query-string and request/response-header logging.
-- Request IDs and forwarded client-IP derivation.
+- Request IDs and forwarded client-IP fields.
 - Per-attempt logs and upstream timing fields.
 - Request and upstream metrics.
 - Health and metrics endpoints.
@@ -49,7 +50,7 @@ scope must be narrowed before promotion.
 - Reload status reporting.
 
 
-6. Additional proxy protocols and routing actions
+6. Proxy protocols and routing actions
 
 - RFC Forwarded headers.
 - PROXY protocol.
@@ -70,7 +71,7 @@ These remain candidates only when backed by a concrete use case:
 - Service discovery.
 
 
-8. Additional header policy features
+8. Header policy features
 
 - Response trailer modification.
 - Conditional response-header policies.

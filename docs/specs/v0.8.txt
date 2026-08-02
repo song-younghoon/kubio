@@ -1,0 +1,311 @@
+Kubio kubio.json v0.8 Specification
+Status: Agreed specification
+Base: v0.7
+
+
+1. Scope
+
+v0.8 adds exact request-header and query-parameter conditions to route
+selection. A route expresses them through one optional `match` object with the
+short child names `header` and `query`.
+
+These are the only configuration additions in v0.8. Client-IP conditions,
+regular expressions, wildcards, negation, presence-only conditions, and every
+other feature carried by the former v0.8 proposal remain deferred. Every valid
+v0.7 configuration remains valid and has the same route-selection behavior.
+
+The singular `header` and `query` names are intentional. Kubio has not had a
+stable release, and no `matches`, `headers`, `queries`, or other alias is
+introduced inside `match`. The pre-existing route-level `headers` field remains
+valid request-header injection and is not an alias for `match.header`.
+
+
+2. Configuration
+
+`match` is optional and valid only on a route:
+
+    {
+      "listen": ":8080",
+      "sites": [
+        {
+          "hosts": ["example.com"],
+          "target": "http://app:3000",
+          "routes": [
+            {
+              "path": "/checkout/*",
+              "methods": ["GET", "HEAD"],
+              "match": {
+                "header": {
+                  "X-Environment": ["production", "staging"],
+                  "X-Feature": "new-checkout"
+                },
+                "query": {
+                  "preview": ["1", "true"]
+                }
+              },
+              "target": "http://preview:3000"
+            }
+          ]
+        }
+      ]
+    }
+
+When present, `match` must be a non-null JSON object containing at least one of
+these fields:
+
+- `header`: a non-null, non-empty object of request-header conditions.
+- `query`: a non-null, non-empty object of query-parameter conditions.
+
+Each property value is either one JSON string or a non-empty array of JSON
+strings. A string is shorthand for a one-element array. Array declaration
+order has no matching or priority meaning. Equal strings within one value
+array are configuration errors.
+
+All configured names are conjunctive: every header and query property in the
+selected route must match. Values for one property are alternatives: the
+property matches when at least one received value exactly equals at least one
+configured value. `path`, `methods`, `match.header`, and `match.query` are also
+conjunctive when they appear on the same route.
+
+An empty string is a valid configured alternative. A missing received property
+never matches an empty configured string. A route without `match` has no
+header or query condition.
+
+
+3. Header conditions
+
+`match.header` property names:
+
+- Must be non-empty valid HTTP field names under the v0.4 rules.
+- Are compared case-insensitively.
+- Must be case-insensitively unique within one `header` object.
+
+Configured header alternatives follow the v0.4 field-value syntax validation,
+except that environment-variable expansion is not performed. A configured
+value is matched literally, so `${NAME}` has no special meaning. Values are
+compared case-sensitively and byte-for-byte without trimming, case folding,
+comma splitting, token parsing, or field-specific interpretation.
+
+For every name other than `Host`, Kubio uses the values in the received Go
+request Header map. The condition matches if any complete received field value
+equals any configured alternative. Multiple field lines remain alternatives;
+Kubio does not split a received value at commas.
+
+Kubio does not synthesize matcher values from other Go Request fields. In
+particular, `Content-Length`, `Transfer-Encoding`, and `Trailer` conditions do
+not inspect Request.ContentLength, Request.TransferEncoding, or Request.Trailer.
+Like every non-Host condition, they can match only a value actually present in
+Request.Header; when net/http represents or removes the field elsewhere, the
+condition is ineligible.
+
+`Host` is a special request field in Go and is not stored in the Header map. A
+case-insensitive `Host` condition therefore compares its alternatives with the
+request Host exactly as received, including a port or trailing dot. This raw
+comparison is independent of the normalized host matching that selects a
+site.
+
+Conditions inspect the downstream request before Kubio generates forwarded
+headers or applies the selected site's and route's request-header injection.
+Consequently, configured injection cannot make a condition match. Incoming
+X-Forwarded-For and similar fields are ordinary untrusted header values for
+this matcher even when the direct peer is listed in `trustProxies`; v0.8 does
+not derive a client identity from them.
+
+Hop-by-hop, authorization, cookie, and other valid request-header names may be
+configured, but only values observable through the preceding source rules can
+match. Kubio does not redact or transform observable values for matching. They
+remain omitted from the v0.7 access log.
+
+
+4. Query conditions
+
+`match.query` property names are decoded query-parameter names. They must be
+non-empty and are compared exactly and case-sensitively. Configured values may
+be empty or contain Unicode and do not support environment-variable expansion.
+The JSON property name is already the literal decoded name; Kubio never applies
+URL decoding to configuration text.
+
+Kubio parses the original request RawQuery with Go's `url.ParseQuery` rules.
+This includes percent decoding and conversion of `+` to a space. A condition
+matches if the decoded parameter is present and any of its decoded values
+exactly equals any configured alternative. Repeated parameters are therefore
+alternatives. These pairs are equivalent for matching:
+
+    ?mode=hello+world
+    configured value: "hello world"
+
+A raw query name `a+b` decodes to `a b` and therefore does not match a
+configured name `a+b`. The raw name `a%2Bb` decodes to `a+b` and does match
+that configured name. The same decoding distinction applies to values.
+
+An empty alternative matches both `?flag` and `?flag=`. It does not match when
+`flag` is absent. Kubio does not distinguish equivalent percent encodings,
+parameter order, or the two empty-value spellings.
+
+If RawQuery is malformed under `url.ParseQuery`, every route containing a
+query condition is ineligible for that request. Routes without query
+conditions remain eligible. Kubio does not generate an error response solely
+for malformed query syntax, and the selected fallback receives the original
+RawQuery unchanged.
+
+Matching never mutates the URL. The selected upstream receives the original
+query string with its original escaping, order, duplicates, and malformed
+content under the existing proxy behavior.
+
+
+5. Candidate evaluation
+
+Site and path matching continue to use the request values and rules from the
+earlier specifications. For a path-eligible route, Kubio evaluates conditions
+in this logical order:
+
+1. `methods`, when present.
+2. Every `match.header` property, when present.
+3. Every `match.query` property, when present.
+
+The order is descriptive and creates no side effects. A failed condition makes
+the route ineligible. Kubio may stop evaluating that route immediately. A
+request with no eligible route still uses the selected site's target or
+backend; a condition mismatch by itself never produces 400, 404, 405, or an
+Allow header.
+
+Only the selected route contributes target or backend selection, strip,
+request headers, and response policy. An ineligible route consumes no backend
+selection and changes no request state. The server-wide OPTIONS * response is
+still handled before site and route selection.
+
+
+6. Route priority
+
+v0.8 restates route priority so all exact conditions participate consistently.
+For each eligible route, define:
+
+- Its condition count as one when `methods` is present, plus the number of
+  `match.header` properties, plus the number of `match.query` properties.
+- Its alternative count as the number of method strings when `methods` is
+  present, plus the number of configured alternatives across every header and
+  query property.
+
+Kubio selects one eligible route using this priority:
+
+1. Exact path over wildcard path.
+2. Greater fixed-segment depth over lesser fixed-segment depth.
+3. Greater condition count over lesser condition count.
+4. Fewer alternatives over more alternatives when condition counts are equal.
+5. Later declaration over earlier declaration when all prior criteria are
+   equal.
+
+More conjunctive conditions therefore make a route more specific, while fewer
+alternatives make an equal number of conditions narrower. Different condition
+kinds have equal priority: one method condition, one header property, and one
+query property each add one to the condition count.
+
+For configurations without `match`, this is exactly the v0.3 priority: a route
+with `methods` beats one without it, fewer methods win between method-limited
+routes, and later declaration resolves the remaining tie. Path specificity
+continues to outrank every non-path condition.
+
+
+7. Validation and strict JSON
+
+In addition to the prior specifications, configuration loading rejects:
+
+- `match` set to null, a scalar, or an array, or containing no recognized
+  condition.
+- An unknown field inside `match`.
+- `header` or `query` set to null, a scalar, an array, or an empty object.
+- A condition value that is null, not a string or string array, or an empty
+  array.
+- Duplicate alternatives within one condition value array.
+- An empty or invalid header name, or case-insensitively duplicate header
+  names.
+- A header alternative that fails the v0.4 field-value syntax rules.
+- An empty query-parameter name.
+- `match` outside a route, or aliases such as `matches`, `headers`, or
+  `queries` inside `match` in place of the specified names. This does not
+  invalidate the existing route-level `headers` injection field.
+
+Exact duplicate JSON keys remain errors under the v0.1 strict parser. Query
+names differing only by case are distinct. Duplicate detection is scoped to
+each individual value array: equal strings within one array are errors; equal
+strings in different properties or routes are allowed and are not compared.
+
+Invalid startup configuration exits before listening. An invalid reload logs
+a sanitized error and retains the complete active router, backend state,
+logging setting, and route conditions. An error may identify the route index,
+condition kind, configured property name, array index, and error category, but
+must not include a configured header or query alternative value.
+
+
+8. Reload, concurrency, and performance constraints
+
+The v0.1 atomic reload rules apply. A successful reload atomically activates
+the new route conditions for new requests. In-flight requests finish with the
+router generation that accepted them. Match configuration is immutable after
+router construction and adds no shared mutable request state.
+
+As required by v0.2, every successful reload constructs fresh backend
+selectors starting at target index 0, including a reload that changes only
+match conditions. A rejected reload retains the prior selectors and their
+current positions.
+
+Routes without `match` must not perform header/query matcher work. A request
+that considers only routes without `match.query`, including routes with only
+`match.header`, must not parse RawQuery. Query parsing occurs lazily when the
+first otherwise-eligible query condition is reached and at most once for one
+request, regardless of the number of query-conditioned routes considered.
+v0.8 adds no regular-expression engine, matcher cache, background worker, or
+external dependency.
+
+
+9. Deferred features
+
+Every item below moves to v0.9; none is implied by v0.8.
+
+Additional route matching:
+
+- Client-IP conditions, including forwarded client-IP derivation.
+- Presence or absence conditions, negation, regular expressions, wildcard
+  values, numeric comparisons, value capture, and logical OR groups.
+
+Backend resilience and upstream transport:
+
+- Active and passive health checks and weighted target selection.
+- Status-based retries.
+- Request-body replay and explicit idempotency policies.
+- Retry backoff, total deadlines, and retry budgets.
+- Direct-target timeout options and response-body timeouts.
+- HTTPS upstream CA and SNI settings.
+
+Client-facing TLS:
+
+- Manual certificates and certificate selection by host.
+- HTTP-to-HTTPS redirects.
+- Automatic ACME certificates.
+
+Observability and administration:
+
+- Configurable access-log outputs and formats, custom fields, sampling, and
+  redaction rules.
+- Query-string and request/response-header logging.
+- Request IDs and forwarded client-IP fields.
+- Per-attempt logs and upstream timing fields.
+- Request and upstream metrics.
+- Health and metrics endpoints, general administration endpoints, and reload
+  status reporting.
+
+Proxy protocols and routing actions:
+
+- RFC Forwarded headers and PROXY protocol.
+- URI rewriting, redirect responses, fixed responses, and custom error bodies.
+
+Application gateway features:
+
+- Rate limiting, authentication, response compression, response caching, and
+  service discovery.
+
+Header policy features:
+
+- Response trailer modification and conditional response-header policies.
+- Request-header removal and addition.
+- Response-header policies for Kubio-generated or intermediate responses.
