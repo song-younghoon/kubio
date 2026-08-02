@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	rand "math/rand/v2"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -124,6 +124,19 @@ func buildRetryStatuses(statuses []int) (map[int]struct{}, error) {
 	return set, nil
 }
 
+func validateBackoff(backoff *backendBackoffConfig) error {
+	if backoff == nil {
+		return nil
+	}
+	if backoff.Base <= 0 {
+		return fmt.Errorf("base must be greater than zero")
+	}
+	if backoff.Cap < backoff.Base {
+		return fmt.Errorf("cap must be greater than or equal to base")
+	}
+	return nil
+}
+
 func newBackend(cfg backendConfig) (*backend, error) {
 	if len(cfg.Targets) == 0 {
 		return nil, fmt.Errorf("targets must not be empty")
@@ -143,13 +156,8 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		if cfg.Retry.Deadline < 0 {
 			return nil, fmt.Errorf("retry.deadline must be greater than zero")
 		}
-		if cfg.Retry.Backoff != nil {
-			if cfg.Retry.Backoff.Base <= 0 {
-				return nil, fmt.Errorf("retry.backoff.base must be greater than zero")
-			}
-			if cfg.Retry.Backoff.Cap < cfg.Retry.Backoff.Base {
-				return nil, fmt.Errorf("retry.backoff.cap must be greater than or equal to base")
-			}
+		if err := validateBackoff(cfg.Retry.Backoff); err != nil {
+			return nil, fmt.Errorf("retry.backoff: %w", err)
 		}
 		var err error
 		retryStatuses, err = buildRetryStatuses(cfg.Retry.Status)
