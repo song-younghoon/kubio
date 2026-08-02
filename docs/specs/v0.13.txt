@@ -1,0 +1,206 @@
+Kubio kubio.json v0.13 Proposal
+Status: Agreed specification
+Base: v0.12
+
+
+1. Scope
+
+v0.13 adds explicit retry method policy and bounded request-body replay to the
+existing named-backend retry feature. A configured method allowlist makes
+retries for intentionally idempotent application methods possible, while an
+explicit memory limit prevents unbounded body buffering.
+
+This is the complete v0.13 scope. It does not add adaptive backoff, retry
+budgets, health checks, weighted targets, direct-target timeout options,
+HTTPS upstream CA/SNI settings, advanced route conditions, client-facing TLS
+features, observability, routing actions, gateway features, or additional
+header policies. Those items are carried to docs/proposals/v0.14.txt.
+
+
+2. Configuration
+
+The named-backend `retry` object may add the following optional fields:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": ["http://app-1:3000", "http://app-2:3000"],
+          "tries": 2,
+          "retry": {
+            "status": [502, 503, 504],
+            "methods": ["POST", "PUT"],
+            "body": {"max": 1048576},
+            "backoff": {
+              "base": "100ms",
+              "cap": "2s",
+              "jitter": "full"
+            },
+            "deadline": "5s"
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`retry.status`, `retry.backoff`, and `retry.deadline` retain v0.12 rules.
+`methods` is an optional non-empty array of unique, exact, case-sensitive,
+non-empty ASCII HTTP method tokens. It must not contain `*` anywhere. When
+absent, the allowed methods remain exactly `GET`, `HEAD`, `OPTIONS`, and
+`TRACE`. When present, it replaces that default set; it does not add to it.
+
+`body` is an optional object containing only `max`. `max` is a positive
+base-10 JSON integer token with no decimal point or exponent, in the inclusive
+range 1 through 67108864 (64 MiB). This fixed Kubio replay ceiling keeps a
+configuration mistake from requesting an unbounded allocation, and also keeps
+`max + 1` representable. Values outside that range are configuration errors.
+`body` is the opt-in switch for replaying a request body; it is invalid without
+a positive `max`.
+
+The complete allowed key set is `status`, `methods`, `body`, `backoff`, and
+`deadline` inside `retry`, and `max` inside `body`. Unknown fields, aliases,
+nulls, non-integer numbers, zero or negative values, `*`, duplicate keys,
+duplicate methods, and placement outside a named backend are errors. The
+v0.12 `retry.delay` field remains invalid.
+
+
+3. Retry eligibility
+
+The request method must be in the configured method set. Matching is exact and
+case-sensitive, without trimming, normalization, or environment expansion.
+`CONNECT`, including HTTP/2 and HTTP/3 extended CONNECT, is never eligible
+regardless of `methods`. HTTP upgrades are never eligible regardless of method
+policy. A request without a body must still have zero content length, no
+transfer encoding, and no trailers.
+
+If a request has a body, `retry.body` must be configured, the method must be
+allowed, and the request must have no trailers. A request is bodyless only when
+`ContentLength == 0`, `TransferEncoding` and `Trailer` are empty, and `Body` is
+nil or `http.NoBody`. Every other request is body-bearing and requires
+`retry.body`; a non-empty `Trailer` always makes it ineligible. Inconsistent
+framing with no readable body (`Body == nil` or `http.NoBody` together with a
+nonzero content length or transfer encoding) is ineligible and is not buffered
+or retried. A replayable body-bearing request must have a non-`NoBody` body. A
+body-bearing request is otherwise ineligible and retains the prior
+single-attempt behavior. The default method set remains bodyless-safe unless
+`methods` explicitly includes another method.
+
+Requests that are ineligible never receive transport or status retries, even
+when the backend has `tries` greater than one. Direct site and route targets
+remain outside this retry policy.
+
+
+4. Body replay behavior
+
+For an eligible body-bearing request, Kubio reads and buffers the complete
+incoming request body in memory before the first upstream attempt. If the body
+would exceed `body.max`, Kubio reads no more than `max + 1` bytes, makes no
+upstream attempt, and returns HTTP 413. `max + 1` is computed without overflow.
+A body-read failure makes no upstream attempt and uses the existing proxy
+error handling. If cancellation and a read error occur together, the request
+context error takes precedence. The request context controls the body read.
+
+The exact bytes read from the incoming body form an immutable payload. The
+original incoming body is not reused or mutated after it is consumed. The
+first and every additional outgoing attempt receives a fresh reader over
+exactly the same payload bytes. Each attempt sets `ContentLength` to the
+payload length, clears `TransferEncoding` and `Trailer`, and forwards no
+original body-framing metadata. Byte identity means payload bytes, not wire
+framing.
+
+The payload is released on every exit path, including 413, body-read error,
+cancellation, retry exhaustion, and successful receipt of the final response.
+It is released once the final response is obtained, before final response-body
+streaming continues. Release occurs exactly once.
+
+An oversize body produces a locally generated terminal 413 response through
+Kubio's standard local error branch. The generated response has status 413,
+body `Request Entity Too Large\n`, `Content-Type: text/plain; charset=utf-8`,
+and `X-Content-Type-Options: nosniff`; normal HTTP framing supplies remaining
+metadata. No configurable custom error body or response policy applies. It
+does not make an upstream attempt, does not consume an additional target
+selector, and the existing access log records the generated 413.
+
+The backend's ordinary starting target selector is consumed before request
+eligibility and body buffering, as it is for other backend requests. An
+oversize body consumes that starting selector but no additional selector.
+
+Body buffering occurs before the first upstream attempt; `retry.deadline`
+starts immediately before that first attempt as specified by v0.11. Incoming
+request cancellation remains effective while the body is being buffered. The
+context is checked before a known-length overflow response and immediately
+before emitting 413; if it has ended, the context error takes precedence over
+413. The same precedence applies when overflow and cancellation are observed
+together. If
+buffering is canceled, no upstream attempt is made and the context error is
+passed to the existing proxy error handler. Kubio checks the context before
+and after each synchronous body read and closes the incoming body exactly once
+on every buffering exit, including known-length rejection, overflow, read
+error, and cancellation. It does not spawn a goroutine or retain the payload
+after cancellation; a Body implementation that ignores context and Close may
+delay cancellation observation until its current Read returns. If more than
+`max` bytes are observed, local 413 takes precedence over a simultaneous
+non-context read error; otherwise a non-EOF read error uses the existing proxy
+error handling, with a context error taking precedence. Incoming body `Close`
+errors are ignored and never replace the 413, context, or body-read result.
+
+The method allowlist is an explicit operator decision that a method is safe to
+retry for this backend. Kubio does not infer idempotency from the method name
+and does not make non-listed methods eligible automatically.
+
+
+5. Interaction with prior retry rules
+
+The v0.12 status, backoff, deadline, target-order, response-discard,
+informational-response, final-body, and direct-target rules remain unchanged.
+Backoff ordinal counting includes retries caused by either transport errors or
+matching statuses. A replayable body is used for both causes.
+
+The server-wide `OPTIONS *` request remains handled before site and backend
+selection, never enters the method allowlist or body replay, and retains its
+v0.7 200 response, `Content-Length: 0`, and bounded request-body discard
+behavior.
+
+When `methods` and `body` are absent, the existing v0.12 bodyless eligibility
+fast path remains unchanged. When `body` is present but the request is
+bodyless, no body buffer is created. The final response alone reaches response
+policies, the client, and the access log.
+
+
+6. Reload and diagnostics
+
+Method and body policies are parsed and validated while building the named
+backend at startup and config reload. A valid reload publishes the complete
+new router and fresh backend selectors atomically. An invalid methods or body
+policy rejects the whole reload and retains the previous generation.
+
+Errors may identify the backend and `retry.methods` or `retry.body.max`, but
+must not expose request-body contents or unrelated secrets. No request-path
+configuration read or reload lock is introduced.
+
+
+7. Performance constraints
+
+When `methods` and `body` are absent, no method map or body buffer is created
+and the v0.12 eligibility path remains unchanged. For a body-bearing request,
+the known content length is checked against `max` before reading. Body
+allocation occurs only after the method and other eligibility checks pass.
+The body is buffered once per retry sequence, not once per attempt.
+
+
+8. Deferred scope
+
+The following remain unresolved and move to v0.14:
+
+- Adaptive backoff and retry budgets.
+- Active/passive health checks and weighted target selection.
+- Direct-target timeout options, response-body timeouts, and HTTPS upstream
+  CA/SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  and additional header policies.
