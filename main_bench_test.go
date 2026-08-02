@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -152,13 +153,76 @@ func BenchmarkApplyResponseHeaders(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				applyResponseHeaders(response, policy)
+				applyResponseHeaderPolicies(response, policy, responseHeaderPolicy{})
 			}
 			b.StopTimer()
 
 			values := response.Header.Values("X-Policy-" + strconv.Itoa(test.policyHeaders-1))
 			if len(values) != 1 || values[0] != "" {
 				b.Fatalf("empty replacement = %q", values)
+			}
+		})
+	}
+}
+
+func BenchmarkResponseHeaderPolicies(b *testing.B) {
+	for _, test := range []struct {
+		name            string
+		policyHeaders   int
+		upstreamHeaders int
+		trailers        int
+	}{
+		{name: "small_6x16", policyHeaders: 6, upstreamHeaders: 16, trailers: 1},
+		{name: "stress_60x128", policyHeaders: 60, upstreamHeaders: 128, trailers: 8},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			site := responseHeaderPolicy{Set: map[string][]string{}, Add: map[string][]string{}}
+			route := responseHeaderPolicy{Set: map[string][]string{}, Add: map[string][]string{}}
+			headers := make(http.Header, test.policyHeaders+test.upstreamHeaders)
+			trailers := make(http.Header, test.trailers)
+			expected := make([][]string, test.policyHeaders)
+			for index := range test.upstreamHeaders {
+				headers.Set("X-Upstream-"+strconv.Itoa(index), "upstream")
+			}
+			for index := range test.policyHeaders {
+				name := "X-Policy-" + strconv.Itoa(index)
+				expected[index] = []string{"upstream-a", "upstream-b"}
+				if index < test.trailers {
+					trailers[name] = nil
+				}
+				switch index % 3 {
+				case 0:
+					site.Set[name] = []string{"site-a", "site-b"}
+					route.Add[name] = []string{"route"}
+					if index >= test.trailers {
+						expected[index] = []string{"site-a", "site-b", "route"}
+					}
+				case 1:
+					site.Add[name] = []string{"site"}
+					route.Set[name] = []string{"upstream-a", "upstream-b"}
+				case 2:
+					site.Remove = append(site.Remove, name)
+					route.Add[name] = []string{"route"}
+					if index >= test.trailers {
+						expected[index] = []string{"route"}
+					}
+				}
+				headers[name] = expected[index]
+			}
+			response := &http.Response{Header: headers, Trailer: trailers}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				applyResponseHeaderPolicies(response, site, route)
+			}
+			b.StopTimer()
+
+			for index, want := range expected {
+				name := "X-Policy-" + strconv.Itoa(index)
+				if values := response.Header.Values(name); !slices.Equal(values, want) {
+					b.Fatalf("%s = %q, want %q", name, values, want)
+				}
 			}
 		})
 	}

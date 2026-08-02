@@ -184,8 +184,8 @@ func TestResponseHeadersInheritanceOverrideAndEnvironment(t *testing.T) {
 
 func TestResponseHeaderOperationOrdering(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header()["X-Order"] = []string{"upstream-1", "upstream-2"}
-		w.Header()["X-Append"] = []string{"upstream-1", "upstream-2"}
+		w.Header()["x-order"] = []string{"upstream-1", "upstream-2"}
+		w.Header()["x-append"] = []string{"upstream-1", "upstream-2"}
 		w.Header().Set("X-Site-Remove", "upstream")
 		w.Header().Set("X-Route-Remove", "upstream")
 		w.Header().Set("X-Unselected", "upstream")
@@ -276,7 +276,6 @@ func TestResponseHeadersRespectTrailerAnnouncements(t *testing.T) {
 		Header: http.Header{
 			"X-Collision": {"initial-a", "initial-b"},
 			"X-Replace":   {"upstream-a", "upstream-b"},
-			"x-replace":   {"upstream-lowercase"},
 		},
 		Trailer: http.Header{"x-collision": nil},
 	}

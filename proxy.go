@@ -130,8 +130,7 @@ func newReverseProxy(
 	}
 	if !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
 		proxy.ModifyResponse = func(response *http.Response) error {
-			applyResponseHeaders(response, siteResponseHeaders)
-			applyResponseHeaders(response, routeResponseHeaders)
+			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
 			return nil
 		}
 	}
@@ -144,9 +143,10 @@ func emptyResponseHeaderPolicy(policy responseHeaderPolicy) bool {
 
 func applyResponseHeaders(response *http.Response, policy responseHeaderPolicy) {
 	for _, name := range policy.Remove {
-		if !containsHeaderName(response.Trailer, name) {
-			deleteResponseHeader(response.Header, name)
+		if containsHeaderName(response.Trailer, name) {
+			continue
 		}
+		delete(response.Header, name)
 	}
 	if response.Header == nil && (len(policy.Set) > 0 || len(policy.Add) > 0) {
 		response.Header = make(http.Header, len(policy.Set)+len(policy.Add))
@@ -155,35 +155,23 @@ func applyResponseHeaders(response *http.Response, policy responseHeaderPolicy) 
 		if containsHeaderName(response.Trailer, name) {
 			continue
 		}
-		deleteResponseHeader(response.Header, name)
 		response.Header[name] = append([]string(nil), values...)
 	}
 	for name, values := range policy.Add {
 		if containsHeaderName(response.Trailer, name) {
 			continue
 		}
-		response.Header[name] = append(headerValuesFor(response.Header, name), values...)
+		current := response.Header[name]
+		combined := make([]string, 0, len(current)+len(values))
+		combined = append(combined, current...)
+		response.Header[name] = append(combined, values...)
 	}
 }
 
-func deleteResponseHeader(headers http.Header, name string) {
-	for existing := range headers {
-		if strings.EqualFold(existing, name) {
-			delete(headers, existing)
-		}
-	}
-}
-
-func headerValuesFor(headers http.Header, name string) []string {
-	values := append([]string(nil), headers[name]...)
-	delete(headers, name)
-	for existing, existingValues := range headers {
-		if strings.EqualFold(existing, name) {
-			values = append(values, existingValues...)
-			delete(headers, existing)
-		}
-	}
-	return values
+func applyResponseHeaderPolicies(response *http.Response, site, route responseHeaderPolicy) {
+	// net/http.Transport and resolveResponseHeaders canonicalize these names.
+	applyResponseHeaders(response, site)
+	applyResponseHeaders(response, route)
 }
 
 func containsHeaderName(headers http.Header, name string) bool {
