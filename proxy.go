@@ -339,6 +339,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 }
 
 func (b *backend) nextTargetIndex() int {
+	// Keep this shape small enough for nextTarget to inline.
 	count := len(b.targets)
 	if len(b.schedule) > 0 {
 		count = len(b.schedule)
