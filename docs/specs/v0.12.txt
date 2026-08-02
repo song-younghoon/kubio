@@ -1,0 +1,140 @@
+Kubio kubio.json v0.12 Proposal
+Status: Agreed specification
+Base: v0.11
+
+
+1. Scope
+
+v0.12 replaces the fixed `retry.delay` pause with bounded exponential retry
+backoff for named backends. It supports deterministic backoff and optional
+full jitter. Adaptive backoff is outside this version.
+
+This is the complete v0.12 scope. It does not add request-body replay,
+configurable idempotency, retry budgets, health checks, weighted targets,
+direct-target timeout options, HTTPS upstream CA/SNI settings, advanced route
+conditions, client-facing TLS features, observability, routing actions,
+gateway features, or additional header policies. Those items are carried to
+docs/proposals/v0.13.txt.
+
+
+2. Configuration
+
+The named-backend `retry` object may replace v0.11's `delay` field with the
+following optional `backoff` object:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": ["http://app-1:3000", "http://app-2:3000"],
+          "tries": 2,
+          "retry": {
+            "status": [502, 503, 504],
+            "backoff": {
+              "base": "100ms",
+              "cap": "2s",
+              "jitter": "full"
+            },
+            "deadline": "5s"
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`retry.status` and `retry.deadline` retain v0.11 rules. `backoff` is optional;
+when present it must contain positive Go duration strings `base` and `cap`,
+and `cap` must be greater than or equal to `base`. `jitter` is optional and
+accepts only `none` or `full`; it defaults to `none`. Duration strings are
+case-sensitive, are not trimmed, and do not support environment expansion.
+
+`retry` permits only `status`, `backoff`, and `deadline`; `backoff` permits
+only `base`, `cap`, and `jitter`. The v0.11 `retry.delay` field is removed;
+`retry.delay`, `retry.backoff.delay`, all aliases, and every other unknown key
+are configuration errors. No v0.11 compatibility alias is accepted. Nulls,
+numbers, empty strings, zero or negative durations, invalid jitter values,
+duplicate keys, and placement outside a named backend are also errors.
+
+
+3. Backoff behavior
+
+For an eligible request, Kubio waits before each additional attempt after the
+previous transport error or after the previous matching terminal response has
+been closed. There is no wait before the first attempt and no wait after the
+final allowed attempt. Backoff applies to both transport-error and status
+retries.
+
+For additional attempt number `n`, where the first additional attempt is
+`n = 1`, the deterministic delay is:
+
+    min(cap, base * 2^(n - 1))
+
+`n` is the one-based ordinal of every additional Kubio attempt in the single
+attempt sequence, regardless of whether the preceding retry cause was a
+transport error or matching status. It is not reset by retry cause.
+
+The calculation saturates at `cap`; duration overflow never wraps around to a
+shorter delay. With `jitter: "none"`, Kubio waits exactly that duration. With
+`jitter: "full"`, Kubio uses a concurrency-safe non-cryptographic
+pseudo-random generator to choose a duration for each wait. Durations are
+integer nanoseconds, and the sample is uniform over integer values `d` where
+`0 <= d < deterministic delay`. Jitter has no configurable seed, no exact
+sequence or seed reproducibility guarantee across requests, reloads,
+goroutines, or process runs, and is not a security feature.
+
+The wait observes the active request context, including `retry.deadline`. If
+the context ends during a wait, Kubio starts no further attempt and returns
+the context error. A discarded matching response remains discarded.
+
+
+4. Interaction with prior retry rules
+
+The v0.11 method, body, upgrade, informational-response, target-order,
+selector, response-discard, final-body deadline, and direct-target rules remain
+unchanged. `retry.deadline` covers backoff waits and retains its total-duration
+semantics. A backoff wait is configured only for the named-backend retry state;
+direct targets and requests ineligible for retry retain their prior behavior.
+
+When `retry` is absent, the v0.6 transport-error path remains unchanged. When
+`backoff` is absent, retries continue immediately as in v0.11. The final
+response alone reaches response policies, the client, and the access log.
+
+
+5. Reload and diagnostics
+
+Backoff values are parsed and validated while building the named backend at
+startup and config reload. A valid reload publishes the complete new router
+and fresh backend selectors atomically. An invalid backoff object rejects the
+whole reload and retains the previous generation.
+
+Errors may identify the backend and `retry.backoff` field, but must not expose
+unrelated secrets. No request-path config read, duration parsing, random seed
+setup, or reload lock is introduced.
+
+
+6. Performance constraints
+
+When `retry` is absent, the v0.10/v0.11 fast paths remain unchanged. When
+`backoff` is absent, no backoff timer or random number is created; any
+`retry.deadline` timer remains as specified by v0.11. Backoff parameters are
+parsed once during config construction. Jitter is generated only when a wait
+is actually required, and status membership remains O(1).
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.13:
+
+- Request-body replay and explicit idempotency policies.
+- Adaptive retry backoff and retry budgets.
+- Active/passive health checks and weighted target selection.
+- Direct-target timeout options, response-body timeouts, and HTTPS upstream
+  CA/SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  and additional header policies.
