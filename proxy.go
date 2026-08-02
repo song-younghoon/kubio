@@ -76,6 +76,9 @@ type retryBudget struct {
 }
 
 func (b *retryBudget) reserve(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -385,7 +388,7 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 			}
 			if b.budget != nil {
 				if admissionErr := b.budget.reserve(ctx); admissionErr != nil {
-					if errors.Is(admissionErr, errRetryBudgetExceeded) {
+					if admissionErr == errRetryBudgetExceeded {
 						return nil, err
 					}
 					return nil, admissionErr
@@ -413,7 +416,7 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 		}
 		if b.budget != nil {
 			if admissionErr := b.budget.reserve(ctx); admissionErr != nil {
-				if errors.Is(admissionErr, errRetryBudgetExceeded) {
+				if admissionErr == errRetryBudgetExceeded {
 					return response, nil
 				}
 				if response.Body != nil {
