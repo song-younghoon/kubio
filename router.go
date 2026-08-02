@@ -2,16 +2,21 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 const routeIndexThreshold = 8
 
 type router struct {
+	accessLogger  *log.Logger
 	sites         []site
 	trustProxies  []netip.Prefix
 	exactHosts    map[string]int
@@ -78,6 +83,10 @@ func newRouter(cfg config) (*router, error) {
 		exactHosts:    make(map[string]int),
 		wildcardHosts: make(map[string]int),
 		starSite:      -1,
+	}
+	if cfg.Log {
+		signal.Ignore(syscall.SIGPIPE)
+		r.accessLogger = stdoutAccessLogger
 	}
 
 	for siteIndex, siteConfig := range cfg.Sites {
@@ -249,6 +258,18 @@ func parseTrustedProxies(raw []string) ([]netip.Prefix, error) {
 }
 
 func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.accessLogger != nil {
+		r.serveLogged(w, req)
+		return
+	}
+	r.serveHTTP(w, req)
+}
+
+func (r *router) serveHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodOptions && req.RequestURI == "*" {
+		serveGeneralOptions(w, req)
+		return
+	}
 	host := normalizeHost(req.Host)
 	selected := r.selectSite(host)
 	if selected == nil {
@@ -266,6 +287,19 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		stripRequestPath(req, selectedRoute.prefix)
 	}
 	selectedRoute.route.proxy.ServeHTTP(w, req)
+}
+
+func serveGeneralOptions(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Length", "0")
+	if req.ContentLength == 0 {
+		return
+	}
+	limitWriter := w
+	if unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter }); ok {
+		limitWriter = unwrapper.Unwrap()
+	}
+	body := http.MaxBytesReader(limitWriter, req.Body, 4<<10)
+	_, _ = io.Copy(io.Discard, body)
 }
 
 func (s *site) buildRouteIndex() {

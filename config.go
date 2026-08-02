@@ -14,6 +14,7 @@ import (
 
 type config struct {
 	Listen       string                   `json:"listen"`
+	Log          bool                     `json:"log"`
 	TrustProxies []string                 `json:"trustProxies"`
 	Backends     map[string]backendConfig `json:"backends"`
 	Sites        []siteConfig             `json:"sites"`
@@ -57,6 +58,7 @@ type responseHeaderPolicy struct {
 
 type rawConfig struct {
 	Listen       *string          `json:"listen"`
+	Log          strictBool       `json:"log"`
 	TrustProxies stringArray      `json:"trustProxies"`
 	Backends     rawBackends      `json:"backends"`
 	Sites        *[]rawSiteConfig `json:"sites"`
@@ -348,6 +350,7 @@ func decodeConfig(data []byte) (config, error) {
 
 	cfg := config{
 		Listen:       *raw.Listen,
+		Log:          bool(raw.Log),
 		TrustProxies: append([]string(nil), raw.TrustProxies...),
 		Backends:     make(map[string]backendConfig, len(raw.Backends)),
 		Sites:        make([]siteConfig, len(*raw.Sites)),
@@ -534,7 +537,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 	switch schema {
 	case jsonRoot:
 		switch key {
-		case "listen", "trustProxies":
+		case "listen", "log", "trustProxies":
 			return jsonAny, nil
 		case "backends":
 			return jsonBackends, nil

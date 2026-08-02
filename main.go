@@ -42,7 +42,12 @@ func main() {
 
 	handler := newReloadableRouter(initial)
 	go watchConfig(configPath, cfg.Listen, initialState, handler)
-	log.Fatal(http.ListenAndServe(cfg.Listen, handler))
+	server := &http.Server{
+		Addr:                         cfg.Listen,
+		Handler:                      handler,
+		DisableGeneralOptionsHandler: true,
+	}
+	log.Fatal(server.ListenAndServe())
 }
 
 func newReloadableRouter(initial *router) *reloadableRouter {
