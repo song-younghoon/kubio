@@ -199,7 +199,7 @@ func newBackends(configs map[string]backendConfig) (map[string]*backend, error) 
 		if name == "" {
 			return nil, fmt.Errorf("backend name must not be empty")
 		}
-		backend, err := newBackend(cfg.Targets)
+		backend, err := newBackend(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("backends[%q]: %w", name, err)
 		}

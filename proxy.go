@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/netip"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"sync"
@@ -22,14 +24,16 @@ const (
 	proxyMaxIdleConnsPerHost = 32
 )
 
-var proxyTransport = func() *http.Transport {
+var proxyTransport = newProxyTransport(proxyDialTimeout, proxyResponseHeaderLimit)
+
+func newProxyTransport(dialTimeout, responseHeaderTimeout time.Duration) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{Timeout: proxyDialTimeout}).DialContext
-	transport.TLSHandshakeTimeout = proxyDialTimeout
-	transport.ResponseHeaderTimeout = proxyResponseHeaderLimit
+	transport.DialContext = (&net.Dialer{Timeout: dialTimeout}).DialContext
+	transport.TLSHandshakeTimeout = dialTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.MaxIdleConnsPerHost = proxyMaxIdleConnsPerHost
 	return transport
-}()
+}
 
 var proxyBuffers proxyBufferPool
 
@@ -39,8 +43,12 @@ type proxyBufferPool struct {
 
 type backend struct {
 	targets   []*url.URL
+	tries     int
+	transport *http.Transport
 	nextIndex atomic.Uint64
 }
+
+type backendRetryKey struct{}
 
 func (p *proxyBufferPool) Get() []byte {
 	if buffer := p.pool.Get(); buffer != nil {
@@ -55,13 +63,33 @@ func (p *proxyBufferPool) Put(buffer []byte) {
 	}
 }
 
-func newBackend(rawTargets []string) (*backend, error) {
-	if len(rawTargets) == 0 {
+func newBackend(cfg backendConfig) (*backend, error) {
+	if len(cfg.Targets) == 0 {
 		return nil, fmt.Errorf("targets must not be empty")
 	}
-	targets := make([]*url.URL, len(rawTargets))
-	seen := make(map[string]struct{}, len(rawTargets))
-	for index, raw := range rawTargets {
+	tries := cfg.Tries
+	if tries == 0 {
+		tries = 1
+	}
+	if tries < 1 || tries > len(cfg.Targets) {
+		return nil, fmt.Errorf("tries must be between 1 and the target count")
+	}
+	dialTimeout := cfg.Timeout.Dial
+	if dialTimeout == 0 {
+		dialTimeout = proxyDialTimeout
+	} else if dialTimeout < 0 {
+		return nil, fmt.Errorf("timeout.dial must be greater than zero")
+	}
+	responseHeaderTimeout := cfg.Timeout.Header
+	if responseHeaderTimeout == 0 {
+		responseHeaderTimeout = proxyResponseHeaderLimit
+	} else if responseHeaderTimeout < 0 {
+		return nil, fmt.Errorf("timeout.header must be greater than zero")
+	}
+
+	targets := make([]*url.URL, len(cfg.Targets))
+	seen := make(map[string]struct{}, len(cfg.Targets))
+	for index, raw := range cfg.Targets {
 		if _, exists := seen[raw]; exists {
 			return nil, fmt.Errorf("targets contains duplicate %q", raw)
 		}
@@ -72,12 +100,16 @@ func newBackend(rawTargets []string) (*backend, error) {
 		}
 		targets[index] = target
 	}
-	return &backend{targets: targets}, nil
+	return &backend{
+		targets:   targets,
+		tries:     tries,
+		transport: newProxyTransport(dialTimeout, responseHeaderTimeout),
+	}, nil
 }
 
-func (b *backend) nextTarget() *url.URL {
+func (b *backend) nextTargetIndex() int {
 	if len(b.targets) == 1 {
-		return b.targets[0]
+		return 0
 	}
 	for {
 		current := b.nextIndex.Load()
@@ -86,9 +118,86 @@ func (b *backend) nextTarget() *url.URL {
 			next = 0
 		}
 		if b.nextIndex.CompareAndSwap(current, next) {
-			return b.targets[current]
+			return int(current)
 		}
 	}
+}
+
+func (b *backend) nextTarget() *url.URL {
+	return b.targets[b.nextTargetIndex()]
+}
+
+func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
+	start := b.nextTargetIndex()
+	attempts := 1
+	retryable, marked := request.Context().Value(backendRetryKey{}).(bool)
+	if !marked {
+		retryable = retryableBackendRequest(request)
+	}
+	if b.tries > 1 && retryable {
+		attempts = b.tries
+	}
+
+	var lastErr error
+	for attempt := range attempts {
+		outgoing := request.Clone(request.Context())
+		requestURL := *request.URL
+		target := b.targets[(start+attempt)%len(b.targets)]
+		requestURL.Scheme = target.Scheme
+		requestURL.Host = target.Host
+		outgoing.URL = &requestURL
+
+		var informational atomic.Bool
+		trace := &httptrace.ClientTrace{Got1xxResponse: func(int, textproto.MIMEHeader) error {
+			informational.Store(true)
+			return nil
+		}}
+		outgoing = outgoing.WithContext(httptrace.WithClientTrace(outgoing.Context(), trace))
+
+		response, err := b.transport.RoundTrip(outgoing)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if informational.Load() || request.Context().Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+func retryableBackendRequest(request *http.Request) bool {
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+	default:
+		return false
+	}
+	if request.ContentLength != 0 || len(request.TransferEncoding) != 0 || len(request.Trailer) != 0 ||
+		request.Body != nil && request.Body != http.NoBody {
+		return false
+	}
+	return !upgradeRequest(request)
+}
+
+func upgradeRequest(request *http.Request) bool {
+	protocol := false
+	for _, value := range request.Header.Values("Upgrade") {
+		if strings.TrimSpace(value) != "" {
+			protocol = true
+			break
+		}
+	}
+	if !protocol {
+		return false
+	}
+	for _, value := range request.Header.Values("Connection") {
+		for token := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func newProxy(
@@ -113,9 +222,14 @@ func newBackendProxy(
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
 ) *httputil.ReverseProxy {
-	return newReverseProxy(func(request *httputil.ProxyRequest) {
-		rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
+	proxy := newReverseProxy(func(request *httputil.ProxyRequest) {
+		request.Out = request.Out.WithContext(context.WithValue(
+			request.Out.Context(), backendRetryKey{}, retryableBackendRequest(request.In),
+		))
+		rewriteProxyRequest(request, backend.targets[0], headers, trustProxies)
 	}, siteResponseHeaders, routeResponseHeaders)
+	proxy.Transport = backend
+	return proxy
 }
 
 func newReverseProxy(

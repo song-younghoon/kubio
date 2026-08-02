@@ -15,7 +15,7 @@ func BenchmarkBackendSelection(b *testing.B) {
 			for index := range targets {
 				targets[index] = "http://backend-" + strconv.Itoa(index) + ":3000"
 			}
-			backend, err := newBackend(targets)
+			backend, err := newBackend(backendConfig{Targets: targets})
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -29,11 +29,11 @@ func BenchmarkBackendSelection(b *testing.B) {
 }
 
 func BenchmarkBackendSelectionParallel(b *testing.B) {
-	backend, err := newBackend([]string{
+	backend, err := newBackend(backendConfig{Targets: []string{
 		"http://backend-0:3000",
 		"http://backend-1:3000",
 		"http://backend-2:3000",
-	})
+	}})
 	if err != nil {
 		b.Fatal(err)
 	}

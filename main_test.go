@@ -393,7 +393,7 @@ func TestBackendSelectionIsConsumedOnFailureAndStatus(t *testing.T) {
 }
 
 func TestBackendSelectionIsConcurrencySafe(t *testing.T) {
-	backend, err := newBackend([]string{"http://a:3000", "http://b:3000", "http://c:3000"})
+	backend, err := newBackend(backendConfig{Targets: []string{"http://a:3000", "http://b:3000", "http://c:3000"}})
 	if err != nil {
 		t.Fatal(err)
 	}

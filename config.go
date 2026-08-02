@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type config struct {
@@ -19,7 +20,14 @@ type config struct {
 }
 
 type backendConfig struct {
-	Targets []string `json:"targets"`
+	Targets []string       `json:"targets"`
+	Tries   int            `json:"tries"`
+	Timeout backendTimeout `json:"timeout"`
+}
+
+type backendTimeout struct {
+	Dial   time.Duration
+	Header time.Duration
 }
 
 type siteConfig struct {
@@ -55,7 +63,14 @@ type rawConfig struct {
 }
 
 type rawBackendConfig struct {
-	Targets *stringArray `json:"targets"`
+	Targets *stringArray      `json:"targets"`
+	Tries   optionalInt       `json:"tries"`
+	Timeout rawBackendTimeout `json:"timeout"`
+}
+
+type rawBackendTimeout struct {
+	Dial   optionalDuration `json:"dial"`
+	Header optionalDuration `json:"header"`
 }
 
 type rawSiteConfig struct {
@@ -99,6 +114,16 @@ type optionalHeaderValues struct {
 	values headerValues
 }
 
+type optionalInt struct {
+	set   bool
+	value int
+}
+
+type optionalDuration struct {
+	set   bool
+	value time.Duration
+}
+
 type strictBool bool
 
 func (b *rawBackends) UnmarshalJSON(data []byte) error {
@@ -120,6 +145,27 @@ func (b *rawBackendConfig) UnmarshalJSON(data []byte) error {
 	}
 	type plain rawBackendConfig
 	return json.Unmarshal(data, (*plain)(b))
+}
+
+func (t *rawBackendTimeout) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Dial   optionalDuration `json:"dial"`
+		Header optionalDuration `json:"header"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Dial.set && !decoded.Header.set {
+		return fmt.Errorf("must contain dial or header")
+	}
+	*t = rawBackendTimeout{Dial: decoded.Dial, Header: decoded.Header}
+	return nil
 }
 
 func (a *stringArray) UnmarshalJSON(data []byte) error {
@@ -226,6 +272,37 @@ func (h *optionalHeaderValues) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (i *optionalInt) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("null")) || bytes.ContainsAny(data, ".eE") {
+		return fmt.Errorf("must be an integer without a decimal point or exponent")
+	}
+	var value int
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("must be an integer without a decimal point or exponent")
+	}
+	i.set = true
+	i.value = value
+	return nil
+}
+
+func (d *optionalDuration) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("must be a positive Go duration string")
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("must be a positive Go duration string")
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return fmt.Errorf("must be a positive Go duration string")
+	}
+	d.set = true
+	d.value = duration
+	return nil
+}
+
 func (b *strictBool) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return fmt.Errorf("must be a boolean")
@@ -282,7 +359,21 @@ func decodeConfig(data []byte) (config, error) {
 		if rawBackend.Targets == nil || len(*rawBackend.Targets) == 0 {
 			return config{}, fmt.Errorf("backends[%q].targets must not be empty", name)
 		}
-		cfg.Backends[name] = backendConfig{Targets: append([]string(nil), (*rawBackend.Targets)...)}
+		tries := 1
+		if rawBackend.Tries.set {
+			tries = rawBackend.Tries.value
+			if tries < 1 || tries > len(*rawBackend.Targets) {
+				return config{}, fmt.Errorf("backends[%q].tries must be between 1 and the target count", name)
+			}
+		}
+		cfg.Backends[name] = backendConfig{
+			Targets: append([]string(nil), (*rawBackend.Targets)...),
+			Tries:   tries,
+			Timeout: backendTimeout{
+				Dial:   rawBackend.Timeout.Dial.value,
+				Header: rawBackend.Timeout.Header.value,
+			},
+		}
 	}
 	for siteIndex, rawSite := range *raw.Sites {
 		if rawSite.Hosts == nil || len(*rawSite.Hosts) == 0 {
@@ -374,6 +465,7 @@ const (
 	jsonRoute
 	jsonHeaders
 	jsonResponseHeaders
+	jsonBackendTimeout
 )
 
 func consumeJSONValue(decoder *json.Decoder, schema jsonSchema) error {
@@ -453,7 +545,16 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 	case jsonBackends:
 		return jsonBackend, nil
 	case jsonBackend:
-		if key == "targets" {
+		switch key {
+		case "targets", "tries":
+			return jsonAny, nil
+		case "timeout":
+			return jsonBackendTimeout, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackendTimeout:
+		switch key {
+		case "dial", "header":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
