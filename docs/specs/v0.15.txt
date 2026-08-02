@@ -1,0 +1,136 @@
+Kubio kubio.json v0.15 Proposal
+Status: Agreed specification
+Base: v0.14
+
+
+1. Scope
+
+v0.15 adds weighted target selection to named backends. The weight affects
+which target receives the first attempt of each new request. Existing retry
+target order, retry budgets, backoff, deadlines, route matching, direct
+targets, and config reload behavior remain unchanged.
+
+This is the complete v0.15 scope. Active and passive health checks, target
+ejection, direct-target timeout options, HTTPS upstream CA/SNI settings,
+adaptive backoff, advanced route conditions, client-facing TLS, observability,
+administration, routing actions, gateway features, and additional header
+policies move to docs/proposals/v0.16.txt.
+
+
+2. Configuration
+
+The named-backend `weights` array is optional and has the same number of
+entries as `targets`:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": ["http://app-1:3000", "http://app-2:3000"],
+          "weights": [3, 1],
+          "tries": 2,
+          "retry": {
+            "status": [502, 503, 504],
+            "budget": {"max": 1000, "window": "1s"}
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`weights` is allowed only inside a named backend. If it is absent, every
+target has weight 1. If it is present, it must be a non-empty array whose
+length exactly matches `targets`. Each item is a base-10 JSON integer from 1
+through 1000 inclusive. The sum of all weights must not exceed 10000.
+
+Unknown fields, aliases, nulls, non-integer numbers, decimal or exponent
+notation, zero or negative values, a length mismatch, and duplicate JSON keys
+are configuration errors. The complete named-backend key set is `targets`,
+`weights`, `tries`, `timeout`, and `retry`; the existing nested key sets remain
+unchanged. The existing `targets` and `tries` validation is unchanged.
+
+
+3. Weighted selection
+
+Kubio builds one immutable weighted schedule while constructing each backend
+generation. The schedule contains target indexes and has one slot per weight
+unit. It is generated with smooth weighted round-robin:
+
+1. Start every target's current score at zero.
+2. For each schedule slot, add each target's weight to its current score.
+3. Select the target with the greatest score; ties select the lower target
+   index.
+4. Subtract the sum of all weights from the selected target's score.
+5. Append the selected index and repeat until the schedule has one slot per
+   weight unit.
+
+For example, weights `[3, 1]` produce the repeating schedule `[0, 0, 1, 0]`.
+Over a complete schedule cycle, each target receives a number of first
+attempts proportional to its weight, with deterministic ordering and no
+random numbers.
+
+Each new request atomically claims one schedule slot. The claimed target is
+the request's first target. A request does not claim additional schedule slots
+for retries. Its subsequent attempts retain the v0.14 target-order rule and
+use the next configured target indexes after the selected first target,
+wrapping at the end. Therefore `tries` still bounds attempts by the target
+count and weights do not cause a request to retry the same target solely due
+to a repeated schedule slot.
+
+Direct site and route targets are not weighted. A backend with one target, or
+with all weights equal, retains its existing selection behavior.
+
+
+4. Reload and request isolation
+
+The weighted schedule is built and validated before a backend is published.
+An invalid `weights` value rejects the whole startup or reload. Startup
+errors terminate the program; reload errors are logged and retain the current
+router and backend generation.
+
+A valid reload publishes a fresh schedule atomically. Each new backend
+generation initializes its schedule cursor at slot zero. A successful reload
+therefore resets the new cursor to slot zero even when the weights are
+unchanged; a rejected reload preserves the existing cursor. Concurrent claims
+are ordered by the cursor's atomic linearization. A request that has already
+selected a backend keeps that generation and its selected first target for all
+of its attempts. A reload does not change an in-flight request.
+
+
+5. Interaction with v0.14
+
+All v0.14 retry rules remain in force. In particular, `tries` and target order,
+retry method/body eligibility, status handling, response closing, backoff,
+deadline, retry budget admission, and direct-target behavior are unchanged.
+Weights select only the initial target; they do not alter retry budget charging
+or the backoff ordinal.
+
+
+6. Performance constraints
+
+Schedule construction is O(target-count × sum(weights)) time and O(sum(weights))
+memory and occurs only during backend construction or reload. The request path
+performs one atomic counter operation and one indexed lookup; it allocates no
+schedule state and takes no mutex.
+When `weights` is absent, the existing target-count round-robin path remains
+available without constructing an expanded schedule.
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.16:
+
+- Active and passive health checks and target ejection.
+- Adaptive backoff.
+- Direct-target connection, response-header, and response-body timeout
+  options.
+- HTTPS upstream CA and SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  and policies for Kubio-generated or intermediate responses.
