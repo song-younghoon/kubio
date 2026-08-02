@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -294,5 +296,69 @@ func TestUnavailableRuntimeCertificateFailsLookup(t *testing.T) {
 	}
 	if _, err := newReloadableRouter(router, nil).GetCertificate(nil); err == nil {
 		t.Fatal("missing runtime certificate was accepted")
+	}
+}
+
+func TestReloadableRouterPublishesCompleteGenerations(t *testing.T) {
+	firstRouter := &router{}
+	secondRouter := &router{}
+	firstCertificate := &tls.Certificate{}
+	secondCertificate := &tls.Certificate{}
+	handler := newReloadableRouter(firstRouter, firstCertificate)
+	var invalid atomic.Bool
+	var observations atomic.Uint64
+	var observedOnce sync.Once
+	observed := make(chan struct{})
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				generation := handler.current.Load()
+				if generation.router == firstRouter {
+					if generation.certificate != firstCertificate {
+						invalid.Store(true)
+					}
+				} else if generation.router == secondRouter {
+					if generation.certificate != secondCertificate {
+						invalid.Store(true)
+					}
+				} else {
+					invalid.Store(true)
+				}
+				observations.Add(1)
+				observedOnce.Do(func() { close(observed) })
+			}
+		}()
+	}
+	close(start)
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("generation reader did not start")
+	}
+	for index := range 1000 {
+		if index%2 == 0 {
+			handler.StoreGeneration(secondRouter, secondCertificate)
+		} else {
+			handler.StoreGeneration(firstRouter, firstCertificate)
+		}
+	}
+	close(stop)
+	readers.Wait()
+	if observations.Load() == 0 {
+		t.Fatal("generation reader observed no generations")
+	}
+	if invalid.Load() {
+		t.Fatal("observed a partially published runtime generation")
 	}
 }
