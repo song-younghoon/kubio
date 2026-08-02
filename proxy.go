@@ -480,7 +480,7 @@ func (b *backend) observeAttempt(index int, ctx context.Context, informational b
 	}
 }
 
-func (b *backend) nextTarget() *url.URL {
+func (b *backend) nextScheduledTarget() *url.URL {
 	return b.targets[b.nextScheduledTargetIndex()]
 }
 
@@ -879,7 +879,7 @@ func newBackendProxy(
 	transport := http.RoundTripper(backend)
 	if backend.tries == 1 && backend.health == nil {
 		rewrite = func(request *httputil.ProxyRequest) {
-			rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
+			rewriteProxyRequest(request, backend.nextScheduledTarget(), headers, trustProxies)
 		}
 		transport = backend.transport
 	}

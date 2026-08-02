@@ -407,7 +407,7 @@ func TestBackendSelectionIsConcurrencySafe(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
-			selected <- backend.nextTarget().Hostname()
+			selected <- backend.nextScheduledTarget().Hostname()
 		}()
 	}
 	close(start)
@@ -434,7 +434,7 @@ func TestBackendWeightedSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index, want := range []string{"a", "a", "b", "a", "a", "a", "b", "a"} {
-		if got := backend.nextTarget().Hostname(); got != want {
+		if got := backend.nextScheduledTarget().Hostname(); got != want {
 			t.Fatalf("selection %d = %q, want %q", index, got, want)
 		}
 	}

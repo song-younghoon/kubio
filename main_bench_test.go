@@ -24,7 +24,7 @@ func BenchmarkBackendSelection(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				_ = backend.nextTarget()
+				_ = backend.nextScheduledTarget()
 			}
 		})
 	}
@@ -42,7 +42,7 @@ func BenchmarkBackendSelectionParallel(b *testing.B) {
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			_ = backend.nextTarget()
+			_ = backend.nextScheduledTarget()
 		}
 	})
 }
@@ -58,7 +58,7 @@ func BenchmarkBackendWeightedSelection(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = backend.nextTarget()
+		_ = backend.nextScheduledTarget()
 	}
 }
 
@@ -73,7 +73,7 @@ func BenchmarkBackendWeightedSelectionParallel(b *testing.B) {
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			_ = backend.nextTarget()
+			_ = backend.nextScheduledTarget()
 		}
 	})
 }
