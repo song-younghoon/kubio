@@ -49,8 +49,8 @@ type routeCondition struct {
 	alternatives []string
 }
 
-type routeRequest struct {
-	request     *http.Request
+type routeMatchState struct {
+	req         *http.Request
 	query       url.Values
 	queryParsed bool
 	queryValid  bool
@@ -221,9 +221,12 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 }
 
 func compileRouteMatch(config routeMatchConfig) routeMatch {
-	match := routeMatch{
-		header: make([]routeCondition, 0, len(config.Header)),
-		query:  make([]routeCondition, 0, len(config.Query)),
+	var match routeMatch
+	if len(config.Header) > 0 {
+		match.header = make([]routeCondition, 0, len(config.Header))
+	}
+	if len(config.Query) > 0 {
+		match.query = make([]routeCondition, 0, len(config.Query))
 	}
 	for name, alternatives := range config.Header {
 		match.header = append(match.header, routeCondition{name: name, alternatives: alternatives})
@@ -354,12 +357,12 @@ func (s *site) buildRouteIndex() {
 
 func (s *site) selectRoute(req *http.Request) routeCandidate {
 	path := req.URL.Path
-	request := routeRequest{request: req}
+	state := routeMatchState{req: req}
 	if s.exactRoutes == nil {
 		var selected routeCandidate
 		for index := range s.routes {
 			prefix, ok := s.routes[index].pattern.match(path)
-			if !ok || !request.matches(&s.routes[index]) {
+			if !ok || !state.matches(&s.routes[index]) {
 				continue
 			}
 			candidate := s.routeCandidate(index)
@@ -373,7 +376,7 @@ func (s *site) selectRoute(req *http.Request) routeCandidate {
 
 	var selected routeCandidate
 	for _, index := range s.exactRoutes[path] {
-		if !request.matches(&s.routes[index]) {
+		if !state.matches(&s.routes[index]) {
 			continue
 		}
 		candidate := s.routeCandidate(index)
@@ -386,7 +389,7 @@ func (s *site) selectRoute(req *http.Request) routeCandidate {
 	}
 
 	for _, index := range s.wildcardRoutes[""] {
-		if request.matches(&s.routes[index]) {
+		if state.matches(&s.routes[index]) {
 			candidate := s.routeCandidate(index)
 			if selected.route == nil || betterRoute(candidate, selected) {
 				selected = candidate
@@ -398,7 +401,7 @@ func (s *site) selectRoute(req *http.Request) routeCandidate {
 			continue
 		}
 		for _, routeIndex := range s.wildcardRoutes[path[:index]] {
-			if !request.matches(&s.routes[routeIndex]) {
+			if !state.matches(&s.routes[routeIndex]) {
 				continue
 			}
 			candidate := s.routeCandidate(routeIndex)
@@ -408,7 +411,7 @@ func (s *site) selectRoute(req *http.Request) routeCandidate {
 		}
 	}
 	for _, routeIndex := range s.wildcardRoutes[path] {
-		if !request.matches(&s.routes[routeIndex]) {
+		if !state.matches(&s.routes[routeIndex]) {
 			continue
 		}
 		candidate := s.routeCandidate(routeIndex)
@@ -419,18 +422,12 @@ func (s *site) selectRoute(req *http.Request) routeCandidate {
 	return selected
 }
 
-func (m *routeRequest) matches(route *route) bool {
-	if !route.matchesMethod(m.request.Method) {
+func (m *routeMatchState) matches(route *route) bool {
+	if !route.matchesMethod(m.req.Method) {
 		return false
 	}
 	for _, condition := range route.match.header {
-		if condition.name == "Host" {
-			if m.request.Host == "" || !matchesAny([]string{m.request.Host}, condition.alternatives) {
-				return false
-			}
-			continue
-		}
-		if !matchesAny(m.request.Header.Values(condition.name), condition.alternatives) {
+		if !matchesRequestHeader(m.req, condition) {
 			return false
 		}
 	}
@@ -439,7 +436,7 @@ func (m *routeRequest) matches(route *route) bool {
 	}
 	if !m.queryParsed {
 		var err error
-		m.query, err = url.ParseQuery(m.request.URL.RawQuery)
+		m.query, err = url.ParseQuery(m.req.URL.RawQuery)
 		m.queryValid = err == nil
 		m.queryParsed = true
 	}
@@ -452,6 +449,30 @@ func (m *routeRequest) matches(route *route) bool {
 		}
 	}
 	return true
+}
+
+func matchesRequestHeader(req *http.Request, condition routeCondition) bool {
+	if condition.name == "Host" {
+		return req.Host != "" && matchesValue(req.Host, condition.alternatives)
+	}
+	if matchesAny(req.Header[condition.name], condition.alternatives) {
+		return true
+	}
+	for name, values := range req.Header {
+		if name != condition.name && strings.EqualFold(name, condition.name) && matchesAny(values, condition.alternatives) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesValue(value string, alternatives []string) bool {
+	for _, alternative := range alternatives {
+		if value == alternative {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesAny(values, alternatives []string) bool {

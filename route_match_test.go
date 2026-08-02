@@ -178,6 +178,15 @@ func TestRouteMatchesHeadersAndQuery(t *testing.T) {
 	if got := request("/inject/test", func(req *http.Request) { req.Header.Set("X-Injected", "yes") }); got != "matched|" {
 		t.Fatalf("received header did not match: %q", got)
 	}
+	if got := request("/inject/test", func(req *http.Request) { req.Header["x-injected"] = []string{"yes"} }); got != "matched|" {
+		t.Fatalf("non-canonical header did not match: %q", got)
+	}
+	if got := request("/inject/test", func(req *http.Request) {
+		req.Header["X-Injected"] = []string{"no"}
+		req.Header["x-injected"] = []string{"yes"}
+	}); got != "matched|" {
+		t.Fatalf("case-variant header values did not match: %q", got)
+	}
 	if got := request("/host/test", func(req *http.Request) { req.Host = "Example.COM.:8443" }); got != "matched|" {
 		t.Fatalf("raw Host did not match: %q", got)
 	}

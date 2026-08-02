@@ -486,8 +486,8 @@ func decodeConfig(data []byte) (config, error) {
 			}
 			if rawRoute.Match.set {
 				route.Match = &routeMatchConfig{
-					Header: copyConditionValues(rawRoute.Match.Header.values),
-					Query:  copyConditionValues(rawRoute.Match.Query.values),
+					Header: cloneConditionValues(rawRoute.Match.Header.values),
+					Query:  cloneConditionValues(rawRoute.Match.Query.values),
 				}
 			}
 			if rawRoute.Target.set {
@@ -780,15 +780,15 @@ func (m *conditionValues) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func copyConditionValues(values conditionValues) map[string][]string {
+func cloneConditionValues(values conditionValues) map[string][]string {
 	if len(values) == 0 {
 		return nil
 	}
-	copy := make(map[string][]string, len(values))
+	cloned := make(map[string][]string, len(values))
 	for name, alternatives := range values {
-		copy[name] = append([]string(nil), alternatives...)
+		cloned[name] = append([]string(nil), alternatives...)
 	}
-	return copy
+	return cloned
 }
 
 func resolveRouteMatch(raw *routeMatchConfig) (routeMatchConfig, error) {
