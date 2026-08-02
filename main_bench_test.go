@@ -407,3 +407,43 @@ func BenchmarkMethodRouteSelection(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkRouteMatchSelection(b *testing.B) {
+	api := pathPattern{path: "/api", wildcard: true, depth: 1}
+	header := route{pattern: api, match: compileRouteMatch(routeMatchConfig{Header: map[string][]string{"X-Test": {"yes"}}})}
+	query := route{pattern: api, match: compileRouteMatch(routeMatchConfig{Query: map[string][]string{"q": {"1"}}})}
+	repeat := func(value route) []route {
+		routes := make([]route, 64)
+		for index := range routes {
+			routes[index] = value
+		}
+		return routes
+	}
+	for _, test := range []struct {
+		name   string
+		routes []route
+	}{
+		{name: "header", routes: []route{header}},
+		{name: "query", routes: []route{query}},
+		{name: "header_same_path_64", routes: repeat(header)},
+		{name: "query_same_path_64", routes: repeat(query)},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			selected := site{routes: test.routes}
+			if len(test.routes) > routeIndexThreshold {
+				selected.buildRouteIndex()
+			}
+			req := httptest.NewRequest(http.MethodGet, "http://proxy/api/users?q=1", nil)
+			req.Header.Set("X-Test", "yes")
+			var result routeCandidate
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				result = selected.selectRoute(req)
+			}
+			if result.route == nil || result.index != len(test.routes)-1 {
+				b.Fatalf("selected route %d", result.index)
+			}
+		})
+	}
+}

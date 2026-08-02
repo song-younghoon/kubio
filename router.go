@@ -33,9 +33,20 @@ type site struct {
 type route struct {
 	pattern pathPattern
 	methods []string
-	match   routeMatchConfig
+	match   routeMatch
 	proxy   *httputil.ReverseProxy
 	strip   bool
+}
+
+type routeMatch struct {
+	header       []routeCondition
+	query        []routeCondition
+	alternatives int
+}
+
+type routeCondition struct {
+	name         string
+	alternatives []string
 }
 
 type routeRequest struct {
@@ -198,7 +209,7 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		s.routes = append(s.routes, route{
 			pattern: pattern,
 			methods: append([]string(nil), routeConfig.Methods...),
-			match:   match,
+			match:   compileRouteMatch(match),
 			proxy:   routeProxy,
 			strip:   routeConfig.Strip,
 		})
@@ -207,6 +218,22 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		s.buildRouteIndex()
 	}
 	return s, nil
+}
+
+func compileRouteMatch(config routeMatchConfig) routeMatch {
+	match := routeMatch{
+		header: make([]routeCondition, 0, len(config.Header)),
+		query:  make([]routeCondition, 0, len(config.Query)),
+	}
+	for name, alternatives := range config.Header {
+		match.header = append(match.header, routeCondition{name: name, alternatives: alternatives})
+		match.alternatives += len(alternatives)
+	}
+	for name, alternatives := range config.Query {
+		match.query = append(match.query, routeCondition{name: name, alternatives: alternatives})
+		match.alternatives += len(alternatives)
+	}
+	return match
 }
 
 func newBackends(configs map[string]backendConfig) (map[string]*backend, error) {
@@ -396,18 +423,18 @@ func (m *routeRequest) matches(route *route) bool {
 	if !route.matchesMethod(m.request.Method) {
 		return false
 	}
-	for name, alternatives := range route.match.Header {
-		if name == "Host" {
-			if m.request.Host == "" || !matchesAny([]string{m.request.Host}, alternatives) {
+	for _, condition := range route.match.header {
+		if condition.name == "Host" {
+			if m.request.Host == "" || !matchesAny([]string{m.request.Host}, condition.alternatives) {
 				return false
 			}
 			continue
 		}
-		if !matchesAny(m.request.Header.Values(name), alternatives) {
+		if !matchesAny(m.request.Header.Values(condition.name), condition.alternatives) {
 			return false
 		}
 	}
-	if len(route.match.Query) == 0 {
+	if len(route.match.query) == 0 {
 		return true
 	}
 	if !m.queryParsed {
@@ -419,8 +446,8 @@ func (m *routeRequest) matches(route *route) bool {
 	if !m.queryValid {
 		return false
 	}
-	for name, alternatives := range route.match.Query {
-		if !matchesAny(m.query[name], alternatives) {
+	for _, condition := range route.match.query {
+		if !matchesAny(m.query[condition.name], condition.alternatives) {
 			return false
 		}
 	}
@@ -504,7 +531,7 @@ func betterRoute(candidate, current routeCandidate) bool {
 }
 
 func (r *route) conditionCount() int {
-	count := len(r.match.Header) + len(r.match.Query)
+	count := len(r.match.header) + len(r.match.query)
 	if len(r.methods) > 0 {
 		count++
 	}
@@ -512,14 +539,7 @@ func (r *route) conditionCount() int {
 }
 
 func (r *route) alternativeCount() int {
-	count := len(r.methods)
-	for _, alternatives := range r.match.Header {
-		count += len(alternatives)
-	}
-	for _, alternatives := range r.match.Query {
-		count += len(alternatives)
-	}
-	return count
+	return len(r.methods) + r.match.alternatives
 }
 
 func newPathPattern(raw string) (pathPattern, error) {

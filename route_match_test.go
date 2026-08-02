@@ -197,8 +197,8 @@ func TestRouteMatchesHeadersAndQuery(t *testing.T) {
 
 func TestMalformedQueryOnlyRejectsQueryRoutes(t *testing.T) {
 	routes := []route{
-		{pattern: pathPattern{path: "/query", wildcard: true, depth: 1}, match: routeMatchConfig{Query: map[string][]string{"a": {"1"}}}},
-		{pattern: pathPattern{path: "/header", wildcard: true, depth: 1}, match: routeMatchConfig{Header: map[string][]string{"X-Test": {"yes"}}}},
+		{pattern: pathPattern{path: "/query", wildcard: true, depth: 1}, match: compileRouteMatch(routeMatchConfig{Query: map[string][]string{"a": {"1"}}})},
+		{pattern: pathPattern{path: "/header", wildcard: true, depth: 1}, match: compileRouteMatch(routeMatchConfig{Header: map[string][]string{"X-Test": {"yes"}}})},
 	}
 	selected := site{routes: routes}
 	query := httptest.NewRequest(http.MethodGet, "http://proxy/query/path?a=1;b=2", nil)
@@ -219,8 +219,8 @@ func TestRouteMatchPriority(t *testing.T) {
 		req.Header.Set("X-Test", "a")
 		return req
 	}
-	match := func(header, query map[string][]string) routeMatchConfig {
-		return routeMatchConfig{Header: header, Query: query}
+	match := func(header, query map[string][]string) routeMatch {
+		return compileRouteMatch(routeMatchConfig{Header: header, Query: query})
 	}
 	for _, test := range []struct {
 		name   string
@@ -294,11 +294,11 @@ func TestIndexedRouteMatchSelectionMatchesLinear(t *testing.T) {
 	for index, pattern := range patterns {
 		routes[index].pattern = pattern
 	}
-	routes[1].match.Header = map[string][]string{"X-Test": {"yes"}}
-	routes[2].match.Query = map[string][]string{"q": {"1"}}
+	routes[1].match = compileRouteMatch(routeMatchConfig{Header: map[string][]string{"X-Test": {"yes"}}})
+	routes[2].match = compileRouteMatch(routeMatchConfig{Query: map[string][]string{"q": {"1"}}})
 	routes[3].methods = []string{http.MethodPost}
-	routes[4].match.Query = map[string][]string{"ready": {""}}
-	routes[5].match.Header = map[string][]string{"Host": {"proxy"}}
+	routes[4].match = compileRouteMatch(routeMatchConfig{Query: map[string][]string{"ready": {""}}})
+	routes[5].match = compileRouteMatch(routeMatchConfig{Header: map[string][]string{"Host": {"proxy"}}})
 	linear := site{routes: routes}
 	indexed := site{routes: routes}
 	indexed.buildRouteIndex()
