@@ -204,9 +204,64 @@ func BenchmarkRouteTableSelection(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if selected.selectRoute("/api/users").route == nil {
+				if selected.selectRoute("/api/users", http.MethodGet).route == nil {
 					b.Fatal("route not selected")
 				}
+			}
+		})
+	}
+}
+
+func BenchmarkMethodRouteSelection(b *testing.B) {
+	api := pathPattern{path: "/api", wildcard: true, depth: 1}
+	duplicates := make([]route, 64)
+	for index := range duplicates {
+		duplicates[index] = route{pattern: api, methods: []string{http.MethodPost}}
+	}
+	duplicates[len(duplicates)-1].methods = []string{http.MethodGet}
+
+	for _, test := range []struct {
+		name   string
+		routes []route
+		path   string
+		method string
+		want   int
+	}{
+		{name: "unrestricted", routes: []route{{pattern: api}}, path: "/api/users"},
+		{name: "matching_method", routes: []route{{pattern: api, methods: []string{http.MethodGet}}}, path: "/api/users"},
+		{
+			name:   "matching_second_of_two",
+			routes: []route{{pattern: api, methods: []string{http.MethodGet, http.MethodHead}}},
+			path:   "/api/users",
+			method: http.MethodHead,
+		},
+		{
+			name: "method_ineligible_fallback",
+			routes: []route{
+				{pattern: pathPattern{wildcard: true}},
+				{pattern: api, methods: []string{http.MethodPost}},
+			},
+			path: "/api/users",
+		},
+		{name: "duplicate_same_path_64", routes: duplicates, path: "/api/users", want: 63},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			selected := site{routes: test.routes}
+			method := test.method
+			if method == "" {
+				method = http.MethodGet
+			}
+			if len(test.routes) > routeIndexThreshold {
+				selected.buildRouteIndex()
+			}
+			var result routeCandidate
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				result = selected.selectRoute(test.path, method)
+			}
+			if result.route == nil || result.index != test.want {
+				b.Fatalf("selected route %d, want %d", result.index, test.want)
 			}
 		})
 	}

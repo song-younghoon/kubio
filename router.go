@@ -23,12 +23,13 @@ type site struct {
 	hosts          []hostPattern
 	proxy          *httputil.ReverseProxy
 	routes         []route
-	exactRoutes    map[string]int
-	wildcardRoutes map[string]int
+	exactRoutes    map[string][]int
+	wildcardRoutes map[string][]int
 }
 
 type route struct {
 	pattern pathPattern
+	methods []string
 	proxy   *httputil.ReverseProxy
 	strip   bool
 }
@@ -134,6 +135,11 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		if err != nil {
 			return site{}, fmt.Errorf("routes[%d].path: %w", routeIndex, err)
 		}
+		if routeConfig.Methods != nil {
+			if err := validateMethods(routeConfig.Methods); err != nil {
+				return site{}, fmt.Errorf("routes[%d].methods: %w", routeIndex, err)
+			}
+		}
 		routeHeaders, err := resolveHeaders(routeConfig.Headers)
 		if err != nil {
 			return site{}, fmt.Errorf("routes[%d].headers: %w", routeIndex, err)
@@ -147,7 +153,12 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		if err != nil {
 			return site{}, fmt.Errorf("routes[%d]: %w", routeIndex, err)
 		}
-		s.routes = append(s.routes, route{pattern: pattern, proxy: routeProxy, strip: routeConfig.Strip})
+		s.routes = append(s.routes, route{
+			pattern: pattern,
+			methods: append([]string(nil), routeConfig.Methods...),
+			proxy:   routeProxy,
+			strip:   routeConfig.Strip,
+		})
 	}
 	if len(s.routes) > routeIndexThreshold {
 		s.buildRouteIndex()
@@ -215,7 +226,7 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	selectedRoute := selected.selectRoute(req.URL.Path)
+	selectedRoute := selected.selectRoute(req.URL.Path, req.Method)
 
 	if selectedRoute.route == nil {
 		selected.proxy.ServeHTTP(w, req)
@@ -228,24 +239,24 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (s *site) buildRouteIndex() {
-	s.exactRoutes = make(map[string]int, len(s.routes))
-	s.wildcardRoutes = make(map[string]int, len(s.routes))
+	s.exactRoutes = make(map[string][]int, len(s.routes))
+	s.wildcardRoutes = make(map[string][]int, len(s.routes))
 	for index := range s.routes {
 		pattern := s.routes[index].pattern
 		if pattern.wildcard {
-			s.wildcardRoutes[pattern.path] = index
+			s.wildcardRoutes[pattern.path] = append(s.wildcardRoutes[pattern.path], index)
 		} else {
-			s.exactRoutes[pattern.path] = index
+			s.exactRoutes[pattern.path] = append(s.exactRoutes[pattern.path], index)
 		}
 	}
 }
 
-func (s *site) selectRoute(path string) routeCandidate {
+func (s *site) selectRoute(path, method string) routeCandidate {
 	if s.exactRoutes == nil {
 		var selected routeCandidate
 		for index := range s.routes {
 			prefix, ok := s.routes[index].pattern.match(path)
-			if !ok {
+			if !ok || !s.routes[index].matchesMethod(method) {
 				continue
 			}
 			candidate := s.routeCandidate(index)
@@ -257,32 +268,67 @@ func (s *site) selectRoute(path string) routeCandidate {
 		return selected
 	}
 
-	if index, ok := s.exactRoutes[path]; ok {
-		return s.routeCandidate(index)
+	var selected routeCandidate
+	for _, index := range s.exactRoutes[path] {
+		if !s.routes[index].matchesMethod(method) {
+			continue
+		}
+		candidate := s.routeCandidate(index)
+		if selected.route == nil || betterRoute(candidate, selected) {
+			selected = candidate
+		}
+	}
+	if selected.route != nil {
+		return selected
 	}
 
-	var selected routeCandidate
-	if index, ok := s.wildcardRoutes[""]; ok {
-		selected = s.routeCandidate(index)
+	for _, index := range s.wildcardRoutes[""] {
+		if s.routes[index].matchesMethod(method) {
+			candidate := s.routeCandidate(index)
+			if selected.route == nil || betterRoute(candidate, selected) {
+				selected = candidate
+			}
+		}
 	}
 	for index := 1; index < len(path); index++ {
 		if path[index] != '/' {
 			continue
 		}
-		if routeIndex, ok := s.wildcardRoutes[path[:index]]; ok {
+		for _, routeIndex := range s.wildcardRoutes[path[:index]] {
+			if !s.routes[routeIndex].matchesMethod(method) {
+				continue
+			}
 			candidate := s.routeCandidate(routeIndex)
 			if selected.route == nil || betterRoute(candidate, selected) {
 				selected = candidate
 			}
 		}
 	}
-	if routeIndex, ok := s.wildcardRoutes[path]; ok {
+	for _, routeIndex := range s.wildcardRoutes[path] {
+		if !s.routes[routeIndex].matchesMethod(method) {
+			continue
+		}
 		candidate := s.routeCandidate(routeIndex)
 		if selected.route == nil || betterRoute(candidate, selected) {
 			selected = candidate
 		}
 	}
 	return selected
+}
+
+func (r *route) matchesMethod(method string) bool {
+	if len(r.methods) == 0 {
+		return true
+	}
+	if len(r.methods) == 1 {
+		return method == r.methods[0]
+	}
+	for _, allowed := range r.methods {
+		if method == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *site) routeCandidate(index int) routeCandidate {
@@ -323,6 +369,13 @@ func betterRoute(candidate, current routeCandidate) bool {
 	}
 	if candidate.depth != current.depth {
 		return candidate.depth > current.depth
+	}
+	candidateMethods, currentMethods := len(candidate.route.methods), len(current.route.methods)
+	if (candidateMethods > 0) != (currentMethods > 0) {
+		return candidateMethods > 0
+	}
+	if candidateMethods != currentMethods {
+		return candidateMethods < currentMethods
 	}
 	return candidate.index > current.index
 }

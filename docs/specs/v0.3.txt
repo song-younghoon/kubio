@@ -1,0 +1,158 @@
+Kubio kubio.json v0.3 Specification
+Status: Agreed specification
+Base: v0.2
+
+
+1. Scope
+
+v0.3 adds optional HTTP method matching to routes.
+
+This is the only feature added by v0.3. All v0.2 behavior remains unchanged
+unless a route defines methods, and every valid v0.2 configuration remains
+valid in v0.3.
+
+
+2. Configuration
+
+A route may contain the optional methods field:
+
+    {
+      "path": "/jobs/*",
+      "methods": ["GET", "HEAD"],
+      "backend": "readers"
+    }
+
+methods is a non-empty array of HTTP method strings. When methods is absent,
+the route accepts every method.
+
+The field is valid only on route objects. It does not apply to sites or
+backends.
+
+A complete example routes reads and writes for the same path independently:
+
+    {
+      "listen": ":8080",
+      "sites": [
+        {
+          "hosts": ["example.com"],
+          "target": "http://app:3000",
+          "routes": [
+            {
+              "path": "/jobs/*",
+              "methods": ["GET", "HEAD"],
+              "target": "http://reader:3000"
+            },
+            {
+              "path": "/jobs/*",
+              "methods": ["POST"],
+              "target": "http://writer:3000"
+            }
+          ]
+        }
+      ]
+    }
+
+In this example, GET and HEAD requests under /jobs use reader, POST requests
+use writer, and every other method falls back to the site's app target.
+
+
+3. Method values and validation
+
+Each methods element:
+
+- Must be a JSON string.
+- Must be non-empty.
+- Must be an ASCII HTTP token. Valid characters are letters, digits, and
+  !#$%&'*+-.^_`|~.
+- Is matched exactly and case-sensitively without trimming or normalization.
+
+GET and get are therefore different method values. Configurations should use
+the method spelling sent by clients, conventionally uppercase for standard
+HTTP methods.
+
+The following are configuration errors:
+
+- methods is null, is not an array, or is an empty array.
+- An element is null, is not a string, is empty, contains non-ASCII data, or
+  contains a character outside the HTTP token set.
+- The same method string appears more than once in one route.
+
+Case variants are not duplicates because matching is case-sensitive. Method
+values do not support environment-variable expansion.
+
+The v0.1 strict JSON rules still apply, including rejection of unknown fields
+and duplicate object keys.
+
+
+4. Matching behavior
+
+A route is a candidate only when both conditions are true:
+
+1. Its v0.1 path pattern matches the request path.
+2. methods is absent, or the array contains the request method exactly.
+
+Kubio matches the method carried by the HTTP request as received. It does not:
+
+- Treat HEAD as GET.
+- Generate a route-aware OPTIONS response.
+- Use X-HTTP-Method-Override or any other header to change the method used for
+  matching.
+- Rewrite the method sent upstream.
+
+As in v0.2, a server-wide OPTIONS * request receives a 200 response with an
+empty body before site or route selection. An OPTIONS request with a path is
+matched like any other method.
+
+Header and query values remain irrelevant to route matching in v0.3.
+
+If a path matches a route but its method does not, that route is simply not a
+candidate. Another eligible route with a less-specific path may be selected.
+If no route is eligible, the selected site's target or backend handles the
+request exactly as in v0.2. Kubio does not generate a 404, 405, Allow header,
+or response body solely because of method mismatch. A selected fallback or
+upstream may independently return any status, headers, or body.
+
+
+5. Route priority
+
+Kubio evaluates every candidate and selects one route using this priority:
+
+1. Exact path over wildcard path.
+2. Greater fixed-segment depth over lesser fixed-segment depth.
+3. A route with methods over a route without methods.
+4. Fewer listed methods over more listed methods when both routes define
+   methods.
+5. Later declaration over earlier declaration when all prior criteria are
+   equal.
+
+Path specificity remains more important than method specificity. For example,
+an unrestricted exact /jobs route wins over a GET-only /jobs/* route for a GET
+request.
+
+Only the selected route is applied. Method conditions are not merged across
+routes, and an ineligible route contributes none of its target, backend,
+headers, or strip settings.
+
+
+6. Existing behavior and reload
+
+- Site selection and host priority run before route selection and are
+  unchanged.
+- Query strings are ignored for matching and forwarded unchanged.
+- The selected route's target or backend inheritance follows v0.2.
+- Site and route request headers, strip, forwarding, WebSocket, streaming,
+  timeout, and error behavior follow v0.1 and v0.2.
+- Ineligible routes consume no backend selection. A request resolved to a
+  named backend consumes exactly one selection under the v0.2 rules.
+- Invalid methods configuration follows the v0.1 startup and reload failure
+  rules.
+- The v0.1 atomic reload rules apply unchanged. A failed reload keeps the
+  active configuration and backend state.
+- A successful reload resets every backend selector to index 0 under the v0.2
+  rules, even when only methods changed.
+
+
+7. Deferred features
+
+All features from the original v0.3 proposal other than HTTP method matching
+are deferred to the v0.4 proposal.

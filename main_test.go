@@ -19,8 +19,12 @@ func newTextBackend(t *testing.T, text string) *httptest.Server {
 }
 
 func proxyResponse(t *testing.T, handler http.Handler, host, path string) string {
+	return proxyMethodResponse(t, handler, http.MethodGet, host, path)
+}
+
+func proxyMethodResponse(t *testing.T, handler http.Handler, method, host, path string) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "http://proxy"+path, nil)
+	req := httptest.NewRequest(method, "http://proxy"+path, nil)
 	req.Host = host
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
@@ -67,6 +71,57 @@ func TestDecodeConfigIsStrict(t *testing.T) {
 				t.Fatal("invalid config was accepted")
 			}
 		})
+	}
+}
+
+func TestDecodeConfigMethods(t *testing.T) {
+	t.Setenv("KUBIO_METHOD", "EXPANDED")
+	valid := "{\"listen\":\":8080\",\"sites\":[{\"hosts\":[\"*\"],\"target\":\"http://localhost:3000\",\"routes\":[{\"path\":\"/*\",\"methods\":[\"GET\",\"get\",\"!#$%&'*+-.^_`|~AZaz09\",\"$KUBIO_METHOD\"]}]}]}"
+	cfg, err := decodeConfig([]byte(valid))
+	if err != nil {
+		t.Fatalf("valid methods rejected: %v", err)
+	}
+	methods := cfg.Sites[0].Routes[0].Methods
+	if len(methods) != 4 || methods[1] != "get" || methods[3] != "$KUBIO_METHOD" {
+		t.Fatalf("decoded methods = %q", methods)
+	}
+
+	withMethods := func(value string) string {
+		return `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://localhost:3000","routes":[{"path":"/*","methods":` + value + `}]}]}`
+	}
+	invalid := map[string]string{
+		"null":               withMethods(`null`),
+		"not array":          withMethods(`"GET"`),
+		"empty array":        withMethods(`[]`),
+		"null item":          withMethods(`[null]`),
+		"non-string item":    withMethods(`[1]`),
+		"empty item":         withMethods(`[""]`),
+		"whitespace":         withMethods(`[" GET"]`),
+		"separator":          withMethods(`["GET/POST"]`),
+		"non-ASCII":          withMethods(`["GÉT"]`),
+		"duplicate":          withMethods(`["GET","GET"]`),
+		"environment syntax": withMethods(`["${KUBIO_METHOD}"]`),
+		"duplicate field":    `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://localhost:3000","routes":[{"path":"/*","methods":["GET"],"methods":["POST"]}]}]}`,
+		"wrong case":         `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://localhost:3000","routes":[{"path":"/*","Methods":["GET"]}]}]}`,
+		"site field":         `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://localhost:3000","methods":["GET"]}]}`,
+	}
+	for name, data := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeConfig([]byte(data)); err == nil {
+				t.Fatal("invalid methods were accepted")
+			}
+		})
+	}
+}
+
+func TestValidMethodUsesExactHTTPTokenSet(t *testing.T) {
+	const allowed = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	for value := 0; value < 256; value++ {
+		method := string([]byte{byte(value)})
+		want := strings.IndexByte(allowed, byte(value)) >= 0
+		if got := validMethod(method); got != want {
+			t.Errorf("validMethod(%q) = %t, want %t", method, got, want)
+		}
 	}
 }
 
@@ -174,6 +229,24 @@ func TestBackendValidation(t *testing.T) {
 			Sites: []siteConfig{{
 				Hosts: []string{"*"}, Target: "http://localhost:3000",
 				Routes: []routeConfig{{Path: "/*", Backend: "missing"}},
+			}},
+		},
+		"empty route methods": {
+			Sites: []siteConfig{{
+				Hosts: []string{"*"}, Target: "http://localhost:3000",
+				Routes: []routeConfig{{Path: "/*", Methods: []string{}}},
+			}},
+		},
+		"invalid route method": {
+			Sites: []siteConfig{{
+				Hosts: []string{"*"}, Target: "http://localhost:3000",
+				Routes: []routeConfig{{Path: "/*", Methods: []string{"GET POST"}}},
+			}},
+		},
+		"duplicate route method": {
+			Sites: []siteConfig{{
+				Hosts: []string{"*"}, Target: "http://localhost:3000",
+				Routes: []routeConfig{{Path: "/*", Methods: []string{"GET", "GET"}}},
 			}},
 		},
 	}
@@ -359,7 +432,11 @@ func TestBackendStateSurvivesFailedReloadAndResetsOnSuccess(t *testing.T) {
 	defer b.Close()
 	cfg := config{
 		Backends: map[string]backendConfig{"app": {Targets: []string{a.URL, b.URL}}},
-		Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+		Sites: []siteConfig{{
+			Hosts:   []string{"*"},
+			Backend: "app",
+			Routes:  []routeConfig{{Path: "/*", Methods: []string{"GET"}}},
+		}},
 	}
 	initial, err := newRouter(cfg)
 	if err != nil {
@@ -369,14 +446,28 @@ func TestBackendStateSurvivesFailedReloadAndResetsOnSuccess(t *testing.T) {
 	if got := proxyResponse(t, handler, "proxy", "/"); got != "a" {
 		t.Fatalf("initial target = %q, want a", got)
 	}
-	if _, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "missing"}}}); err == nil {
-		t.Fatal("invalid reload was accepted")
+	if _, err := newRouter(config{
+		Backends: cfg.Backends,
+		Sites: []siteConfig{{
+			Hosts:   []string{"*"},
+			Backend: "app",
+			Routes:  []routeConfig{{Path: "/*", Methods: []string{}}},
+		}},
+	}); err == nil {
+		t.Fatal("invalid methods reload was accepted")
 	}
 	if got := proxyResponse(t, handler, "proxy", "/"); got != "b" {
 		t.Fatalf("target after failed reload = %q, want b", got)
 	}
 
-	reloaded, err := newRouter(cfg)
+	reloaded, err := newRouter(config{
+		Backends: cfg.Backends,
+		Sites: []siteConfig{{
+			Hosts:   []string{"*"},
+			Backend: "app",
+			Routes:  []routeConfig{{Path: "/*", Methods: []string{"GET", "POST"}}},
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,6 +599,159 @@ func TestRouterChoosesMostSpecificSiteAndRoute(t *testing.T) {
 	}
 }
 
+func TestRouteMethodsMatchExactlyAndPreserveMethod(t *testing.T) {
+	newBackend := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("X-Backend", name)
+			w.Header().Set("X-Method", req.Method)
+		}))
+	}
+	fallback := newBackend("fallback")
+	upper := newBackend("upper")
+	lower := newBackend("lower")
+	open := newBackend("open")
+	defer fallback.Close()
+	defer upper.Close()
+	defer lower.Close()
+	defer open.Close()
+
+	handler, err := newRouter(config{Sites: []siteConfig{{
+		Hosts:  []string{"*"},
+		Target: fallback.URL,
+		Routes: []routeConfig{
+			{Path: "/jobs/*", Methods: []string{"GET"}, Target: upper.URL},
+			{Path: "/jobs/*", Methods: []string{"get"}, Target: lower.URL},
+			{Path: "/open/*", Target: open.URL},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		method  string
+		path    string
+		header  string
+		backend string
+	}{
+		{method: "GET", path: "/jobs/1", backend: "upper"},
+		{method: "get", path: "/jobs/1", backend: "lower"},
+		{method: "HEAD", path: "/jobs/1", backend: "fallback"},
+		{method: "POST", path: "/jobs/1", header: "GET", backend: "fallback"},
+		{method: "PATCH", path: "/open/1", backend: "open"},
+	}
+	for _, test := range tests {
+		req := httptest.NewRequest(test.method, "http://proxy"+test.path, nil)
+		if test.header != "" {
+			req.Header.Set("X-HTTP-Method-Override", test.header)
+		}
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if got := res.Header().Get("X-Backend"); got != test.backend {
+			t.Errorf("%s %s backend = %q, want %q", test.method, test.path, got, test.backend)
+		}
+		if got := res.Header().Get("X-Method"); got != test.method {
+			t.Errorf("%s %s upstream method = %q", test.method, test.path, got)
+		}
+	}
+}
+
+func TestRouteMethodPriorityAndFallback(t *testing.T) {
+	definitions := []struct {
+		path    string
+		methods []string
+	}{
+		{path: "/*", methods: []string{"GET"}},
+		{path: "/api/*"},
+		{path: "/api/admin/*", methods: []string{"POST"}},
+		{path: "/jobs/*", methods: []string{"GET"}},
+		{path: "/jobs/*", methods: []string{"GET", "POST"}},
+		{path: "/open/*", methods: []string{"GET"}},
+		{path: "/open/*"},
+		{path: "/tie/*", methods: []string{"GET", "POST"}},
+		{path: "/tie/*", methods: []string{"GET", "PUT"}},
+		{path: "/exact"},
+		{path: "/exact/*", methods: []string{"GET"}},
+	}
+	routes := make([]route, len(definitions))
+	for index, definition := range definitions {
+		pattern, err := newPathPattern(definition.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes[index] = route{pattern: pattern, methods: definition.methods}
+	}
+	selected := site{routes: routes}
+	for _, test := range []struct {
+		path   string
+		method string
+		want   int
+	}{
+		{path: "/api/admin/1", method: "GET", want: 1},
+		{path: "/api/admin/1", method: "POST", want: 2},
+		{path: "/jobs/1", method: "GET", want: 3},
+		{path: "/jobs/1", method: "POST", want: 4},
+		{path: "/open/1", method: "GET", want: 5},
+		{path: "/open/1", method: "PUT", want: 6},
+		{path: "/tie/1", method: "GET", want: 8},
+		{path: "/exact", method: "GET", want: 9},
+		{path: "/none", method: "DELETE", want: -1},
+	} {
+		got := selected.selectRoute(test.path, test.method)
+		if test.want < 0 {
+			if got.route != nil {
+				t.Errorf("%s %s selected route %d, want none", test.method, test.path, got.index)
+			}
+			continue
+		}
+		if got.route == nil || got.index != test.want {
+			t.Errorf("%s %s selected route %d, want %d", test.method, test.path, got.index, test.want)
+		}
+	}
+}
+
+func TestMethodIneligibleRouteDoesNotApplyOrConsumeBackend(t *testing.T) {
+	newBackend := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			_, _ = w.Write([]byte(name + "|" + req.URL.Path + "|" + req.Header.Get("X-Route")))
+		}))
+	}
+	fallback := newBackend("fallback")
+	a := newBackend("a")
+	b := newBackend("b")
+	defer fallback.Close()
+	defer a.Close()
+	defer b.Close()
+
+	handler, err := newRouter(config{
+		Backends: map[string]backendConfig{"writers": {Targets: []string{a.URL, b.URL}}},
+		Sites: []siteConfig{{
+			Hosts:  []string{"*"},
+			Target: fallback.URL,
+			Routes: []routeConfig{{
+				Path:    "/jobs/*",
+				Methods: []string{"POST"},
+				Backend: "writers",
+				Headers: map[string]string{"X-Route": "selected"},
+				Strip:   true,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := proxyMethodResponse(t, handler, "GET", "proxy", "/jobs/1"); got != "fallback|/jobs/1|" {
+		t.Fatalf("ineligible route result = %q", got)
+	}
+	if got := proxyMethodResponse(t, handler, "POST", "proxy", "/jobs/1"); got != "a|/1|selected" {
+		t.Fatalf("first eligible route result = %q", got)
+	}
+	if got := proxyMethodResponse(t, handler, "POST", "proxy", "/jobs/2"); got != "b|/2|selected" {
+		t.Fatalf("second eligible route result = %q", got)
+	}
+}
+
 func TestRouterReturnsNotFoundForUnknownHost(t *testing.T) {
 	backend := newTextBackend(t, "backend")
 	defer backend.Close()
@@ -570,33 +814,58 @@ func TestIndexedRouteSelectionPreservesPriority(t *testing.T) {
 }
 
 func TestIndexedRouteSelectionMatchesLinearSelection(t *testing.T) {
-	paths := []string{
-		"/*", "/api/*", "/api/admin/*", "/health",
-		"/unused-a", "/unused-b", "/unused-c", "/unused-d", "/unused-e", "/api/*",
+	definitions := []struct {
+		path    string
+		methods []string
+	}{
+		{path: "/*"},
+		{path: "/api/*", methods: []string{"GET", "POST"}},
+		{path: "/api/*", methods: []string{"GET"}},
+		{path: "/api/admin/*", methods: []string{"POST"}},
+		{path: "/health", methods: []string{"GET"}},
+		{path: "/health", methods: []string{"POST"}},
+		{path: "/unused-a"},
+		{path: "/unused-b"},
+		{path: "/unused-c"},
+		{path: "/unused-d"},
 	}
-	routes := make([]route, len(paths))
-	for index, path := range paths {
-		pattern, err := newPathPattern(path)
+	routes := make([]route, len(definitions))
+	for index, definition := range definitions {
+		pattern, err := newPathPattern(definition.path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		routes[index].pattern = pattern
+		routes[index] = route{pattern: pattern, methods: definition.methods}
 	}
 
 	linear := site{routes: routes}
 	indexed := site{routes: routes}
 	indexed.buildRouteIndex()
-	for _, path := range []string{"/", "/api/users", "/api/admin/users", "/health", "/other"} {
-		want := linear.selectRoute(path)
-		got := indexed.selectRoute(path)
+	for _, test := range []struct {
+		path   string
+		method string
+	}{
+		{path: "/", method: "DELETE"},
+		{path: "/api/users", method: "GET"},
+		{path: "/api/users", method: "POST"},
+		{path: "/api/users", method: "DELETE"},
+		{path: "/api/admin/users", method: "GET"},
+		{path: "/api/admin/users", method: "POST"},
+		{path: "/health", method: "GET"},
+		{path: "/health", method: "POST"},
+		{path: "/health", method: "PUT"},
+		{path: "/other", method: "GET"},
+	} {
+		want := linear.selectRoute(test.path, test.method)
+		got := indexed.selectRoute(test.path, test.method)
 		if got.route == nil || want.route == nil {
 			if got.route != want.route {
-				t.Errorf("path %q selected route mismatch", path)
+				t.Errorf("%s %s selected route mismatch", test.method, test.path)
 			}
 			continue
 		}
 		if got.index != want.index || got.prefix != want.prefix {
-			t.Errorf("path %q selected route (%d, %q), want (%d, %q)", path, got.index, got.prefix, want.index, want.prefix)
+			t.Errorf("%s %s selected route (%d, %q), want (%d, %q)", test.method, test.path, got.index, got.prefix, want.index, want.prefix)
 		}
 	}
 }

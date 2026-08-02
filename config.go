@@ -32,6 +32,7 @@ type siteConfig struct {
 
 type routeConfig struct {
 	Path    string            `json:"path"`
+	Methods []string          `json:"methods"`
 	Target  string            `json:"target"`
 	Backend string            `json:"backend"`
 	Headers map[string]string `json:"headers"`
@@ -58,11 +59,12 @@ type rawSiteConfig struct {
 }
 
 type rawRouteConfig struct {
-	Path    *string        `json:"path"`
-	Target  optionalString `json:"target"`
-	Backend optionalString `json:"backend"`
-	Headers headerMap      `json:"headers"`
-	Strip   strictBool     `json:"strip"`
+	Path    *string             `json:"path"`
+	Methods optionalStringArray `json:"methods"`
+	Target  optionalString      `json:"target"`
+	Backend optionalString      `json:"backend"`
+	Headers headerMap           `json:"headers"`
+	Strip   strictBool          `json:"strip"`
 }
 
 type headerMap map[string]string
@@ -74,6 +76,11 @@ type rawRoutes []rawRouteConfig
 type optionalString struct {
 	set   bool
 	value string
+}
+
+type optionalStringArray struct {
+	set    bool
+	values stringArray
 }
 
 type strictBool bool
@@ -145,6 +152,16 @@ func (s *optionalString) UnmarshalJSON(data []byte) error {
 	}
 	s.set = true
 	s.value = value
+	return nil
+}
+
+func (a *optionalStringArray) UnmarshalJSON(data []byte) error {
+	var values stringArray
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	a.set = true
+	a.values = values
 	return nil
 }
 
@@ -234,6 +251,11 @@ func decodeConfig(data []byte) (config, error) {
 			if rawRoute.Path == nil || *rawRoute.Path == "" {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].path must be set", siteIndex, routeIndex)
 			}
+			if rawRoute.Methods.set {
+				if err := validateMethods(rawRoute.Methods.values); err != nil {
+					return config{}, fmt.Errorf("sites[%d].routes[%d].methods: %w", siteIndex, routeIndex, err)
+				}
+			}
 			if rawRoute.Target.set && rawRoute.Backend.set {
 				return config{}, fmt.Errorf("sites[%d].routes[%d] cannot set both target and backend", siteIndex, routeIndex)
 			}
@@ -245,6 +267,7 @@ func decodeConfig(data []byte) (config, error) {
 			}
 			route := routeConfig{
 				Path:    *rawRoute.Path,
+				Methods: append([]string(nil), rawRoute.Methods.values...),
 				Headers: map[string]string(rawRoute.Headers),
 				Strip:   bool(rawRoute.Strip),
 			}
@@ -382,7 +405,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonRoute:
 		switch key {
-		case "path", "target", "backend", "strip":
+		case "path", "methods", "target", "backend", "strip":
 			return jsonAny, nil
 		case "headers":
 			return jsonHeaders, nil
@@ -463,15 +486,44 @@ func validHeaderName(name string) bool {
 	if name == "" {
 		return false
 	}
-	for i := 0; i < len(name); i++ {
-		if !validTokenByte(name[i]) {
+	for index := 0; index < len(name); index++ {
+		if !validHeaderNameByte(name[index]) {
 			return false
 		}
 	}
 	return true
 }
 
-func validTokenByte(value byte) bool {
+func validateMethods(methods []string) error {
+	if len(methods) == 0 {
+		return fmt.Errorf("must not be empty")
+	}
+	seen := make(map[string]struct{}, len(methods))
+	for index, method := range methods {
+		if !validMethod(method) {
+			return fmt.Errorf("item %d must be a non-empty ASCII HTTP token", index)
+		}
+		if _, exists := seen[method]; exists {
+			return fmt.Errorf("contains duplicate %q", method)
+		}
+		seen[method] = struct{}{}
+	}
+	return nil
+}
+
+func validMethod(method string) bool {
+	if method == "" {
+		return false
+	}
+	for index := 0; index < len(method); index++ {
+		if method[index] != '*' && !validHeaderNameByte(method[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validHeaderNameByte(value byte) bool {
 	if value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' {
 		return true
 	}

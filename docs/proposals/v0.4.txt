@@ -1,18 +1,16 @@
-Kubio kubio.json v0.3 Proposal
+Kubio kubio.json v0.4 Proposal
 Status: Deferred features; discussion not started
-Base: v0.2
+Base: v0.3
 
 
 1. Purpose
 
-This file carries forward features excluded from v0.2. It is not a
-specification yet. The scope must be narrowed and each selected item must be
-fully defined before v0.3 is finalized.
+This proposal carries every feature from the original v0.3 proposal that was
+not selected for v0.3. It defines no agreed behavior yet. Its scope must be
+narrowed and selected items must be specified before promotion.
 
 
 2. Backend resilience and upstream transport
-
-Consider extending v0.2 backends with:
 
 - Retry and failover rules.
 - Active or passive health checks.
@@ -20,36 +18,30 @@ Consider extending v0.2 backends with:
 - Per-backend connection and response-header timeouts.
 - HTTPS upstream CA and SNI settings.
 
-Retry safety, health state, selection priority, timeout inheritance, and reload
-behavior must be defined before implementation.
+Future work must define retry safety, health state, selection priority,
+timeout inheritance, transport ownership, and reload behavior for whichever
+items are selected.
 
 
 3. Additional route matching
 
-Consider route conditions beyond host and path:
+- Request header conditions.
+- Query parameter conditions.
+- Client IP conditions.
 
-- HTTP method.
-- Request header.
-- Query parameter.
-- Client IP.
-
-The matching precedence and interaction between conditions must be defined
-before implementation.
+Future work must define condition syntax, validation, precedence, and
+interaction with v0.3 method matching.
 
 
 4. Response headers
 
-Consider extending headers beyond v0.1 request injection:
-
 - Response header set.
-- Header removal.
-- Multiple header values.
+- Response header removal.
+- Multiple response header values.
 - Explicit set, add, and remove operation ordering.
 
 
 5. Client-facing TLS
-
-Consider TLS termination on Kubio's public listener:
 
 - Manual certificates.
 - Certificate selection by host.
@@ -59,8 +51,6 @@ Consider TLS termination on Kubio's public listener:
 
 6. Observability and administration
 
-Consider:
-
 - Structured access logs.
 - Request and upstream metrics.
 - Health and metrics endpoints.
@@ -68,8 +58,6 @@ Consider:
 
 
 7. Additional proxy protocols and routing actions
-
-Consider:
 
 - RFC Forwarded headers.
 - PROXY protocol.
@@ -81,7 +69,7 @@ Consider:
 
 8. Application gateway features
 
-Consider only when there is a concrete use case:
+These remain candidates only when backed by a concrete use case:
 
 - Rate limiting.
 - Authentication.
