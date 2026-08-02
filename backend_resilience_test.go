@@ -407,6 +407,7 @@ func TestBackendDoesNotRetryAfterInformationalResponse(t *testing.T) {
 	}
 
 	var informational atomic.Int32
+	traceError := errors.New("stop after informational response")
 	request, err := http.NewRequest(http.MethodGet, "http://proxy/", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -415,20 +416,20 @@ func TestBackendDoesNotRetryAfterInformationalResponse(t *testing.T) {
 		if code == http.StatusEarlyHints {
 			informational.Add(1)
 		}
-		return nil
+		return traceError
 	}}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	start := backend.nextTargetIndex()
+	request.URL.Scheme = backend.targets[start].Scheme
+	request.URL.Host = backend.targets[start].Host
+	request = withBackendRetry(request, start)
 	_, err = backend.RoundTrip(request)
 	close(release)
 	if serverError := <-serverErr; serverError != nil {
 		t.Fatal(serverError)
 	}
-	if err == nil {
-		t.Fatal("missing final response was accepted")
-	}
-	var timeout net.Error
-	if !errors.As(err, &timeout) || !timeout.Timeout() {
-		t.Fatalf("error = %v, want timeout", err)
+	if !errors.Is(err, traceError) {
+		t.Fatalf("error = %v, want trace error", err)
 	}
 	if informational.Load() != 1 || healthyHits.Load() != 0 {
 		t.Fatalf("informational = %d, healthy hits = %d", informational.Load(), healthyHits.Load())

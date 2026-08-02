@@ -244,6 +244,16 @@ func BenchmarkBackendProxyRequestParallel(b *testing.B) {
 	})
 }
 
+func BenchmarkBackendRetryProxyRequestParallel(b *testing.B) {
+	benchmarkProxyRequestParallel(b, func(target string) config {
+		sameTarget := "HTTP" + target[len("http"):]
+		return config{
+			Backends: map[string]backendConfig{"app": {Targets: []string{target, sameTarget}, Tries: 2}},
+			Sites:    []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+		}
+	})
+}
+
 func benchmarkProxyRequestParallel(b *testing.B, configForTarget func(string) config) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

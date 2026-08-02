@@ -50,6 +50,11 @@ type backend struct {
 
 type backendRetryKey struct{}
 
+type backendRetryState struct {
+	start         int
+	informational atomic.Bool
+}
+
 func (p *proxyBufferPool) Get() []byte {
 	if buffer := p.pool.Get(); buffer != nil {
 		return buffer.([]byte)
@@ -128,42 +133,48 @@ func (b *backend) nextTarget() *url.URL {
 }
 
 func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
-	start := b.nextTargetIndex()
-	attempts := 1
-	retryable, marked := request.Context().Value(backendRetryKey{}).(bool)
-	if !marked {
-		retryable = retryableBackendRequest(request)
-	}
-	if b.tries > 1 && retryable {
-		attempts = b.tries
+	state, _ := request.Context().Value(backendRetryKey{}).(*backendRetryState)
+	if state == nil {
+		return b.transport.RoundTrip(request)
 	}
 
-	var lastErr error
-	for attempt := range attempts {
+	response, lastErr := b.transport.RoundTrip(request)
+	if lastErr == nil {
+		return response, nil
+	}
+	if state.informational.Load() || request.Context().Err() != nil {
+		return nil, lastErr
+	}
+
+	for attempt := 1; attempt < b.tries; attempt++ {
+		state.informational.Store(false)
 		outgoing := request.Clone(request.Context())
 		requestURL := *request.URL
-		target := b.targets[(start+attempt)%len(b.targets)]
+		target := b.targets[(state.start+attempt)%len(b.targets)]
 		requestURL.Scheme = target.Scheme
 		requestURL.Host = target.Host
 		outgoing.URL = &requestURL
-
-		var informational atomic.Bool
-		trace := &httptrace.ClientTrace{Got1xxResponse: func(int, textproto.MIMEHeader) error {
-			informational.Store(true)
-			return nil
-		}}
-		outgoing = outgoing.WithContext(httptrace.WithClientTrace(outgoing.Context(), trace))
 
 		response, err := b.transport.RoundTrip(outgoing)
 		if err == nil {
 			return response, nil
 		}
 		lastErr = err
-		if informational.Load() || request.Context().Err() != nil {
+		if state.informational.Load() || request.Context().Err() != nil {
 			break
 		}
 	}
 	return nil, lastErr
+}
+
+func withBackendRetry(request *http.Request, start int) *http.Request {
+	state := &backendRetryState{start: start}
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(int, textproto.MIMEHeader) error {
+		state.informational.Store(true)
+		return nil
+	}}
+	ctx := context.WithValue(request.Context(), backendRetryKey{}, state)
+	return request.WithContext(httptrace.WithClientTrace(ctx, trace))
 }
 
 func retryableBackendRequest(request *http.Request) bool {
@@ -222,11 +233,19 @@ func newBackendProxy(
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
 ) *httputil.ReverseProxy {
+	if backend.tries == 1 {
+		proxy := newReverseProxy(func(request *httputil.ProxyRequest) {
+			rewriteProxyRequest(request, backend.nextTarget(), headers, trustProxies)
+		}, siteResponseHeaders, routeResponseHeaders)
+		proxy.Transport = backend.transport
+		return proxy
+	}
 	proxy := newReverseProxy(func(request *httputil.ProxyRequest) {
-		request.Out = request.Out.WithContext(context.WithValue(
-			request.Out.Context(), backendRetryKey{}, retryableBackendRequest(request.In),
-		))
-		rewriteProxyRequest(request, backend.targets[0], headers, trustProxies)
+		start := backend.nextTargetIndex()
+		rewriteProxyRequest(request, backend.targets[start], headers, trustProxies)
+		if retryableBackendRequest(request.In) {
+			request.Out = withBackendRetry(request.Out, start)
+		}
 	}, siteResponseHeaders, routeResponseHeaders)
 	proxy.Transport = backend
 	return proxy
