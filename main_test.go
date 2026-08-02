@@ -425,6 +425,31 @@ func TestBackendSelectionIsConcurrencySafe(t *testing.T) {
 	}
 }
 
+func TestBackendWeightedSelection(t *testing.T) {
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://a:3000", "http://b:3000"},
+		Weights: []int{3, 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range []string{"a", "a", "b", "a", "a", "a", "b", "a"} {
+		if got := backend.nextTarget().Hostname(); got != want {
+			t.Fatalf("selection %d = %q, want %q", index, got, want)
+		}
+	}
+
+	targets := make([]string, 11)
+	weights := make([]int, 11)
+	for index := range targets {
+		targets[index] = "http://backend-" + strings.Repeat("x", index+1) + ":3000"
+		weights[index] = maxTargetWeight
+	}
+	if _, err := newBackend(backendConfig{Targets: targets, Weights: weights}); err == nil {
+		t.Fatal("weights sum above the limit was accepted")
+	}
+}
+
 func TestBackendStateSurvivesFailedReloadAndResetsOnSuccess(t *testing.T) {
 	a := newTextBackend(t, "a")
 	b := newTextBackend(t, "b")

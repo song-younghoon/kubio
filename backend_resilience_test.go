@@ -43,6 +43,7 @@ func TestBackendResilienceConfig(t *testing.T) {
   "backends": {
     "app": {
       "targets": ["http://app-1:3000", "http://app-2:3000", "http://app-3:3000"],
+      "weights": [3, 1, 2],
       "tries": 2,
       "retry": {"status": [502, 503, 504], "methods": ["POST", "PUT"], "body": {"max": 1048576}, "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s", "budget": {"max": 100, "window": "1s"}},
       "timeout": {"dial": "250ms", "header": "1m30s"}
@@ -55,7 +56,7 @@ func TestBackendResilienceConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := cfg.Backends["app"]
-	if backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second ||
+	if !slices.Equal(backend.Weights, []int{3, 1, 2}) || backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second ||
 		!slices.Equal(backend.Retry.Methods, []string{"POST", "PUT"}) || backend.Retry.Body == nil || backend.Retry.Body.Max != 1048576 ||
 		backend.Retry.Backoff == nil || backend.Retry.Backoff.Base != 25*time.Millisecond ||
 		backend.Retry.Backoff.Cap != 50*time.Millisecond || backend.Retry.Backoff.Jitter ||
@@ -85,6 +86,16 @@ func TestBackendResilienceConfig(t *testing.T) {
 		"tries zero":                    withBackend(`"tries":0`),
 		"tries negative":                withBackend(`"tries":-1`),
 		"tries above targets":           withBackend(`"tries":3`),
+		"weights null":                  withBackend(`"weights":null`),
+		"weights empty":                 withBackend(`"weights":[]`),
+		"weights length":                withBackend(`"weights":[1]`),
+		"weights decimal":               withBackend(`"weights":[1.0,1]`),
+		"weights exponent":              withBackend(`"weights":[1e0,1]`),
+		"weights zero":                  withBackend(`"weights":[0,1]`),
+		"weights negative":              withBackend(`"weights":[-1,1]`),
+		"weights too large":             withBackend(`"weights":[1001,1]`),
+		"weights unknown":               withBackend(`"weight":[1,1]`),
+		"weights duplicate field":       withBackend(`"weights":[1,1],"weights":[2,2]`),
 		"timeout null":                  withBackend(`"timeout":null`),
 		"timeout array":                 withBackend(`"timeout":[]`),
 		"timeout empty":                 withBackend(`"timeout":{}`),
@@ -214,6 +225,10 @@ func TestBackendResilienceDefaultsAndValidation(t *testing.T) {
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Deadline: -time.Second}},
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Budget: &backendBudgetConfig{Max: 0, Window: time.Second}}},
 		{Targets: []string{"http://a:3000", "http://b:3000"}, Tries: 2, Retry: &backendRetryConfig{Status: []int{503}, Budget: &backendBudgetConfig{Max: 1, Window: 0}}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Weights: []int{}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Weights: []int{1}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Weights: []int{0, 1}},
+		{Targets: []string{"http://a:3000", "http://b:3000"}, Weights: []int{1001, 1}},
 	}
 	for _, cfg := range invalid {
 		if _, err := newBackend(cfg); err == nil {

@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	maxRetryBodyBytes int64 = 64 << 20
-	maxRetryBudget          = 1_000_000
+	maxRetryBodyBytes    int64 = 64 << 20
+	maxRetryBudget             = 1_000_000
+	maxTargetWeight            = 1_000
+	maxTargetWeightTotal       = 10_000
 )
 
 type config struct {
@@ -33,6 +35,7 @@ type tlsConfig struct {
 
 type backendConfig struct {
 	Targets []string            `json:"targets"`
+	Weights []int               `json:"weights"`
 	Tries   int                 `json:"tries"`
 	Timeout backendTimeout      `json:"timeout"`
 	Retry   *backendRetryConfig `json:"retry"`
@@ -115,6 +118,7 @@ type rawTLSConfig struct {
 
 type rawBackendConfig struct {
 	Targets *stringArray      `json:"targets"`
+	Weights optionalIntArray  `json:"weights"`
 	Tries   optionalInt       `json:"tries"`
 	Timeout rawBackendTimeout `json:"timeout"`
 	Retry   rawBackendRetry   `json:"retry"`
@@ -663,6 +667,13 @@ func decodeConfig(data []byte) (config, error) {
 		if rawBackend.Targets == nil || len(*rawBackend.Targets) == 0 {
 			return config{}, fmt.Errorf("backends[%q].targets must not be empty", name)
 		}
+		var weights []int
+		if rawBackend.Weights.set {
+			weights = append([]int{}, rawBackend.Weights.values...)
+			if err := validateTargetWeights(weights, len(*rawBackend.Targets)); err != nil {
+				return config{}, fmt.Errorf("backends[%q].weights: %w", name, err)
+			}
+		}
 		tries := 1
 		if rawBackend.Tries.set {
 			tries = rawBackend.Tries.value
@@ -704,6 +715,7 @@ func decodeConfig(data []byte) (config, error) {
 		}
 		cfg.Backends[name] = backendConfig{
 			Targets: append([]string(nil), (*rawBackend.Targets)...),
+			Weights: weights,
 			Tries:   tries,
 			Timeout: backendTimeout{
 				Dial:   rawBackend.Timeout.Dial.value,
@@ -898,7 +910,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonBackend, nil
 	case jsonBackend:
 		switch key {
-		case "targets", "tries":
+		case "targets", "weights", "tries":
 			return jsonAny, nil
 		case "retry":
 			return jsonBackendRetry, nil

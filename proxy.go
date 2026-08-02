@@ -46,6 +46,7 @@ type proxyBufferPool struct {
 
 type backend struct {
 	targets       []*url.URL
+	schedule      []int
 	tries         int
 	retryStatuses map[int]struct{}
 	retryMethods  map[string]struct{}
@@ -170,6 +171,47 @@ func buildRetryStatuses(statuses []int) (map[int]struct{}, error) {
 	return set, nil
 }
 
+func validateTargetWeights(weights []int, targetCount int) error {
+	if len(weights) == 0 {
+		return fmt.Errorf("must not be empty")
+	}
+	if len(weights) != targetCount {
+		return fmt.Errorf("must contain one item per target")
+	}
+	total := 0
+	for index, weight := range weights {
+		if weight < 1 || weight > maxTargetWeight {
+			return fmt.Errorf("item %d must be between 1 and %d", index, maxTargetWeight)
+		}
+		if total > maxTargetWeightTotal-weight {
+			return fmt.Errorf("sum must not exceed %d", maxTargetWeightTotal)
+		}
+		total += weight
+	}
+	return nil
+}
+
+func buildTargetSchedule(weights []int) []int {
+	total := 0
+	for _, weight := range weights {
+		total += weight
+	}
+	current := make([]int, len(weights))
+	schedule := make([]int, 0, total)
+	for range total {
+		selected := 0
+		for index, weight := range weights {
+			current[index] += weight
+			if index == 0 || current[index] > current[selected] {
+				selected = index
+			}
+		}
+		current[selected] -= total
+		schedule = append(schedule, selected)
+	}
+	return schedule
+}
+
 func validateBackoff(backoff *backendBackoffConfig) error {
 	if backoff == nil {
 		return nil
@@ -264,6 +306,13 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		}
 		targets[index] = target
 	}
+	var schedule []int
+	if cfg.Weights != nil {
+		if err := validateTargetWeights(cfg.Weights, len(targets)); err != nil {
+			return nil, fmt.Errorf("weights: %w", err)
+		}
+		schedule = buildTargetSchedule(cfg.Weights)
+	}
 	var backoffDelays []time.Duration
 	var backoffJitter bool
 	var deadline time.Duration
@@ -276,6 +325,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 	}
 	return &backend{
 		targets:       targets,
+		schedule:      schedule,
 		tries:         tries,
 		retryStatuses: retryStatuses,
 		retryMethods:  retryMethods,
@@ -289,19 +339,22 @@ func newBackend(cfg backendConfig) (*backend, error) {
 }
 
 func (b *backend) nextTargetIndex() int {
-	if len(b.targets) == 1 {
+	count := len(b.targets)
+	if len(b.schedule) > 0 {
+		count = len(b.schedule)
+	}
+	if count == 1 {
+		if len(b.schedule) > 0 {
+			return b.schedule[0]
+		}
 		return 0
 	}
-	for {
-		current := b.nextIndex.Load()
-		next := current + 1
-		if next == uint64(len(b.targets)) {
-			next = 0
-		}
-		if b.nextIndex.CompareAndSwap(current, next) {
-			return int(current)
-		}
+	current := b.nextIndex.Add(1) - 1
+	index := int(current % uint64(count))
+	if len(b.schedule) > 0 {
+		return b.schedule[index]
 	}
+	return index
 }
 
 func (b *backend) nextTarget() *url.URL {
