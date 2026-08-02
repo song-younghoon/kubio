@@ -59,28 +59,22 @@ type rawBackendConfig struct {
 }
 
 type rawSiteConfig struct {
-	Hosts           *stringArray       `json:"hosts"`
-	Target          optionalString     `json:"target"`
-	Backend         optionalString     `json:"backend"`
-	Headers         headerMap          `json:"headers"`
-	ResponseHeaders rawResponseHeaders `json:"response"`
-	Routes          rawRoutes          `json:"routes"`
+	Hosts           *stringArray         `json:"hosts"`
+	Target          optionalString       `json:"target"`
+	Backend         optionalString       `json:"backend"`
+	Headers         headerMap            `json:"headers"`
+	ResponseHeaders responseHeaderPolicy `json:"response"`
+	Routes          rawRoutes            `json:"routes"`
 }
 
 type rawRouteConfig struct {
-	Path            *string             `json:"path"`
-	Methods         optionalStringArray `json:"methods"`
-	Target          optionalString      `json:"target"`
-	Backend         optionalString      `json:"backend"`
-	Headers         headerMap           `json:"headers"`
-	ResponseHeaders rawResponseHeaders  `json:"response"`
-	Strip           strictBool          `json:"strip"`
-}
-
-type rawResponseHeaders struct {
-	Set    optionalHeaderValues `json:"set"`
-	Add    optionalHeaderValues `json:"add"`
-	Remove optionalStringArray  `json:"remove"`
+	Path            *string              `json:"path"`
+	Methods         optionalStringArray  `json:"methods"`
+	Target          optionalString       `json:"target"`
+	Backend         optionalString       `json:"backend"`
+	Headers         headerMap            `json:"headers"`
+	ResponseHeaders responseHeaderPolicy `json:"response"`
+	Strip           strictBool           `json:"strip"`
 }
 
 type headerMap map[string]string
@@ -164,13 +158,16 @@ func (r *rawRoutes) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (h *rawResponseHeaders) UnmarshalJSON(data []byte) error {
+func (h *responseHeaderPolicy) UnmarshalJSON(data []byte) error {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 || data[0] != '{' {
 		return fmt.Errorf("must be an object")
 	}
-	type plain rawResponseHeaders
-	var decoded plain
+	var decoded struct {
+		Set    optionalHeaderValues `json:"set"`
+		Add    optionalHeaderValues `json:"add"`
+		Remove optionalStringArray  `json:"remove"`
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
@@ -188,7 +185,11 @@ func (h *rawResponseHeaders) UnmarshalJSON(data []byte) error {
 	if decoded.Remove.set && len(decoded.Remove.values) == 0 {
 		return fmt.Errorf("remove must not be empty")
 	}
-	*h = rawResponseHeaders(decoded)
+	*h = responseHeaderPolicy{
+		Set:    map[string][]string(decoded.Set.values),
+		Add:    map[string][]string(decoded.Add.values),
+		Remove: []string(decoded.Remove.values),
+	}
 	return nil
 }
 
@@ -298,14 +299,10 @@ func decodeConfig(data []byte) (config, error) {
 		}
 
 		site := siteConfig{
-			Hosts:   append([]string(nil), (*rawSite.Hosts)...),
-			Headers: map[string]string(rawSite.Headers),
-			ResponseHeaders: responseHeaderPolicy{
-				Set:    map[string][]string(rawSite.ResponseHeaders.Set.values),
-				Add:    map[string][]string(rawSite.ResponseHeaders.Add.values),
-				Remove: append([]string(nil), rawSite.ResponseHeaders.Remove.values...),
-			},
-			Routes: make([]routeConfig, len(rawSite.Routes)),
+			Hosts:           append([]string(nil), (*rawSite.Hosts)...),
+			Headers:         map[string]string(rawSite.Headers),
+			ResponseHeaders: rawSite.ResponseHeaders,
+			Routes:          make([]routeConfig, len(rawSite.Routes)),
 		}
 		if rawSite.Target.set {
 			site.Target = rawSite.Target.value
@@ -331,15 +328,11 @@ func decodeConfig(data []byte) (config, error) {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].backend must not be empty", siteIndex, routeIndex)
 			}
 			route := routeConfig{
-				Path:    *rawRoute.Path,
-				Methods: append([]string(nil), rawRoute.Methods.values...),
-				Headers: map[string]string(rawRoute.Headers),
-				ResponseHeaders: responseHeaderPolicy{
-					Set:    map[string][]string(rawRoute.ResponseHeaders.Set.values),
-					Add:    map[string][]string(rawRoute.ResponseHeaders.Add.values),
-					Remove: append([]string(nil), rawRoute.ResponseHeaders.Remove.values...),
-				},
-				Strip: bool(rawRoute.Strip),
+				Path:            *rawRoute.Path,
+				Methods:         append([]string(nil), rawRoute.Methods.values...),
+				Headers:         map[string]string(rawRoute.Headers),
+				ResponseHeaders: rawRoute.ResponseHeaders,
+				Strip:           bool(rawRoute.Strip),
 			}
 			if rawRoute.Target.set {
 				route.Target = rawRoute.Target.value
