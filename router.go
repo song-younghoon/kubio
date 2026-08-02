@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
-	"os/signal"
 	"strings"
-	"syscall"
 )
 
 const routeIndexThreshold = 8
@@ -83,11 +81,6 @@ func newRouter(cfg config) (*router, error) {
 		wildcardHosts: make(map[string]int),
 		starSite:      -1,
 	}
-	if cfg.Log {
-		signal.Ignore(syscall.SIGPIPE)
-		r.accessLogger = stdoutAccessLogger
-	}
-
 	for siteIndex, siteConfig := range cfg.Sites {
 		s, err := newSite(siteConfig, backends, trustProxies)
 		if err != nil {
@@ -111,6 +104,10 @@ func newRouter(cfg config) (*router, error) {
 				}
 			}
 		}
+	}
+	if cfg.Log {
+		prepareAccessLog()
+		r.accessLogger = stdoutAccessLogger
 	}
 
 	return r, nil

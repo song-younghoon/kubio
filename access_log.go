@@ -8,11 +8,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 )
 
-var stdoutAccessLogger = newAccessLogger(os.Stdout)
+var (
+	stdoutAccessLogger = newAccessLogger(os.Stdout)
+	prepareAccessLog   = sync.OnceFunc(func() { signal.Ignore(syscall.SIGPIPE) })
+)
 
 type accessLogger struct {
 	mu     sync.Mutex

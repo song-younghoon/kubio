@@ -96,39 +96,20 @@ func BenchmarkLinearRouteSelection(b *testing.B) {
 }
 
 func BenchmarkProxyRequest(b *testing.B) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer backend.Close()
-
-	handler, err := newRouter(config{Sites: []siteConfig{{
-		Hosts:  []string{"*"},
-		Target: backend.URL,
-		Routes: []routeConfig{{Path: "/api/*", Strip: true}},
-	}}})
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest(http.MethodGet, "http://proxy/api/users?x=1", nil)
-		req.RemoteAddr = "198.51.100.7:1234"
-		res := httptest.NewRecorder()
-		handler.ServeHTTP(res, req)
-		if res.Code != http.StatusNoContent {
-			b.Fatalf("status = %d", res.Code)
-		}
-	}
+	benchmarkProxyRequest(b, false)
 }
 
 func BenchmarkProxyRequestWithAccessLog(b *testing.B) {
+	benchmarkProxyRequest(b, true)
+}
+
+func benchmarkProxyRequest(b *testing.B, accessLog bool) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
 
-	handler, err := newRouter(config{Log: true, Sites: []siteConfig{{
+	handler, err := newRouter(config{Log: accessLog, Sites: []siteConfig{{
 		Hosts:  []string{"*"},
 		Target: backend.URL,
 		Routes: []routeConfig{{Path: "/api/*", Strip: true}},
@@ -136,7 +117,9 @@ func BenchmarkProxyRequestWithAccessLog(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	handler.accessLogger = newAccessLogger(io.Discard)
+	if accessLog {
+		handler.accessLogger = newAccessLogger(io.Discard)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
