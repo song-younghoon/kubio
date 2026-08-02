@@ -96,6 +96,17 @@ func (b *retryBudget) reserve(ctx context.Context) error {
 	return nil
 }
 
+func (b *backend) reserveRetry(ctx context.Context) (bool, error) {
+	if b.budget == nil {
+		return true, nil
+	}
+	err := b.budget.reserve(ctx)
+	if err == errRetryBudgetExceeded {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 type deadlineBody struct {
 	io.ReadCloser
 	ctx    context.Context
@@ -386,13 +397,12 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 				}
 				return nil, err
 			}
-			if b.budget != nil {
-				if admissionErr := b.budget.reserve(ctx); admissionErr != nil {
-					if admissionErr == errRetryBudgetExceeded {
-						return nil, err
-					}
-					return nil, admissionErr
-				}
+			admitted, admissionErr := b.reserveRetry(ctx)
+			if admissionErr != nil {
+				return nil, admissionErr
+			}
+			if !admitted {
+				return nil, err
 			}
 			if b.backoffDelays != nil {
 				if err := waitRetryBackoff(ctx, b.backoffDelays, b.backoffJitter, attempt+1); err != nil {
@@ -414,16 +424,15 @@ func (b *backend) roundTripWithStatusRetry(request *http.Request, state *backend
 			}
 			return nil, err
 		}
-		if b.budget != nil {
-			if admissionErr := b.budget.reserve(ctx); admissionErr != nil {
-				if admissionErr == errRetryBudgetExceeded {
-					return response, nil
-				}
-				if response.Body != nil {
-					_ = response.Body.Close()
-				}
-				return nil, admissionErr
+		admitted, admissionErr := b.reserveRetry(ctx)
+		if admissionErr != nil {
+			if response.Body != nil {
+				_ = response.Body.Close()
 			}
+			return nil, admissionErr
+		}
+		if !admitted {
+			return response, nil
 		}
 		if response.Body != nil {
 			_ = response.Body.Close()
