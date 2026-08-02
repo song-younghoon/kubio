@@ -168,9 +168,6 @@ func (h *rawResponseHeaders) UnmarshalJSON(data []byte) error {
 	if len(decoded.Set) == 0 {
 		return fmt.Errorf("set must not be empty")
 	}
-	if err := validateResponseHeaderSet(decoded.Set); err != nil {
-		return fmt.Errorf("set: %w", err)
-	}
 	h.Set = decoded.Set
 	return nil
 }
@@ -533,32 +530,12 @@ func resolveResponseHeaders(raw map[string]string) (map[string]string, error) {
 		return nil, err
 	}
 	for name := range headers {
-		if restrictedResponseHeader(name) {
+		switch name {
+		case "Proxy-Authenticate", "Proxy-Authorization":
 			return nil, fmt.Errorf("header %q is managed by the proxy", name)
 		}
 	}
 	return headers, nil
-}
-
-func validateResponseHeaderSet(headers map[string]string) error {
-	seen := make(map[string]struct{}, len(headers))
-	for name, value := range headers {
-		if !validHeaderName(name) {
-			return fmt.Errorf("invalid header name %q", name)
-		}
-		name = http.CanonicalHeaderKey(name)
-		if _, exists := seen[name]; exists {
-			return fmt.Errorf("duplicate header name %q", name)
-		}
-		seen[name] = struct{}{}
-		if restrictedResponseHeader(name) {
-			return fmt.Errorf("header %q is managed by the proxy", name)
-		}
-		if !validHeaderValue(value) {
-			return fmt.Errorf("header %q contains invalid control characters", name)
-		}
-	}
-	return nil
 }
 
 func validHeaderName(name string) bool {
@@ -628,18 +605,6 @@ func restrictedHeader(name string) bool {
 	switch strings.ToLower(name) {
 	case "connection", "proxy-connection", "keep-alive", "transfer-encoding",
 		"te", "trailer", "upgrade", "content-length":
-		return true
-	default:
-		return false
-	}
-}
-
-func restrictedResponseHeader(name string) bool {
-	if restrictedHeader(name) {
-		return true
-	}
-	switch strings.ToLower(name) {
-	case "proxy-authenticate", "proxy-authorization":
 		return true
 	default:
 		return false
