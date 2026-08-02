@@ -148,6 +148,7 @@ func TestResponseHeadersRespectTrailerAnnouncements(t *testing.T) {
 		Header: http.Header{
 			"X-Collision": {"initial-a", "initial-b"},
 			"X-Replace":   {"upstream-a", "upstream-b"},
+			"x-replace":   {"upstream-lowercase"},
 		},
 		Trailer: http.Header{"x-collision": nil},
 	}
@@ -160,8 +161,14 @@ func TestResponseHeadersRespectTrailerAnnouncements(t *testing.T) {
 	if got := response.Header.Values("X-Collision"); len(got) != 2 || got[0] != "initial-a" || got[1] != "initial-b" {
 		t.Fatalf("announced trailer collision changed initial values: %q", got)
 	}
-	if got := response.Header.Values("X-Replace"); len(got) != 1 || got[0] != "" {
-		t.Fatalf("replacement values = %q", got)
+	matchingKeys := 0
+	for name := range response.Header {
+		if strings.EqualFold(name, "X-Replace") {
+			matchingKeys++
+		}
+	}
+	if got := response.Header.Values("X-Replace"); matchingKeys != 1 || len(got) != 1 || got[0] != "" {
+		t.Fatalf("replacement keys = %d, values = %q", matchingKeys, got)
 	}
 	response.Trailer["X-Late"] = []string{"late"}
 	if response.Header.Get("X-Late") != "configured" || response.Trailer.Get("X-Late") != "late" {

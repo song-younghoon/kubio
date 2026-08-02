@@ -128,13 +128,30 @@ func replaceResponseHeaders(response *http.Response, configured map[string]strin
 	if response.Header == nil {
 		response.Header = make(http.Header, len(configured))
 	}
+	canonical := true
+	for name := range configured {
+		if http.CanonicalHeaderKey(name) != name {
+			canonical = false
+			break
+		}
+	}
+	if canonical {
+		for name := range response.Header {
+			if http.CanonicalHeaderKey(name) != name {
+				canonical = false
+				break
+			}
+		}
+	}
 	for name, value := range configured {
 		if containsHeaderName(response.Trailer, name) {
 			continue
 		}
-		for existing := range response.Header {
-			if strings.EqualFold(existing, name) {
-				delete(response.Header, existing)
+		if !canonical {
+			for existing := range response.Header {
+				if strings.EqualFold(existing, name) {
+					delete(response.Header, existing)
+				}
 			}
 		}
 		response.Header[name] = []string{value}
@@ -142,6 +159,9 @@ func replaceResponseHeaders(response *http.Response, configured map[string]strin
 }
 
 func containsHeaderName(headers http.Header, name string) bool {
+	if _, exists := headers[name]; exists {
+		return true
+	}
 	for existing := range headers {
 		if strings.EqualFold(existing, name) {
 			return true

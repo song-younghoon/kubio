@@ -120,6 +120,49 @@ func BenchmarkProxyRequest(b *testing.B) {
 	}
 }
 
+func BenchmarkReplaceResponseHeaders(b *testing.B) {
+	for _, test := range []struct {
+		name            string
+		policyHeaders   int
+		upstreamHeaders int
+		trailers        int
+	}{
+		{name: "small_4x16", policyHeaders: 4, upstreamHeaders: 16, trailers: 1},
+		{name: "stress_64x128", policyHeaders: 64, upstreamHeaders: 128, trailers: 8},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			configured := make(map[string]string, test.policyHeaders)
+			headers := make(http.Header, test.policyHeaders+test.upstreamHeaders)
+			trailers := make(http.Header, test.trailers)
+			for index := range test.upstreamHeaders {
+				headers.Set("X-Upstream-"+strconv.Itoa(index), "upstream")
+			}
+			for index := range test.policyHeaders {
+				name := "X-Policy-" + strconv.Itoa(index)
+				configured[name] = "configured"
+				headers[name] = []string{"upstream-a", "upstream-b"}
+				if index < test.trailers {
+					trailers[name] = nil
+				}
+			}
+			configured["X-Policy-"+strconv.Itoa(test.policyHeaders-1)] = ""
+			response := &http.Response{Header: headers, Trailer: trailers}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				replaceResponseHeaders(response, configured)
+			}
+			b.StopTimer()
+
+			values := response.Header.Values("X-Policy-" + strconv.Itoa(test.policyHeaders-1))
+			if len(values) != 1 || values[0] != "" {
+				b.Fatalf("empty replacement = %q", values)
+			}
+		})
+	}
+}
+
 func BenchmarkProxyRequestParallel(b *testing.B) {
 	benchmarkProxyRequestParallel(b, func(target string) config {
 		return config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: target}}}
