@@ -1,0 +1,170 @@
+Kubio kubio.json v0.14 Proposal
+Status: Agreed specification
+Base: v0.13
+
+
+1. Scope
+
+v0.14 adds a shared retry budget to a named backend. The budget limits the
+number of additional upstream attempts made by all requests using one backend
+generation during a fixed, lazily started time window.
+
+This is the complete v0.14 scope. It does not add adaptive backoff, health
+checks, weighted targets, direct-target timeout options, HTTPS upstream CA/SNI
+settings, advanced route conditions, client-facing TLS features,
+observability, routing actions, gateway features, or additional header
+policies. Those items are carried to docs/proposals/v0.15.txt.
+
+
+2. Configuration
+
+The named-backend `retry` object may add the optional `budget` object:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": ["http://app-1:3000", "http://app-2:3000"],
+          "tries": 3,
+          "retry": {
+            "status": [502, 503, 504],
+            "body": {"max": 1048576},
+            "backoff": {
+              "base": "100ms",
+              "cap": "2s",
+              "jitter": "full"
+            },
+            "deadline": "5s",
+            "budget": {"max": 1000, "window": "1s"}
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`retry.status`, `retry.methods`, `retry.body`, `retry.backoff`, and
+`retry.deadline` retain v0.13 rules. `budget` contains only positive JSON
+integer `max` and a positive Go duration string `window`. `max` must be a
+base-10 integer token without a decimal point or exponent and must be between
+1 and 1000000 inclusive. `window` is case-sensitive, is not trimmed, and does
+not support environment expansion.
+
+The complete allowed key set is `status`, `methods`, `body`, `backoff`,
+`deadline`, and `budget` inside `retry`, and `max` and `window` inside
+`budget`. Unknown fields, aliases, nulls, non-integer numbers, zero or
+negative values, duplicate keys, and placement outside a named backend are
+configuration errors.
+
+
+3. Budget behavior
+
+When `budget` is configured, Kubio creates one budget for each constructed
+named-backend generation. The budget is initially inactive. The first retry
+reservation starts a monotonic fixed window of length `window`; reservations
+made before the end of that window consume its quota. When a reservation is
+attempted at or after the end, Kubio starts a new window at that time with a
+fresh quota. A window is not aligned to wall-clock boundaries.
+
+`max` is the maximum number of additional Kubio attempts that may be
+reserved in one window, across all concurrent requests using that backend.
+The first attempt of each request is not charged. A reservation is made
+immediately before each additional attempt is scheduled, after the previous
+transport error or matching response and before any configured backoff wait.
+The reservation is consumed even if a later context cancellation, deadline,
+or transport failure prevents the attempt from starting; reservations are not
+refunded.
+
+Budget admission is one linearizable operation under the backend-local budget
+synchronization point. The operation reads one monotonic timestamp, checks the
+active request context, rolls the window when elapsed time is `>= window`, and
+then evaluates and increments the quota. At a rollover, exactly one operation
+replaces the start and resets the quota; concurrent reservations observe one
+window generation. If the context has ended at the admission decision, no
+reservation is consumed and the context error is returned. Otherwise at most
+`max` reservations are admitted in one window. A timestamp at or after the
+window end belongs to the new window. No random numbers or timers are created
+solely to enforce the budget.
+
+
+4. Exhaustion behavior
+
+After either a transport error or a matching response, Kubio checks the active
+request context before reservation. If it has ended, Kubio makes no
+reservation or backoff wait and returns the context error; matching responses
+follow the existing close/discard rule.
+
+For an active matching response, Kubio reserves before closing. If the budget
+denies the next reservation, Kubio preserves and returns that response as the
+final response.
+
+Its body, headers, trailers, response policies, client visibility, and access
+logging are handled as for an ordinary non-retried response. Kubio does not
+close or discard that response when admission is denied.
+
+If an active transport error has its next reservation denied, Kubio stops
+retrying and returns that transport error through the existing proxy error
+handling. No backoff wait occurs. If a reservation succeeds, Kubio then
+synchronously closes a matching response exactly once before backoff; close
+errors are ignored. Context expiry during or after `Close` returns the context
+error without refunding the reservation. The existing v0.13 ordering for
+informational responses, deadline expiry, and response closing otherwise
+remains unchanged.
+
+
+5. Interaction with prior retry rules
+
+The v0.13 method, body replay, status, backoff, deadline, target-order,
+selector, direct-target, and server-wide `OPTIONS *` rules remain unchanged.
+Budget reservations apply to both transport-error and status retries, and the
+same cumulative backoff ordinal is used after a successful reservation. A
+request that is ineligible for retry never consumes budget.
+
+When `budget` is absent, retry behavior is unchanged and no budget state is
+created. A backend reload creates a fresh budget generation; reservations
+from the previous generation do not affect it. Direct site and route targets
+never consume a named-backend budget.
+
+An in-flight request captures the backend generation selected by its router and
+uses that generation's budget for its entire attempt sequence. A reload affects
+only subsequently admitted requests; old-generation requests never consume the
+new budget, and the old budget remains alive until those requests finish.
+
+
+6. Reload and diagnostics
+
+Budget values are parsed and validated while building the named backend at
+startup and config reload. A valid reload publishes the complete new router,
+fresh target selectors, and a fresh budget atomically. An invalid budget
+object rejects the whole reload and retains the previous generation.
+
+Errors may identify the backend and `retry.budget.max` or
+`retry.budget.window`, but must not expose unrelated secrets. No request-path
+configuration read or reload lock is introduced.
+
+
+7. Performance constraints
+
+When `budget` is absent, the v0.13 retry hot paths retain their existing
+branches and do not acquire a budget lock. When present, admission uses one
+backend-local synchronization point and constant-time quota checks. Budget
+state is allocated once during backend construction, not per request or
+attempt.
+
+
+8. Deferred scope
+
+The following remain unresolved and move to v0.15:
+
+- Adaptive backoff.
+- Active and passive health checks.
+- Weighted target selection.
+- Direct-target timeout options, response-body timeouts, and HTTPS upstream
+  CA/SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  and additional header policies.
