@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func BenchmarkBackendSelection(b *testing.B) {
@@ -73,6 +74,37 @@ func BenchmarkBackendWeightedSelectionParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			_ = backend.nextTarget()
+		}
+	})
+}
+
+func BenchmarkBackendHealthSelection(b *testing.B) {
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://backend-0:3000", "http://backend-1:3000"},
+		Health:  &backendHealthConfig{Fail: 3, Cool: time.Hour},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = backend.nextTargetIndex()
+	}
+}
+
+func BenchmarkBackendHealthSelectionParallel(b *testing.B) {
+	backend, err := newBackend(backendConfig{
+		Targets: []string{"http://backend-0:3000", "http://backend-1:3000"},
+		Health:  &backendHealthConfig{Fail: 3, Cool: time.Hour},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = backend.nextTargetIndex()
 		}
 	})
 }

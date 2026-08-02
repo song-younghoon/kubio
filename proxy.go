@@ -431,14 +431,18 @@ func (b *backend) nextScheduledTargetIndex() int {
 }
 
 func (b *backend) nextTargetIndex() int {
+	first := b.nextScheduledTargetIndex()
 	if b.health == nil {
-		return b.nextScheduledTargetIndex()
+		return first
 	}
+	return b.nextHealthyTargetIndex(first)
+}
+
+func (b *backend) nextHealthyTargetIndex(first int) int {
 	count := len(b.targets)
 	if len(b.schedule) > 0 {
 		count = len(b.schedule)
 	}
-	first := b.nextScheduledTargetIndex()
 	index := first
 	if b.health.available(index) {
 		return index
@@ -477,7 +481,7 @@ func (b *backend) observeAttempt(index int, ctx context.Context, informational b
 }
 
 func (b *backend) nextTarget() *url.URL {
-	return b.targets[b.nextTargetIndex()]
+	return b.targets[b.nextScheduledTargetIndex()]
 }
 
 func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -859,7 +863,10 @@ func newBackendProxy(
 	trustProxies []netip.Prefix,
 ) *httputil.ReverseProxy {
 	rewrite := func(request *httputil.ProxyRequest) {
-		start := backend.nextTargetIndex()
+		start := backend.nextScheduledTargetIndex()
+		if backend.health != nil {
+			start = backend.nextHealthyTargetIndex(start)
+		}
 		rewriteProxyRequest(request, backend.targets[start], headers, trustProxies)
 		retry := retryableBackendRequest(request.In, backend.retryMethods, backend.retryBodyMax)
 		if retry || backend.health != nil {
