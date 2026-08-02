@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log"
 	"math/big"
@@ -189,7 +190,9 @@ func startTestTLSServer(t *testing.T, handler *reloadableRouter) (string, func()
 	go func() { done <- server.ServeTLS(listener, "", "") }()
 	closeServer := func() {
 		_ = server.Close()
-		<-done
+		if err := <-done; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("serve TLS: %v", err)
+		}
 	}
 	return listener.Addr().String(), closeServer
 }
@@ -222,7 +225,7 @@ func TestTLSListenerAndAtomicGenerationReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newRouter, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"example.com"}, Target: newBackend.URL}}})
+	updatedRouter, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"example.com"}, Target: newBackend.URL}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +277,7 @@ func TestTLSListenerAndAtomicGenerationReload(t *testing.T) {
 		t.Fatalf("old response = %q over %s", body, proto)
 	}
 
-	handler.StoreGeneration(newRouter, newCertificate)
+	handler.StoreGeneration(updatedRouter, newCertificate)
 	if body, _ := request(); body != "new|https" {
 		t.Fatalf("new response = %q", body)
 	}
