@@ -27,8 +27,6 @@ const (
 	proxyMaxIdleConnsPerHost   = 32
 )
 
-var proxyTransport = newProxyTransport(proxyDialTimeout, proxyResponseHeaderTimeout)
-
 func newProxyTransport(dialTimeout, responseHeaderTimeout time.Duration) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: dialTimeout}).DialContext
@@ -1102,7 +1100,7 @@ func newProxy(
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}, transports.get(timeout), siteResponseHeaders, routeResponseHeaders, 0, timeoutBody(timeout)), nil
+	}, transports.get(timeout), siteResponseHeaders, routeResponseHeaders, 0, directBodyTimeout(timeout)), nil
 }
 
 type directTransportKey struct {
@@ -1139,7 +1137,7 @@ func (c *directTransportCache) get(timeout *directTimeout) *http.Transport {
 	return transport
 }
 
-func timeoutBody(timeout *directTimeout) time.Duration {
+func directBodyTimeout(timeout *directTimeout) time.Duration {
 	if timeout == nil {
 		return 0
 	}
@@ -1191,44 +1189,48 @@ func newReverseProxy(
 	}
 	if deadline > 0 || bodyTimeout > 0 || !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
 		proxy.ModifyResponse = func(response *http.Response) error {
-			var deadlineResponseBody *deadlineBody
-			if deadline > 0 {
-				deadlineResponseBody, _ = response.Body.(*deadlineBody)
-				if deadlineResponseBody != nil {
-					if err := deadlineResponseBody.ctx.Err(); err != nil {
-						return err
-					}
-				}
-			}
-			var directResponseBody *directBody
-			if bodyTimeout > 0 && response.StatusCode >= http.StatusOK && response.StatusCode != http.StatusSwitchingProtocols && response.Body != nil {
-				ctx := context.Background()
-				if response.Request != nil {
-					ctx = response.Request.Context()
-				}
-				directResponseBody = newDirectBody(response.Body, ctx, bodyTimeout)
-				response.Body = directResponseBody
-				if err := directResponseBody.err(); err != nil {
-					_ = directResponseBody.Close()
-					return err
-				}
-			}
-			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
-			if deadlineResponseBody != nil {
-				if err := deadlineResponseBody.ctx.Err(); err != nil {
-					return err
-				}
-			}
-			if directResponseBody != nil {
-				if err := directResponseBody.err(); err != nil {
-					_ = directResponseBody.Close()
-					return err
-				}
-			}
-			return nil
+			return modifyProxyResponse(response, siteResponseHeaders, routeResponseHeaders, deadline, bodyTimeout)
 		}
 	}
 	return proxy
+}
+
+func modifyProxyResponse(response *http.Response, site, route responseHeaderPolicy, deadline, bodyTimeout time.Duration) error {
+	var deadlineResponseBody *deadlineBody
+	if deadline > 0 {
+		deadlineResponseBody, _ = response.Body.(*deadlineBody)
+		if deadlineResponseBody != nil {
+			if err := deadlineResponseBody.ctx.Err(); err != nil {
+				return err
+			}
+		}
+	}
+	var directResponseBody *directBody
+	if bodyTimeout > 0 && response.StatusCode >= http.StatusOK && response.StatusCode != http.StatusSwitchingProtocols && response.Body != nil {
+		ctx := context.Background()
+		if response.Request != nil {
+			ctx = response.Request.Context()
+		}
+		directResponseBody = newDirectBody(response.Body, ctx, bodyTimeout)
+		response.Body = directResponseBody
+		if err := directResponseBody.err(); err != nil {
+			_ = directResponseBody.Close()
+			return err
+		}
+	}
+	applyResponseHeaderPolicies(response, site, route)
+	if deadlineResponseBody != nil {
+		if err := deadlineResponseBody.ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if directResponseBody != nil {
+		if err := directResponseBody.err(); err != nil {
+			_ = directResponseBody.Close()
+			return err
+		}
+	}
+	return nil
 }
 
 func emptyResponseHeaderPolicy(policy responseHeaderPolicy) bool {

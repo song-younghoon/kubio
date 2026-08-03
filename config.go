@@ -368,14 +368,14 @@ func (t *rawDirectTimeout) UnmarshalJSON(data []byte) error {
 	if !decoded.Dial.set && !decoded.Header.set && !decoded.Body.set {
 		return fmt.Errorf("must contain dial, header, or body")
 	}
-	for name, duration := range map[string]time.Duration{
-		"dial":   decoded.Dial.value,
-		"header": decoded.Header.value,
-		"body":   decoded.Body.value,
-	} {
-		if duration > maxDirectTimeout {
-			return fmt.Errorf("%s must be no greater than %s", name, maxDirectTimeout)
-		}
+	if decoded.Dial.set && decoded.Dial.value > maxDirectTimeout {
+		return fmt.Errorf("dial must be no greater than %s", maxDirectTimeout)
+	}
+	if decoded.Header.set && decoded.Header.value > maxDirectTimeout {
+		return fmt.Errorf("header must be no greater than %s", maxDirectTimeout)
+	}
+	if decoded.Body.set && decoded.Body.value > maxDirectTimeout {
+		return fmt.Errorf("body must be no greater than %s", maxDirectTimeout)
 	}
 	*t = rawDirectTimeout{set: true, Dial: decoded.Dial, Header: decoded.Header, Body: decoded.Body}
 	return nil

@@ -337,14 +337,21 @@ func validateDirectTimeout(timeout *directTimeout) error {
 	if timeout == nil {
 		return nil
 	}
-	for name, duration := range map[string]time.Duration{
-		"dial":   timeout.Dial,
-		"header": timeout.Header,
-		"body":   timeout.Body,
-	} {
-		if duration < 0 || duration > maxDirectTimeout {
-			return fmt.Errorf("timeout.%s must not be negative and no greater than %s", name, maxDirectTimeout)
-		}
+	if err := validateDirectTimeoutValue("dial", timeout.Dial); err != nil {
+		return err
+	}
+	if err := validateDirectTimeoutValue("header", timeout.Header); err != nil {
+		return err
+	}
+	if err := validateDirectTimeoutValue("body", timeout.Body); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDirectTimeoutValue(name string, duration time.Duration) error {
+	if duration < 0 || duration > maxDirectTimeout {
+		return fmt.Errorf("timeout.%s must not be negative and no greater than %s", name, maxDirectTimeout)
 	}
 	return nil
 }
