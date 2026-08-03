@@ -83,7 +83,7 @@ func buildRuntimeGeneration(cfg config) (*runtimeGeneration, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &runtimeGeneration{router: router, certificate: certificate, bucket: newRateLimitStateValue(cfg.Limit, time.Now())}, nil
+	return &runtimeGeneration{router: router, certificate: certificate}, nil
 }
 
 func (r *reloadableRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {

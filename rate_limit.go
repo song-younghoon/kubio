@@ -62,14 +62,7 @@ func (l *rateLimiter) bindCurrent(current *atomic.Pointer[runtimeGeneration]) {
 }
 
 func (l *rateLimiter) allow() bool {
-	if l.current != nil {
-		_, allowed := l.admitGeneration(l.current.Load())
-		return allowed
-	}
-	if l.fallback == nil {
-		return true
-	}
-	return l.reserve(l.fallback, time.Now())
+	return l.admit()
 }
 
 func (l *rateLimiter) admit() bool {
