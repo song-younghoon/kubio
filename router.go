@@ -30,12 +30,13 @@ type router struct {
 }
 
 type site struct {
-	hosts          []hostPattern
-	proxy          *httputil.ReverseProxy
-	routes         []route
-	trustProxies   []netip.Prefix
-	exactRoutes    map[string][]int
-	wildcardRoutes map[string][]int
+	hosts           []hostPattern
+	proxy           *httputil.ReverseProxy
+	responseHeaders responseHeaderPolicy
+	routes          []route
+	trustProxies    []netip.Prefix
+	exactRoutes     map[string][]int
+	wildcardRoutes  map[string][]int
 }
 
 type route struct {
@@ -43,6 +44,7 @@ type route struct {
 	methods []string
 	match   routeMatch
 	proxy   *httputil.ReverseProxy
+	respond *generatedResponse
 	strip   bool
 }
 
@@ -135,7 +137,9 @@ func newRouter(cfg config) (*router, error) {
 		if cfg.RequestID {
 			enableRequestIDProxy(s.proxy)
 			for routeIndex := range s.routes {
-				enableRequestIDProxy(s.routes[routeIndex].proxy)
+				if s.routes[routeIndex].proxy != nil {
+					enableRequestIDProxy(s.routes[routeIndex].proxy)
+				}
 			}
 		}
 
@@ -218,10 +222,11 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		return site{}, err
 	}
 	s := site{
-		hosts:        hosts,
-		proxy:        proxy,
-		routes:       make([]route, 0, len(cfg.Routes)),
-		trustProxies: trustProxies,
+		hosts:           hosts,
+		proxy:           proxy,
+		responseHeaders: siteResponseHeaders,
+		routes:          make([]route, 0, len(cfg.Routes)),
+		trustProxies:    trustProxies,
 	}
 	for routeIndex, routeConfig := range cfg.Routes {
 		pattern, err := newPathPattern(routeConfig.Path)
@@ -252,6 +257,21 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		routeResponseHeaders, err := resolveResponseHeaders(routeConfig.ResponseHeaders)
 		if err != nil {
 			return s, fmt.Errorf("routes[%d].response: %w", routeIndex, err)
+		}
+		if routeConfig.Respond != nil {
+			if err := validateGeneratedResponse(routeConfig.Respond); err != nil {
+				return s, fmt.Errorf("routes[%d].respond: %w", routeIndex, err)
+			}
+			if routeConfig.Target != "" || routeConfig.Backend != "" || routeConfig.Timeout != nil || routeConfig.TLS != nil || len(routeConfig.Headers) > 0 || !emptyResponseHeaderPolicy(routeConfig.ResponseHeaders) || routeConfig.Rewrite != "" || routeConfig.Strip {
+				return s, fmt.Errorf("routes[%d].respond cannot be combined with upstream, headers, response, or rewrite fields", routeIndex)
+			}
+			s.routes = append(s.routes, route{
+				pattern: pattern,
+				methods: append([]string(nil), routeConfig.Methods...),
+				match:   compileRouteMatch(match),
+				respond: routeConfig.Respond,
+			})
+			continue
 		}
 
 		target, backendName := cfg.Target, cfg.Backend
@@ -302,6 +322,19 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		s.buildRouteIndex()
 	}
 	return s, nil
+}
+
+func validateGeneratedResponse(response *generatedResponse) error {
+	if response.Status < http.StatusOK || response.Status > 599 {
+		return fmt.Errorf("status must be an integer between 200 and 599")
+	}
+	if len(response.Body) > maxGeneratedBodyBytes {
+		return fmt.Errorf("body must not exceed %d bytes", maxGeneratedBodyBytes)
+	}
+	if (response.Status == http.StatusNoContent || response.Status == http.StatusResetContent || response.Status == http.StatusNotModified) && len(response.Body) > 0 {
+		return fmt.Errorf("body must be empty for status %d", response.Status)
+	}
+	return nil
 }
 
 func compileRouteMatch(config routeMatchConfig) routeMatch {
@@ -553,10 +586,28 @@ func (r *router) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		selected.proxy.ServeHTTP(w, req)
 		return
 	}
+	if selectedRoute.route.respond != nil {
+		serveGeneratedResponse(w, req, selectedRoute.route.respond, selected.responseHeaders)
+		return
+	}
 	if selectedRoute.route.strip {
 		stripRequestPath(req, selectedRoute.prefix)
 	}
 	selectedRoute.route.proxy.ServeHTTP(w, req)
+}
+
+func serveGeneratedResponse(w http.ResponseWriter, req *http.Request, generated *generatedResponse, sitePolicy responseHeaderPolicy) {
+	response := &http.Response{StatusCode: generated.Status, Header: make(http.Header)}
+	applyResponseHeaders(response, sitePolicy)
+	applyResponseHeaders(response, generated.Headers)
+	for name, values := range response.Header {
+		w.Header()[name] = append([]string(nil), values...)
+	}
+	w.WriteHeader(generated.Status)
+	if req.Method == http.MethodHead || generated.Status == http.StatusNoContent || generated.Status == http.StatusResetContent || generated.Status == http.StatusNotModified || len(generated.Body) == 0 {
+		return
+	}
+	_, _ = w.Write(generated.Body)
 }
 
 func serveGeneralOptions(w http.ResponseWriter, req *http.Request) {

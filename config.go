@@ -24,6 +24,7 @@ const (
 	maxHealthProbePathBytes       = 2_048
 	maxHealthProbeDuration        = 24 * time.Hour
 	maxDirectTimeout              = 24 * time.Hour
+	maxGeneratedBodyBytes         = 64 << 20
 )
 
 type config struct {
@@ -112,6 +113,7 @@ type siteConfig struct {
 type routeConfig struct {
 	Path            string               `json:"path"`
 	Rewrite         string               `json:"rewrite"`
+	Respond         *generatedResponse   `json:"respond"`
 	Methods         []string             `json:"methods"`
 	Match           *routeMatchConfig    `json:"match"`
 	Target          string               `json:"target"`
@@ -121,6 +123,12 @@ type routeConfig struct {
 	Headers         map[string]string    `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Strip           bool                 `json:"strip"`
+}
+
+type generatedResponse struct {
+	Status  int
+	Body    []byte
+	Headers responseHeaderPolicy
 }
 
 type routeMatchConfig struct {
@@ -229,15 +237,33 @@ type rawSiteConfig struct {
 type rawRouteConfig struct {
 	Path            *string              `json:"path"`
 	Rewrite         optionalString       `json:"rewrite"`
+	Respond         rawRespond           `json:"respond"`
 	Methods         optionalStringArray  `json:"methods"`
 	Match           rawRouteMatch        `json:"match"`
 	Target          optionalString       `json:"target"`
 	Backend         optionalString       `json:"backend"`
 	Timeout         rawDirectTimeout     `json:"timeout"`
 	TLS             rawUpstreamTLS       `json:"tls"`
-	Headers         headerMap            `json:"headers"`
+	Headers         optionalHeaderMap    `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Strip           strictBool           `json:"strip"`
+}
+
+type rawRespond struct {
+	set     bool
+	Status  optionalInt          `json:"status"`
+	Body    optionalString       `json:"body"`
+	Headers optionalRespondHeads `json:"headers"`
+}
+
+type optionalRespondHeads struct {
+	set    bool
+	values map[string][]string
+}
+
+type optionalHeaderMap struct {
+	set    bool
+	values map[string]string
 }
 
 type rawUpstreamTLS struct {
@@ -269,6 +295,15 @@ type optionalString struct {
 type optionalStringArray struct {
 	set    bool
 	values stringArray
+}
+
+func (m *optionalHeaderMap) UnmarshalJSON(data []byte) error {
+	var values headerMap
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	*m = optionalHeaderMap{set: true, values: map[string]string(values)}
+	return nil
 }
 
 type optionalHeaderValues struct {
@@ -666,6 +701,63 @@ func (r *rawRoutes) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (r *rawRespond) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Status  optionalInt          `json:"status"`
+		Body    optionalString       `json:"body"`
+		Headers optionalRespondHeads `json:"headers"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Status.set || decoded.Status.value < http.StatusOK || decoded.Status.value > 599 {
+		return fmt.Errorf("status must be an integer between 200 and 599")
+	}
+	body := decoded.Body.value
+	if len([]byte(body)) > maxGeneratedBodyBytes {
+		return fmt.Errorf("body must not exceed %d bytes", maxGeneratedBodyBytes)
+	}
+	if (decoded.Status.value == http.StatusNoContent || decoded.Status.value == http.StatusResetContent || decoded.Status.value == http.StatusNotModified) && body != "" {
+		return fmt.Errorf("body must be empty for status %d", decoded.Status.value)
+	}
+	*r = rawRespond{set: true, Status: decoded.Status, Body: decoded.Body, Headers: decoded.Headers}
+	return nil
+}
+
+func (h *optionalRespondHeads) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("must be an object: %w", err)
+	}
+	values := make(map[string][]string, len(raw))
+	for name, encoded := range raw {
+		encoded = bytes.TrimSpace(encoded)
+		if len(encoded) == 0 || encoded[0] != '[' {
+			return fmt.Errorf("header %q value must be a non-empty array of strings", name)
+		}
+		var array stringArray
+		if err := json.Unmarshal(encoded, &array); err != nil {
+			return fmt.Errorf("header %q value must be a non-empty array of strings: %w", name, err)
+		}
+		if len(array) == 0 {
+			return fmt.Errorf("header %q value array must not be empty", name)
+		}
+		values[name] = []string(array)
+	}
+	*h = optionalRespondHeads{set: true, values: values}
+	return nil
+}
+
 func (m *rawRouteMatch) UnmarshalJSON(data []byte) error {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 || data[0] != '{' {
@@ -1027,6 +1119,21 @@ func decodeConfig(data []byte) (config, error) {
 			if rawRoute.Rewrite.set && bool(rawRoute.Strip) {
 				return config{}, fmt.Errorf("sites[%d].routes[%d] cannot combine rewrite with strip:true", siteIndex, routeIndex)
 			}
+			var respond *generatedResponse
+			if rawRoute.Respond.set {
+				if rawRoute.Target.set || rawRoute.Backend.set || rawRoute.Timeout.set || rawRoute.TLS.set || rawRoute.Headers.set || !emptyResponseHeaderPolicy(rawRoute.ResponseHeaders) || rawRoute.Rewrite.set || bool(rawRoute.Strip) {
+					return config{}, fmt.Errorf("sites[%d].routes[%d].respond cannot be combined with upstream, headers, response, or rewrite fields", siteIndex, routeIndex)
+				}
+				resolvedHeaders, err := resolveResponseHeaders(responseHeaderPolicy{Set: rawRoute.Respond.Headers.values})
+				if err != nil {
+					return config{}, fmt.Errorf("sites[%d].routes[%d].respond.headers: %w", siteIndex, routeIndex, err)
+				}
+				respond = &generatedResponse{
+					Status:  rawRoute.Respond.Status.value,
+					Body:    []byte(rawRoute.Respond.Body.value),
+					Headers: resolvedHeaders,
+				}
+			}
 			if rawRoute.Target.set && rawRoute.Backend.set {
 				return config{}, fmt.Errorf("sites[%d].routes[%d] cannot set both target and backend", siteIndex, routeIndex)
 			}
@@ -1047,10 +1154,11 @@ func decodeConfig(data []byte) (config, error) {
 			route := routeConfig{
 				Path:            *rawRoute.Path,
 				Rewrite:         rawRoute.Rewrite.value,
+				Respond:         respond,
 				Methods:         append([]string(nil), rawRoute.Methods.values...),
 				Timeout:         decodeDirectTimeout(rawRoute.Timeout),
 				TLS:             routeTLS,
-				Headers:         map[string]string(rawRoute.Headers),
+				Headers:         map[string]string(rawRoute.Headers.values),
 				ResponseHeaders: rawRoute.ResponseHeaders,
 				Strip:           bool(rawRoute.Strip),
 			}
@@ -1109,6 +1217,7 @@ const (
 	jsonSite
 	jsonRoutes
 	jsonRoute
+	jsonRespond
 	jsonHeaders
 	jsonResponseHeaders
 	jsonBackendTimeout
@@ -1286,6 +1395,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "path", "rewrite", "methods", "target", "backend", "strip":
 			return jsonAny, nil
+		case "respond":
+			return jsonRespond, nil
 		case "tls":
 			return jsonUpstreamTLS, nil
 		case "timeout":
@@ -1296,6 +1407,14 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonHeaders, nil
 		case "response":
 			return jsonResponseHeaders, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonRespond:
+		switch key {
+		case "status", "body":
+			return jsonAny, nil
+		case "headers":
+			return jsonHeaders, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonResponseHeaders:
