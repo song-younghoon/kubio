@@ -22,6 +22,7 @@ type reloadableRouter struct {
 type runtimeGeneration struct {
 	router      *router
 	certificate *tls.Certificate
+	bucket      *rateLimitState
 }
 
 type fileState struct {
@@ -65,7 +66,11 @@ func main() {
 
 func newReloadableRouter(initial *router, certificate *tls.Certificate) *reloadableRouter {
 	r := &reloadableRouter{}
-	r.current.Store(&runtimeGeneration{router: initial, certificate: certificate})
+	if initial.limiter == nil {
+		initial.limiter = newRateLimiter(nil)
+	}
+	initial.limiter.bindCurrent(&r.current)
+	r.current.Store(&runtimeGeneration{router: initial, certificate: certificate, bucket: newRateLimitState(initial.limit, time.Now())})
 	return r
 }
 
@@ -78,11 +83,51 @@ func buildRuntimeGeneration(cfg config) (*runtimeGeneration, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &runtimeGeneration{router: router, certificate: certificate}, nil
+	return &runtimeGeneration{router: router, certificate: certificate, bucket: newRateLimitState(cfg.Limit, time.Now())}, nil
 }
 
 func (r *reloadableRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	r.current.Load().router.ServeHTTP(w, req)
+	generation := r.current.Load()
+	if generation == nil || generation.router == nil {
+		return
+	}
+	router := generation.router
+	var id string
+	if router.requestID {
+		var err error
+		id, err = requestIDFor(req)
+		if err != nil {
+			if router.accessLogger != nil {
+				router.serveRequestIDFailure(w, req)
+			} else {
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			}
+			return
+		}
+	}
+
+	latest := r.current.Load()
+	if latest == nil || latest.router == nil {
+		return
+	}
+	if latest.router.limit != nil {
+		_, allowed := router.limiter.admitGeneration(latest)
+		if !allowed {
+			router.serveRejected(w, req, id)
+			return
+		}
+	}
+
+	if router.requestID {
+		req = setRequestID(req, id)
+		requestWriter := newRequestIDWriter(w, id)
+		router.serveResolved(requestWriter, req)
+		if !requestWriter.committed {
+			requestWriter.enforce()
+		}
+		return
+	}
+	router.serveResolved(w, req)
 }
 
 func (r *reloadableRouter) Store(next *router) {
@@ -90,7 +135,19 @@ func (r *reloadableRouter) Store(next *router) {
 }
 
 func (r *reloadableRouter) StoreGeneration(next *router, certificate *tls.Certificate) {
-	old := r.current.Swap(&runtimeGeneration{router: next, certificate: certificate})
+	old := r.current.Load()
+	if old != nil && old.router != nil {
+		next.limiter = old.router.limiter
+	}
+	if next.limiter == nil {
+		next.limiter = newRateLimiter(nil)
+		next.limiter.bindCurrent(&r.current)
+	}
+	old = r.current.Swap(&runtimeGeneration{
+		router:      next,
+		certificate: certificate,
+		bucket:      newRateLimitState(next.limit, time.Now()),
+	})
 	if old != nil && old.router != next {
 		old.router.close()
 	}

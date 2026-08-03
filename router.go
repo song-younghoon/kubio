@@ -18,6 +18,8 @@ const routeIndexThreshold = 8
 type router struct {
 	accessLogger     *accessLogger
 	requestID        bool
+	limiter          *rateLimiter
+	limit            *limitConfig
 	backends         map[string]*backend
 	generation       *backendGeneration
 	directTransports []*http.Transport
@@ -118,6 +120,8 @@ func newRouter(cfg config) (*router, error) {
 	r := &router{
 		backends:      backends,
 		requestID:     cfg.RequestID,
+		limiter:       newRateLimiter(cfg.Limit),
+		limit:         cfg.Limit,
 		generation:    generation,
 		sites:         make([]site, 0, len(cfg.Sites)),
 		trustProxies:  trustProxies,
@@ -539,6 +543,12 @@ func effectiveClientIP(req *http.Request, trustProxies []netip.Prefix) (netip.Ad
 }
 
 func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.serveRequest(w, req, func(w http.ResponseWriter, req *http.Request) {
+		r.serveHTTP(w, req)
+	})
+}
+
+func (r *router) serveRequest(w http.ResponseWriter, req *http.Request, serve func(http.ResponseWriter, *http.Request)) {
 	if r.requestID {
 		id, err := requestIDFor(req)
 		if err != nil {
@@ -552,9 +562,9 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		req = setRequestID(req, id)
 		requestWriter := newRequestIDWriter(w, id)
 		if r.accessLogger != nil {
-			r.serveLogged(requestWriter, req)
+			r.serveLogged(requestWriter, req, serve)
 		} else {
-			r.serveHTTP(requestWriter, req)
+			serve(requestWriter, req)
 		}
 		if !requestWriter.committed {
 			requestWriter.enforce()
@@ -562,13 +572,21 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if r.accessLogger != nil {
-		r.serveLogged(w, req)
+		r.serveLogged(w, req, serve)
 		return
 	}
-	r.serveHTTP(w, req)
+	serve(w, req)
 }
 
 func (r *router) serveHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.limiter != nil && !r.limiter.admit() {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	r.serveHTTPRoutes(w, req)
+}
+
+func (r *router) serveHTTPRoutes(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodOptions && req.RequestURI == "*" {
 		serveGeneralOptions(w, req)
 		return
@@ -594,6 +612,38 @@ func (r *router) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		stripRequestPath(req, selectedRoute.prefix)
 	}
 	selectedRoute.route.proxy.ServeHTTP(w, req)
+}
+
+func (r *router) serveResolved(w http.ResponseWriter, req *http.Request) {
+	if r.accessLogger != nil {
+		r.serveLogged(w, req, r.serveHTTPRoutes)
+		return
+	}
+	r.serveHTTPRoutes(w, req)
+}
+
+func (r *router) serveRejected(w http.ResponseWriter, req *http.Request, id string) {
+	writeStatus := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+	if r.requestID {
+		req = setRequestID(req, id)
+		requestWriter := newRequestIDWriter(w, id)
+		if r.accessLogger != nil {
+			r.serveLogged(requestWriter, req, writeStatus)
+		} else {
+			writeStatus(requestWriter, req)
+		}
+		if !requestWriter.committed {
+			requestWriter.enforce()
+		}
+		return
+	}
+	if r.accessLogger != nil {
+		r.serveLogged(w, req, writeStatus)
+		return
+	}
+	writeStatus(w, req)
 }
 
 func serveGeneratedResponse(w http.ResponseWriter, req *http.Request, generated *generatedResponse) {

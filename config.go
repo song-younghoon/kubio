@@ -25,12 +25,15 @@ const (
 	maxHealthProbeDuration        = 24 * time.Hour
 	maxDirectTimeout              = 24 * time.Hour
 	maxGeneratedBodyBytes         = 64 << 20
+	maxLimitRate                  = 1_000_000
+	maxLimitBurst                 = 1_000_000
 )
 
 type config struct {
 	Listen       string                   `json:"listen"`
 	Log          bool                     `json:"log"`
 	RequestID    bool                     `json:"id"`
+	Limit        *limitConfig             `json:"limit"`
 	TLS          *tlsConfig               `json:"tls"`
 	TrustProxies []string                 `json:"trustProxies"`
 	Backends     map[string]backendConfig `json:"backends"`
@@ -40,6 +43,11 @@ type config struct {
 type tlsConfig struct {
 	Cert string `json:"cert"`
 	Key  string `json:"key"`
+}
+
+type limitConfig struct {
+	Rate  int
+	Burst int
 }
 
 type backendConfig struct {
@@ -148,6 +156,7 @@ type rawConfig struct {
 	Listen       *string          `json:"listen"`
 	Log          strictBool       `json:"log"`
 	RequestID    strictBool       `json:"id"`
+	Limit        rawLimit         `json:"limit"`
 	TLS          rawTLSConfig     `json:"tls"`
 	TrustProxies stringArray      `json:"trustProxies"`
 	Backends     rawBackends      `json:"backends"`
@@ -158,6 +167,12 @@ type rawTLSConfig struct {
 	set  bool
 	Cert string
 	Key  string
+}
+
+type rawLimit struct {
+	set   bool
+	Rate  optionalInt `json:"rate"`
+	Burst optionalInt `json:"burst"`
 }
 
 type rawBackendConfig struct {
@@ -374,6 +389,33 @@ func (t *rawTLSConfig) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("key must be a non-empty string")
 	}
 	*t = rawTLSConfig{set: true, Cert: decoded.Cert.value, Key: decoded.Key.value}
+	return nil
+}
+
+func (l *rawLimit) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Rate  optionalInt `json:"rate"`
+		Burst optionalInt `json:"burst"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Rate.set || !decoded.Burst.set {
+		return fmt.Errorf("must contain rate and burst")
+	}
+	if decoded.Rate.value < 1 || decoded.Rate.value > maxLimitRate {
+		return fmt.Errorf("rate must be between 1 and %d", maxLimitRate)
+	}
+	if decoded.Burst.value < 1 || decoded.Burst.value > maxLimitBurst {
+		return fmt.Errorf("burst must be between 1 and %d", maxLimitBurst)
+	}
+	*l = rawLimit{set: true, Rate: decoded.Rate, Burst: decoded.Burst}
 	return nil
 }
 
@@ -998,6 +1040,9 @@ func decodeConfig(data []byte) (config, error) {
 		Backends:     make(map[string]backendConfig, len(raw.Backends)),
 		Sites:        make([]siteConfig, len(*raw.Sites)),
 	}
+	if raw.Limit.set {
+		cfg.Limit = &limitConfig{Rate: raw.Limit.Rate.value, Burst: raw.Limit.Burst.value}
+	}
 	if raw.TLS.set {
 		cfg.TLS = &tlsConfig{Cert: raw.TLS.Cert, Key: raw.TLS.Key}
 	}
@@ -1219,6 +1264,7 @@ type jsonSchema uint8
 const (
 	jsonAny jsonSchema = iota
 	jsonRoot
+	jsonLimit
 	jsonBackends
 	jsonBackend
 	jsonBackendRetry
@@ -1310,12 +1356,20 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "listen", "log", "id", "trustProxies":
 			return jsonAny, nil
+		case "limit":
+			return jsonLimit, nil
 		case "tls":
 			return jsonTLS, nil
 		case "backends":
 			return jsonBackends, nil
 		case "sites":
 			return jsonSites, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonLimit:
+		switch key {
+		case "rate", "burst":
+			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonBackends:

@@ -57,7 +57,7 @@ type accessResponseWriter struct {
 	bytes  int64
 }
 
-func (r *router) serveLogged(w http.ResponseWriter, req *http.Request) {
+func (r *router) serveLogged(w http.ResponseWriter, req *http.Request, serve func(http.ResponseWriter, *http.Request)) {
 	method, host, proto := req.Method, req.Host, req.Proto
 	path := req.URL.EscapedPath()
 	if path == "" {
@@ -86,7 +86,7 @@ func (r *router) serveLogged(w http.ResponseWriter, req *http.Request) {
 			panic(panicValue)
 		}
 	}()
-	r.serveHTTP(observed, req)
+	serve(observed, req)
 }
 
 func (r *router) serveRequestIDFailure(w http.ResponseWriter, req *http.Request) {
