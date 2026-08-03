@@ -1,0 +1,32 @@
+Kubio kubio.json v0.26 Proposal
+Status: Under review
+Base: v0.25
+
+
+1. Scope under discussion
+
+v0.26 may select one or more capabilities deferred by v0.25. The following
+items are candidates only and are not yet part of the agreed specification:
+
+- Custom bodies for Kubio-generated errors.
+- Metrics, configurable log sinks and formats, and health, admin, or reload
+  endpoints.
+- Forwarded and PROXY protocols.
+- Listener client authentication, inbound mutual TLS, TLS passthrough,
+  configurable TLS policy, ACME, multiple listener certificates, and listener
+  SNI certificate selection.
+- Authentication and authorization.
+- Compression and caching.
+- Service discovery.
+- Response trailers, conditional response headers, and request-header
+  policies.
+- Adaptive retry policies.
+- Policies for Kubio-generated or intermediate responses.
+
+
+2. Decision status
+
+The v0.26 scope, configuration names, interaction rules, security behavior,
+and compatibility boundaries require discussion before any item is promoted
+to docs/specs/v0.26.txt. Items not selected for v0.26 remain candidates for a
+later proposal.

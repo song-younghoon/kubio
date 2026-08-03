@@ -1,0 +1,116 @@
+Kubio kubio.json v0.25 Specification
+Status: Agreed specification
+Base: v0.24
+
+
+1. Scope
+
+v0.25 adds one global token-bucket rate limit. It is an admission limit for
+the whole Kubio process, not a per-client, per-host, per-route, or per-method
+quota. It does not add authentication, authorization, metrics, configurable
+logs, or custom error bodies.
+
+
+2. Configuration
+
+The root may set `limit`:
+
+    {
+      "limit": {
+        "rate": 1000,
+        "burst": 2000
+      }
+    }
+
+`limit.rate` is the number of tokens replenished per second and must be a
+JSON base-10 integer from 1 through 1,000,000. `limit.burst` is the bucket
+capacity and must be a JSON base-10 integer from 1 through 1,000,000. Both
+fields are required; the bucket starts full. A request consumes one token.
+Kubio represents the balance in integer nanotoken units: one token is exactly
+1,000,000,000 units and the capacity is exactly `burst * 1,000,000,000`
+units. At each linearization point, Kubio samples the Go monotonic clock and
+computes `elapsed = max(now - last, 0)`. `elapsed` is the non-negative integer
+number of nanoseconds in the Go monotonic `time.Duration`, so `elapsed * rate`
+is measured in nanotokens. It adds that amount, caps the balance at capacity,
+and then admits exactly when the balance is at least 1,000,000,000 units,
+subtracting that amount on admission. The timestamp is updated even when a
+request is denied, provided `now >= last`;
+an earlier sample leaves the timestamp and balance unchanged. Refill and
+capacity arithmetic uses saturating overflow handling, so an overflow fills
+the bucket to capacity. Exact-boundary availability admits, and fractional
+replenishment is retained between requests.
+
+The object is valid only at the configuration root. Nulls, non-objects,
+unknown fields, aliases, duplicate keys, missing fields, non-integer values,
+decimals, exponents, and out-of-range values are errors. When `limit` is
+absent, rate limiting is disabled.
+
+
+3. Admission behavior
+
+When enabled, Kubio evaluates the limiter once for every incoming HTTP
+request, after request-ID resolution and before `OPTIONS *` handling, site
+selection, route matching, or proxying. If a token is available, the request
+continues normally. If no token is available, Kubio calls `WriteHeader(429)`
+once, writes zero body bytes, and does not contact an upstream or evaluate a
+route. A rejection does not call `http.Error`, an upstream/error handler, or
+any response-header policy. Kubio does not emit `Retry-After` and does not
+wait for a token; the managed request ID is the only response header Kubio
+may add.
+
+The existing request-ID feature, when enabled, owns the response ID for a
+429 response. A rejected request is recorded by the existing access log with
+status 429 and zero bytes when logging is enabled. No custom error-body or
+response-header policy applies to a limiter-generated response.
+
+Request-ID resolution, including random-ID failure, occurs first. An
+ID-generation failure follows the existing 500 path and consumes no token. A
+limiter rejection occurs before the existing `OPTIONS *` body-discard logic,
+so Kubio does not read or discard that request body.
+
+The limiter is global across all sites, hosts, routes, methods, listeners,
+and generated responses in the process. It does not inspect client identity,
+forwarded headers, path, method, or request body.
+
+
+4. Reload and failure behavior
+
+Kubio owns one limiter admission state per process, shared by every runtime
+generation. Candidate rate and burst parameters are parsed and validated
+without touching the live state. A valid reload atomically publishes the new
+runtime generation and replaces the process limiter parameters with a full
+new bucket; admissions and publication are linearized against that shared
+state. Admissions linearized before publication use the old state, and
+admissions after publication use the new state. Requests already admitted
+retain the runtime generation selected for them. A reload with invalid limit
+configuration is logged and leaves the current generation and shared
+limiter state unchanged. If `limit` is removed, the shared limiter is
+disabled for the new generation. Any failed or unpublished generation,
+including failures after limit parsing, leaves the current runtime generation
+and shared limiter state unchanged; limiter publication occurs only with
+successful generation publication.
+
+
+5. Performance and concurrency constraints
+
+The disabled mode adds no limiter clock read, allocation, lock, or atomic
+operation to request handling. The enabled mode performs one non-blocking,
+thread-safe token reservation with no sleeping and no global mutex; concurrent
+requests are linearized by the shared limiter state. Configuration parsing
+and generation construction perform no request admission.
+
+
+6. Deferred scope
+
+The following remain unresolved and move to the next proposal:
+
+- Custom bodies for Kubio-generated errors.
+- Metrics, configurable log sinks/formats, and health/admin/reload endpoints.
+- Forwarded and PROXY protocols.
+- Listener client authentication, inbound mutual TLS, TLS passthrough,
+  configurable TLS policy, ACME, multiple listener certificates, and listener
+  SNI certificate selection.
+- Authentication, authorization, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  adaptive retry policies, and policies for Kubio-generated or intermediate
+  responses.
