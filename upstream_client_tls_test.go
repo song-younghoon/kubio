@@ -25,7 +25,7 @@ type clientTLSMaterial struct {
 	ca                                    *x509.Certificate
 }
 
-func newClientTLSMaterial(t *testing.T) clientTLSMaterial {
+func newClientTLSMaterial(t testing.TB) clientTLSMaterial {
 	t.Helper()
 	directory := t.TempDir()
 	now := time.Now().Add(-time.Hour)
@@ -56,7 +56,7 @@ func newClientTLSMaterial(t *testing.T) clientTLSMaterial {
 	}
 }
 
-func newTestECDSAKey(t *testing.T) *ecdsa.PrivateKey {
+func newTestECDSAKey(t testing.TB) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -65,7 +65,7 @@ func newTestECDSAKey(t *testing.T) *ecdsa.PrivateKey {
 	return key
 }
 
-func createTestCertificate(t *testing.T, template, parent *x509.Certificate, publicKey, signer any) []byte {
+func createTestCertificate(t testing.TB, template, parent *x509.Certificate, publicKey, signer any) []byte {
 	t.Helper()
 	der, err := x509.CreateCertificate(rand.Reader, template, parent, publicKey, signer)
 	if err != nil {
@@ -74,7 +74,7 @@ func createTestCertificate(t *testing.T, template, parent *x509.Certificate, pub
 	return der
 }
 
-func writeSignedClientTLSCertificate(t *testing.T, directory, name string, ca *x509.Certificate, caKey *ecdsa.PrivateKey, dnsNames []string, usages []x509.ExtKeyUsage) (string, string, tls.Certificate) {
+func writeSignedClientTLSCertificate(t testing.TB, directory, name string, ca *x509.Certificate, caKey *ecdsa.PrivateKey, dnsNames []string, usages []x509.ExtKeyUsage) (string, string, tls.Certificate) {
 	t.Helper()
 	key := newTestECDSAKey(t)
 	now := time.Now().Add(-time.Hour)
@@ -103,7 +103,7 @@ func writeSignedClientTLSCertificate(t *testing.T, directory, name string, ca *x
 	return certPath, keyPath, certificate
 }
 
-func writePEM(t *testing.T, path, blockType string, data []byte) {
+func writePEM(t testing.TB, path, blockType string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: data}), 0o600); err != nil {
 		t.Fatal(err)
@@ -230,5 +230,27 @@ func TestUpstreamClientCertificateConfigAndHTTPValidation(t *testing.T) {
 	}}})
 	if err == nil {
 		t.Fatal("HTTP target accepted upstream client certificate")
+	}
+}
+
+func BenchmarkDirectTLSTransportCache(b *testing.B) {
+	material := newClientTLSMaterial(b)
+	config := &upstreamTLSConfig{
+		CAPath: material.caPath, Name: "upstream.test",
+		CertPath: material.clientCertPath, KeyPath: material.clientKeyPath,
+	}
+	cache := newDirectTransportCache()
+	if _, err := cache.get(nil, config); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		if _, err := cache.get(nil, config); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	for _, transport := range cache.all {
+		transport.CloseIdleConnections()
 	}
 }
