@@ -37,6 +37,9 @@ func newProxyTransportWithTLS(dialTimeout, responseHeaderTimeout time.Duration, 
 	transport.MaxIdleConnsPerHost = proxyMaxIdleConnsPerHost
 	if config != nil {
 		transport.TLSClientConfig = &tls.Config{RootCAs: config.RootCAs, ServerName: config.Name}
+		if config.ClientCert != nil {
+			transport.TLSClientConfig.Certificates = []tls.Certificate{*config.ClientCert}
+		}
 		transport.ForceAttemptHTTP2 = true
 	}
 	return transport
@@ -1164,9 +1167,15 @@ type directTransportKey struct {
 }
 
 type upstreamTLSKey struct {
-	caPath string
-	name   string
-	roots  *x509.CertPool
+	caPath   string
+	caHash   [32]byte
+	name     string
+	certPath string
+	keyPath  string
+	certHash [32]byte
+	keyHash  [32]byte
+	roots    *x509.CertPool
+	client   *tls.Certificate
 }
 
 type directTransportCache struct {
@@ -1184,17 +1193,18 @@ func newDirectTransportCache() *directTransportCache {
 
 func (c *directTransportCache) get(timeout *directTimeout, tlsConfig *upstreamTLSConfig) (*http.Transport, error) {
 	if tlsConfig != nil {
-		identity := upstreamTLSKey{caPath: tlsConfig.CAPath, name: tlsConfig.Name, roots: tlsConfig.RootCAs}
-		loaded, ok := c.loadedTLS[identity]
-		if !ok {
-			var err error
-			loaded, err = loadUpstreamTLS(tlsConfig)
-			if err != nil {
-				return nil, err
-			}
-			c.loadedTLS[identity] = loaded
+		loadedConfig, err := loadUpstreamTLS(tlsConfig)
+		if err != nil {
+			return nil, err
 		}
-		tlsConfig = loaded
+		identity := upstreamTLSIdentity(loadedConfig)
+		cachedConfig, ok := c.loadedTLS[identity]
+		if !ok {
+			c.loadedTLS[identity] = loadedConfig
+		} else {
+			loadedConfig = cachedConfig
+		}
+		tlsConfig = loadedConfig
 	}
 	dial, header := proxyDialTimeout, proxyResponseHeaderTimeout
 	if timeout != nil {
@@ -1213,6 +1223,25 @@ func (c *directTransportCache) get(timeout *directTimeout, tlsConfig *upstreamTL
 	c.byKey[key] = transport
 	c.all = append(c.all, transport)
 	return transport, nil
+}
+
+func upstreamTLSIdentity(config *upstreamTLSConfig) upstreamTLSKey {
+	identity := upstreamTLSKey{
+		caPath:   config.CAPath,
+		caHash:   config.CAHash,
+		name:     config.Name,
+		certPath: config.CertPath,
+		keyPath:  config.KeyPath,
+		certHash: config.CertHash,
+		keyHash:  config.KeyHash,
+	}
+	if config.CAHash == ([32]byte{}) {
+		identity.roots = config.RootCAs
+	}
+	if config.CertHash == ([32]byte{}) || config.KeyHash == ([32]byte{}) {
+		identity.client = config.ClientCert
+	}
+	return identity
 }
 
 func directBodyTimeout(timeout *directTimeout) time.Duration {

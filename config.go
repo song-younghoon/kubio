@@ -271,6 +271,8 @@ type rawUpstreamTLS struct {
 	set  bool
 	CA   optionalString `json:"ca"`
 	Name optionalString `json:"name"`
+	Cert optionalString `json:"cert"`
+	Key  optionalString `json:"key"`
 }
 
 type rawRouteMatch struct {
@@ -383,14 +385,16 @@ func (t *rawUpstreamTLS) UnmarshalJSON(data []byte) error {
 	var decoded struct {
 		CA   optionalString `json:"ca"`
 		Name optionalString `json:"name"`
+		Cert optionalString `json:"cert"`
+		Key  optionalString `json:"key"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return err
 	}
-	if !decoded.CA.set && !decoded.Name.set {
-		return fmt.Errorf("must contain ca or name")
+	if !decoded.CA.set && !decoded.Name.set && !decoded.Cert.set && !decoded.Key.set {
+		return fmt.Errorf("must contain ca, name, cert, or key")
 	}
 	if decoded.CA.set && decoded.CA.value == "" {
 		return fmt.Errorf("ca must be a non-empty string")
@@ -403,7 +407,16 @@ func (t *rawUpstreamTLS) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("name: %w", err)
 		}
 	}
-	*t = rawUpstreamTLS{set: true, CA: decoded.CA, Name: decoded.Name}
+	if decoded.Cert.set != decoded.Key.set {
+		return fmt.Errorf("cert and key must be set together")
+	}
+	if decoded.Cert.set && decoded.Cert.value == "" {
+		return fmt.Errorf("cert must be a non-empty string")
+	}
+	if decoded.Key.set && decoded.Key.value == "" {
+		return fmt.Errorf("key must be a non-empty string")
+	}
+	*t = rawUpstreamTLS{set: true, CA: decoded.CA, Name: decoded.Name, Cert: decoded.Cert, Key: decoded.Key}
 	return nil
 }
 
@@ -1444,7 +1457,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonUpstreamTLS:
 		switch key {
-		case "ca", "name":
+		case "ca", "name", "cert", "key":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
