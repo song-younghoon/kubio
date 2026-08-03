@@ -613,30 +613,23 @@ func (m *routeMatchState) matches(route *route) bool {
 			return false
 		}
 	}
-	if len(route.match.query) == 0 {
-		if len(route.match.ip) == 0 {
-			return true
+	if len(route.match.query) > 0 {
+		if !m.queryParsed {
+			var err error
+			m.query, err = url.ParseQuery(m.req.URL.RawQuery)
+			m.queryValid = err == nil
+			m.queryParsed = true
 		}
-		return m.matchesClientIP(route)
-	}
-	if !m.queryParsed {
-		var err error
-		m.query, err = url.ParseQuery(m.req.URL.RawQuery)
-		m.queryValid = err == nil
-		m.queryParsed = true
-	}
-	if !m.queryValid {
-		return false
-	}
-	for _, condition := range route.match.query {
-		if !matchesAny(m.query[condition.name], condition.alternatives) {
+		if !m.queryValid {
 			return false
 		}
+		for _, condition := range route.match.query {
+			if !matchesAny(m.query[condition.name], condition.alternatives) {
+				return false
+			}
+		}
 	}
-	if len(route.match.ip) == 0 {
-		return true
-	}
-	return m.matchesClientIP(route)
+	return len(route.match.ip) == 0 || m.matchesClientIP(route)
 }
 
 func (m *routeMatchState) matchesClientIP(route *route) bool {
