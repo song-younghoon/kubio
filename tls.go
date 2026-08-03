@@ -74,13 +74,13 @@ func loadUpstreamTLS(config *upstreamTLSConfig) (*upstreamTLSConfig, error) {
 		changed = true
 	}
 	if config.CertPath != "" && config.ClientCert == nil {
-		certificate, certHash, keyHash, err := loadUpstreamClientCertificateWithHashes(config.CertPath, config.KeyPath)
+		material, err := loadUpstreamClientMaterial(config.CertPath, config.KeyPath)
 		if err != nil {
 			return nil, err
 		}
-		loaded.ClientCert = &certificate
-		loaded.CertHash = certHash
-		loaded.KeyHash = keyHash
+		loaded.ClientCert = &material.certificate
+		loaded.CertHash = material.certHash
+		loaded.KeyHash = material.keyHash
 		changed = true
 	}
 	if !changed {
@@ -90,14 +90,20 @@ func loadUpstreamTLS(config *upstreamTLSConfig) (*upstreamTLSConfig, error) {
 }
 
 func loadUpstreamClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
-	certificate, _, _, err := loadUpstreamClientCertificateWithHashes(certPath, keyPath)
-	return certificate, err
+	material, err := loadUpstreamClientMaterial(certPath, keyPath)
+	return material.certificate, err
 }
 
-func loadUpstreamClientCertificateWithHashes(certPath, keyPath string) (tls.Certificate, [32]byte, [32]byte, error) {
+type upstreamClientMaterial struct {
+	certificate tls.Certificate
+	certHash    [32]byte
+	keyHash     [32]byte
+}
+
+func loadUpstreamClientMaterial(certPath, keyPath string) (upstreamClientMaterial, error) {
 	certData, err := os.ReadFile(certPath)
 	if err != nil {
-		return tls.Certificate{}, [32]byte{}, [32]byte{}, fmt.Errorf("tls.cert %q: read failed", certPath)
+		return upstreamClientMaterial{}, fmt.Errorf("tls.cert %q: read failed", certPath)
 	}
 	certHash := sha256.Sum256(certData)
 	var keyHash [32]byte
@@ -110,20 +116,20 @@ func loadUpstreamClientCertificateWithHashes(certPath, keyPath string) (tls.Cert
 		if err == nil {
 			keyData, readErr := os.ReadFile(keyPath)
 			if readErr != nil {
-				return tls.Certificate{}, [32]byte{}, [32]byte{}, fmt.Errorf("tls.key %q: read failed", keyPath)
+				return upstreamClientMaterial{}, fmt.Errorf("tls.key %q: read failed", keyPath)
 			}
 			keyHash = sha256.Sum256(keyData)
 			keyPEM, err = validateClientKeyPEM(keyData)
 		}
 	}
 	if err != nil {
-		return tls.Certificate{}, [32]byte{}, [32]byte{}, fmt.Errorf("tls.cert %q/tls.key %q: invalid PEM or certificate/key pair", certPath, keyPath)
+		return upstreamClientMaterial{}, fmt.Errorf("tls.cert %q/tls.key %q: invalid PEM or certificate/key pair", certPath, keyPath)
 	}
 	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return tls.Certificate{}, [32]byte{}, [32]byte{}, fmt.Errorf("tls.cert %q/tls.key %q: invalid certificate/key pair", certPath, keyPath)
+		return upstreamClientMaterial{}, fmt.Errorf("tls.cert %q/tls.key %q: invalid certificate/key pair", certPath, keyPath)
 	}
-	return certificate, certHash, keyHash, nil
+	return upstreamClientMaterial{certificate: certificate, certHash: certHash, keyHash: keyHash}, nil
 }
 
 func validateClientCertificatePEM(data []byte) ([]byte, error) {
@@ -172,7 +178,6 @@ func splitCombinedClientPEM(data []byte) ([]byte, []byte, error) {
 	var certificates, key []byte
 	seenKey := false
 	certCount := 0
-	keyCount := 0
 	for {
 		remaining = bytes.TrimLeftFunc(remaining, unicode.IsSpace)
 		if len(remaining) == 0 {
@@ -186,11 +191,10 @@ func splitCombinedClientPEM(data []byte) ([]byte, []byte, error) {
 			return nil, nil, fmt.Errorf("invalid combined PEM")
 		}
 		if validClientKeyBlockType(block.Type) {
-			if seenKey || keyCount > 0 {
+			if seenKey {
 				return nil, nil, fmt.Errorf("invalid combined PEM")
 			}
 			seenKey = true
-			keyCount++
 			key = pem.EncodeToMemory(block)
 		} else {
 			if seenKey || block.Type != "CERTIFICATE" {
@@ -204,7 +208,7 @@ func splitCombinedClientPEM(data []byte) ([]byte, []byte, error) {
 		}
 		remaining = rest
 	}
-	if certCount == 0 || keyCount != 1 {
+	if certCount == 0 || !seenKey {
 		return nil, nil, fmt.Errorf("invalid combined PEM")
 	}
 	return certificates, key, nil

@@ -1179,17 +1179,17 @@ type upstreamTLSKey struct {
 }
 
 type directTransportCache struct {
-	byKey          map[directTransportKey]*http.Transport
-	loadedByConfig map[*upstreamTLSConfig]*upstreamTLSConfig
-	loadedTLS      map[upstreamTLSKey]*upstreamTLSConfig
-	all            []*http.Transport
+	byKey            map[directTransportKey]*http.Transport
+	loadedByConfig   map[*upstreamTLSConfig]*upstreamTLSConfig
+	loadedByMaterial map[upstreamTLSKey]*upstreamTLSConfig
+	all              []*http.Transport
 }
 
 func newDirectTransportCache() *directTransportCache {
 	return &directTransportCache{
-		byKey:          make(map[directTransportKey]*http.Transport),
-		loadedByConfig: make(map[*upstreamTLSConfig]*upstreamTLSConfig),
-		loadedTLS:      make(map[upstreamTLSKey]*upstreamTLSConfig),
+		byKey:            make(map[directTransportKey]*http.Transport),
+		loadedByConfig:   make(map[*upstreamTLSConfig]*upstreamTLSConfig),
+		loadedByMaterial: make(map[upstreamTLSKey]*upstreamTLSConfig),
 	}
 }
 
@@ -1205,9 +1205,9 @@ func (c *directTransportCache) get(timeout *directTimeout, tlsConfig *upstreamTL
 			c.loadedByConfig[tlsConfig] = loadedConfig
 		}
 		identity := upstreamTLSIdentity(loadedConfig)
-		cachedConfig, ok := c.loadedTLS[identity]
+		cachedConfig, ok := c.loadedByMaterial[identity]
 		if !ok {
-			c.loadedTLS[identity] = loadedConfig
+			c.loadedByMaterial[identity] = loadedConfig
 		} else {
 			loadedConfig = cachedConfig
 		}
