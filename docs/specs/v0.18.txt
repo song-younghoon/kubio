@@ -1,0 +1,169 @@
+Kubio kubio.json v0.18 Proposal
+Status: Agreed specification
+Base: v0.17
+
+
+1. Scope
+
+v0.18 adds timeout controls to direct site and route targets. It covers the
+connection, response-header, and response-body phases that are not controlled
+by a named backend's timeout settings. Existing `backends.<name>.timeout`
+objects with `dial` and `header` remain valid and unchanged; the direct-target
+restriction applies only to `sites[].timeout` and
+`sites[].routes[].timeout`.
+
+This version does not add adaptive backoff, HTTPS upstream CA/SNI settings,
+advanced route conditions, client-facing TLS, observability, administration,
+routing actions, gateway features, additional header policies, or any other
+deferred v0.17 item. Those items move to v0.19.
+
+
+2. Configuration
+
+A site or route may add a `timeout` object when its effective upstream
+selection is a direct `target`:
+
+    {
+      "listen": ":8080",
+      "sites": [{
+        "hosts": ["example.com"],
+        "target": "http://app:3000",
+        "timeout": {"dial": "2s", "header": "5s", "body": "30s"},
+        "routes": [{
+          "path": "/slow",
+          "timeout": {"header": "10s", "body": "1m"}
+        }]
+      }]
+    }
+
+The `timeout` object contains one or more of exactly `dial`, `header`, and
+`body`. Each value is a positive, case-sensitive, untrimmed Go duration no
+greater than 24 hours. Environment expansion is not supported. The object
+must not be null or empty. Unknown fields, aliases, non-string durations,
+invalid duration strings, zero or negative values, values above 24 hours,
+duplicate keys, and null members are configuration errors.
+
+`dial` applies to a newly established connection. One use limits the complete
+DNS/TCP dialing operation, including all address attempts, and an HTTPS target
+then receives a separate full use for its TLS handshake. A pooled connection
+consumes no `dial` timeout. `header` starts after the complete outbound
+request, including its body, is written, and runs continuously until terminal
+response headers arrive. Informational 1xx responses do not satisfy or reset
+it. `body` limits response-body streaming after terminal response headers are
+received. Each phase has its own duration; the settings are not a single
+total deadline and do not limit time spent in another phase.
+
+A site `timeout` applies to the site's direct target. A route without its own
+`timeout` inherits the site's timeout when the route uses the site's direct
+target. A route with its own `timeout` replaces the inherited object. A route
+that selects its own direct `target` uses its own timeout or the default when
+omitted. A route selecting a named `backend` has no direct-target timeout and
+must reject `timeout`; the same applies to a site selecting a named backend.
+The effective selection is determined after applying the existing site/route
+target and backend rules.
+
+The default direct-target values remain the v0.17 defaults: `dial` is 5s,
+`header` is 30s, and `body` has no deadline. An omitted member uses its default
+independently. A configured `body` timeout does not alter request retry
+deadlines or named-backend timeout settings.
+
+
+3. Direct request behavior
+
+For a direct target, Kubio creates a transport with the effective `dial` and
+`header` values. Client cancellation or an existing client deadline always
+wins; Kubio never extends a client deadline. A dial timeout or response-header
+timeout produces the existing proxy-generated 504 behavior. The target URL,
+header policies, request forwarding, and response forwarding remain
+unchanged.
+
+Nonterminal informational 1xx responses remain forwarded as in v0.17, do not
+end the header phase, and do not start or reset the body phase. HTTP 101
+Switching Protocols ends the header phase, preserves the existing upgrade and
+hijack behavior, and is not wrapped by `body`.
+
+After terminal non-101 response headers arrive, a configured `body` deadline
+starts once and never resets. The effective deadline is the earlier of the
+body deadline and client cancellation/deadline. The response body wrapper
+observes that deadline on every read and close. If the deadline expires while
+a read is blocked, Kubio cancels the upstream body operation, closes the
+underlying body exactly once, and the read returns `context.DeadlineExceeded`.
+After timeout, later reads return `context.DeadlineExceeded`; later closes are
+no-ops. Client cancellation wins over the body timeout and closes the body
+exactly once. A normal proxy cleanup also closes it exactly once; underlying
+close errors are not used to change the response classification. On EOF, a
+read error, normal close, timeout, cancellation, or proxy copy termination,
+Kubio stops the body timer and releases its body/context references. Timer
+expiry and `Close` are serialized so the underlying body is closed at most
+once and no timer callback acts after cleanup.
+
+ReverseProxy commits the final upstream status and headers before body
+streaming. A body timeout after downstream headers are committed never invokes
+`ErrorHandler`, replaces the status or headers, or writes a second error
+response; it closes/truncates the upstream body and terminates the downstream
+stream. If expiry is observed before downstream commit, Kubio checks it before
+and after response policies and passes the winning context error to the
+existing `ErrorHandler`: `context.Canceled` for client cancellation, and
+`context.DeadlineExceeded` for the configured body deadline or a client
+deadline. The target URL, header policies, request forwarding, and response
+forwarding remain unchanged.
+
+An omitted `body` member leaves response-body streaming unlimited, preserving
+the existing behavior. Body timeout state is local to the direct proxy
+request; it does not alter another request or a named backend.
+
+
+4. Retry and response semantics
+
+Direct targets do not use named-backend status retries. A timeout in any direct
+phase is not retried by v0.18. Existing route/site response header policies and
+error handling remain unchanged. The `body` deadline begins only after
+terminal non-101 response headers have been obtained, so it does not consume
+header timeout time. Body timeout and client cancellation are not converted
+into a replacement response after final headers are committed.
+
+The configured timeout values are captured by a router generation. A reload
+does not change timeout behavior for an in-flight request; subsequent requests
+use the new generation.
+
+
+5. Validation and reload
+
+Timeout objects are parsed and validated before a router generation is built.
+A syntactically valid timeout on a `site` or `route` whose effective selection
+is a named backend is invalid because direct timeouts are not backend options;
+existing `backends.<name>.timeout` remains valid. Startup errors terminate the
+program; reload errors are logged and retain the current generation. A valid
+reload publishes the complete replacement atomically without downtime.
+
+Direct transports are generation-owned. After publication, retiring a
+generation closes only idle connections belonging to its direct transports;
+active connections and in-flight response bodies remain usable with the old
+settings. Failed or unpublished generations release their direct transports.
+Subsequent requests use only the replacement generation's transports.
+
+
+6. Performance constraints
+
+Direct targets without a configured `body` timeout retain the existing
+response-body path and do not allocate a body deadline wrapper. A configured
+`body` timeout adds one per-request wrapper and one timer/deadline mechanism;
+it does not add work to named-backend requests. No request-path config read,
+global lock, goroutine per request, or unbounded timer queue is introduced.
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.19:
+
+- Adaptive retry backoff policy extensions.
+- HTTPS upstream CA, SNI, and certificate verification settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  and policies for Kubio-generated or intermediate responses.

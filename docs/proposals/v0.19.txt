@@ -1,0 +1,143 @@
+Kubio kubio.json v0.19 Proposal
+Status: Under review
+Base: v0.18
+
+
+1. Scope
+
+v0.19 adds upstream HTTPS trust-store and SNI controls. The controls apply to
+named backends and direct site/route targets. They customize upstream TLS
+verification and the server name sent during the TLS handshake; they do not
+change Kubio's listener TLS configuration.
+
+This version does not add client certificates or mutual TLS, TLS passthrough,
+custom cipher/minimum-version policy, ACME, multiple listener certificates,
+advanced route conditions, observability, administration, routing actions,
+gateway features, or other deferred v0.18 items. Those items move to
+v0.20.
+
+
+2. Configuration
+
+A named backend may add `tls`:
+
+    {
+      "backends": {
+        "app": {
+          "targets": ["https://app.internal:8443"],
+          "tls": {"ca": "certs/internal-ca.pem", "name": "app.internal"}
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+A direct site or route may add the same object when its effective upstream is
+an HTTPS `target`:
+
+    {
+      "sites": [{
+        "hosts": ["example.com"],
+        "target": "https://app.internal:8443",
+        "tls": {"ca": "certs/internal-ca.pem"},
+        "routes": [{
+          "path": "/special/*",
+          "tls": {"name": "special.internal"}
+        }]
+      }]
+    }
+
+The `tls` object contains one or both of exactly `ca` and `name`. `ca` is a
+non-empty path to a PEM file. The path is resolved from Kubio's process
+working directory using the existing TLS-file path rules. The file must be
+readable and contain at least one valid X.509 certificate. `name` is a
+non-empty TLS server name used for SNI and certificate hostname verification.
+It may be a DNS name or IP address. Values are strings, are not trimmed, and
+do not support environment expansion. The object must not be null or empty.
+Unknown fields, aliases, nulls, non-string values, empty values, invalid PEM,
+unreadable files, duplicate keys, and duplicate object members are
+configuration errors.
+
+When `ca` is present, its certificates are added to the system trust pool. If
+the system pool is unavailable, the configured certificates form the trust
+pool. When `ca` is absent, the system trust behavior is unchanged. When
+`name` is absent, Go's existing default derived from the HTTPS target host is
+unchanged. Kubio never enables insecure certificate verification.
+
+A direct `tls` object is inherited by a route that uses the site's direct
+target and has no route-level `tls`. A route-level object replaces the
+inherited object. A route with its own direct `target` uses its own `tls` or
+the default when omitted. A direct `tls` object on a site or route whose
+effective selection is a named backend is invalid. A direct `tls` object whose
+effective target is HTTP is invalid. A named-backend `tls` object is valid for
+HTTP and HTTPS target arrays; it affects HTTPS targets only and has no effect
+on HTTP targets.
+
+
+3. Upstream TLS behavior
+
+For every HTTPS upstream connection, Kubio uses the generation's configured
+trust pool and server name. The target URL and HTTP `Host` header remain the
+target host; `name` changes only TLS SNI and certificate hostname
+verification. TLS handshake and connection timeout behavior continue to use
+the effective v0.18 `timeout.dial` value. HTTP targets do not perform a TLS
+handshake and do not use the TLS object.
+
+The default TLS minimum version, cipher selection, ALPN behavior, proxy
+headers, request headers, response handling, active health probe behavior, and
+retry behavior remain unchanged. Probe requests use the same backend transport
+and therefore the same trust pool and SNI settings as backend requests.
+
+Certificate verification failures are upstream transport failures and retain
+the existing 502/504 classification rules. Kubio does not expose certificate
+details to clients.
+
+
+4. Generation and reload
+
+CA files are read and parsed before a router generation is published. A
+startup failure terminates Kubio. A reload with an unreadable or invalid CA
+file is logged and leaves the current generation, its transports, and its
+active probes unchanged. A valid reload atomically publishes new TLS settings
+without downtime; in-flight requests retain the old generation's trust pool
+and SNI settings.
+
+All upstream transports are generation-owned. After a replacement is
+published, Kubio marks the old generation retired, cancels its active health
+probes, closes only idle connections for its direct and named-backend
+transports, and leaves active connections and in-flight response bodies
+usable. Failed or unpublished generations release their transports and do not
+affect the current generation.
+
+
+5. Validation and compatibility
+
+The listener-level root `tls` object remains the existing certificate/key
+configuration and is independent of upstream `tls` objects. Upstream `tls`
+settings are validated after effective site/route selection is resolved and
+before proxy construction. Existing v0.18 timeout inheritance and direct vs
+backend restrictions remain unchanged.
+
+
+6. Performance constraints
+
+CA files are read only during generation construction, never per request or
+per probe. A generation reuses its immutable trust pools and TLS settings
+across all requests using the same upstream transport. HTTP targets and
+upstreams without a `tls` object retain the existing request path. No request
+path config read, global lock, certificate parse, or reload lock is added.
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.20:
+
+- Client certificates, mutual TLS, TLS passthrough, configurable TLS policy,
+  ACME, multiple listener certificates, and SNI certificate selection.
+- Client-IP and other advanced route conditions.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  adaptive retry policies, and policies for Kubio-generated or intermediate
+  responses.
