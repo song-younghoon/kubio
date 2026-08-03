@@ -32,6 +32,7 @@ type site struct {
 	hosts          []hostPattern
 	proxy          *httputil.ReverseProxy
 	routes         []route
+	trustProxies   []netip.Prefix
 	exactRoutes    map[string][]int
 	wildcardRoutes map[string][]int
 }
@@ -47,6 +48,7 @@ type route struct {
 type routeMatch struct {
 	header       []routeCondition
 	query        []routeCondition
+	ip           []netip.Prefix
 	alternatives int
 }
 
@@ -56,10 +58,14 @@ type routeCondition struct {
 }
 
 type routeMatchState struct {
-	req         *http.Request
-	query       url.Values
-	queryParsed bool
-	queryValid  bool
+	req          *http.Request
+	query        url.Values
+	queryParsed  bool
+	queryValid   bool
+	clientIP     netip.Addr
+	clientValid  bool
+	clientParsed bool
+	trustProxies []netip.Prefix
 }
 
 type pathPattern struct {
@@ -203,9 +209,10 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		return site{}, err
 	}
 	s := site{
-		hosts:  hosts,
-		proxy:  proxy,
-		routes: make([]route, 0, len(cfg.Routes)),
+		hosts:        hosts,
+		proxy:        proxy,
+		routes:       make([]route, 0, len(cfg.Routes)),
+		trustProxies: trustProxies,
 	}
 	for routeIndex, routeConfig := range cfg.Routes {
 		pattern, err := newPathPattern(routeConfig.Path)
@@ -287,6 +294,8 @@ func compileRouteMatch(config routeMatchConfig) routeMatch {
 		match.query = append(match.query, routeCondition{name: name, alternatives: alternatives})
 		match.alternatives += len(alternatives)
 	}
+	match.ip = append([]netip.Prefix(nil), config.IP...)
+	match.alternatives += len(match.ip)
 	return match
 }
 
@@ -393,9 +402,81 @@ func parseTrustedProxies(raw []string) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, fmt.Errorf("trustProxies[%d] %q: %w", index, value, err)
 		}
-		prefixes = append(prefixes, prefix)
+		prefixes = append(prefixes, normalizeIPPrefix(prefix))
 	}
 	return prefixes, nil
+}
+
+func parseRouteMatchPrefixes(raw []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(raw))
+	for index, value := range raw {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, fmt.Errorf("item %d must be a CIDR", index)
+		}
+		prefixes = append(prefixes, normalizeIPPrefix(prefix))
+	}
+	return normalizeRouteMatchPrefixes(prefixes)
+}
+
+func normalizeRouteMatchPrefixes(prefixes []netip.Prefix) ([]netip.Prefix, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+	normalized := make([]netip.Prefix, 0, len(prefixes))
+	seen := make(map[netip.Prefix]struct{}, len(prefixes))
+	for index, prefix := range prefixes {
+		prefix = normalizeIPPrefix(prefix)
+		if _, exists := seen[prefix]; exists {
+			return nil, fmt.Errorf("duplicate prefix at index %d", index)
+		}
+		seen[prefix] = struct{}{}
+		normalized = append(normalized, prefix)
+	}
+	return normalized, nil
+}
+
+func normalizeIPPrefix(prefix netip.Prefix) netip.Prefix {
+	address := prefix.Addr()
+	bits := prefix.Bits()
+	if address.Is4In6() && bits >= 96 {
+		address = address.Unmap()
+		bits -= 96
+	}
+	return netip.PrefixFrom(address, bits).Masked()
+}
+
+func effectiveClientIP(req *http.Request, trustProxies []netip.Prefix) (netip.Addr, bool) {
+	peer, _ := peerAddress(req.RemoteAddr)
+	if !peer.IsValid() {
+		return netip.Addr{}, false
+	}
+	peer = peer.Unmap()
+	if !isTrustedProxy(peer, trustProxies) {
+		return peer, true
+	}
+
+	values := req.Header.Values("X-Forwarded-For")
+	if len(values) == 0 {
+		return netip.Addr{}, false
+	}
+	forwarded := make([]netip.Addr, 0, len(values))
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.Trim(token, " \t")
+			address, err := netip.ParseAddr(token)
+			if err != nil || address.Zone() != "" {
+				return netip.Addr{}, false
+			}
+			forwarded = append(forwarded, address.Unmap())
+		}
+	}
+	for index := len(forwarded) - 1; index >= 0; index-- {
+		if !isTrustedProxy(forwarded[index], trustProxies) {
+			return forwarded[index], true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -458,7 +539,7 @@ func (s *site) buildRouteIndex() {
 
 func (s *site) selectRoute(req *http.Request) routeCandidate {
 	path := req.URL.Path
-	state := routeMatchState{req: req}
+	state := routeMatchState{req: req, trustProxies: s.trustProxies}
 	if s.exactRoutes == nil {
 		var selected routeCandidate
 		for index := range s.routes {
@@ -533,7 +614,7 @@ func (m *routeMatchState) matches(route *route) bool {
 		}
 	}
 	if len(route.match.query) == 0 {
-		return true
+		return m.matchesClientIP(route)
 	}
 	if !m.queryParsed {
 		var err error
@@ -549,7 +630,26 @@ func (m *routeMatchState) matches(route *route) bool {
 			return false
 		}
 	}
-	return true
+	return m.matchesClientIP(route)
+}
+
+func (m *routeMatchState) matchesClientIP(route *route) bool {
+	if len(route.match.ip) == 0 {
+		return true
+	}
+	if !m.clientParsed {
+		m.clientIP, m.clientValid = effectiveClientIP(m.req, m.trustProxies)
+		m.clientParsed = true
+	}
+	if !m.clientValid {
+		return false
+	}
+	for _, prefix := range route.match.ip {
+		if prefix.Contains(m.clientIP) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesRequestHeader(req *http.Request, condition routeCondition) bool {
@@ -654,6 +754,9 @@ func betterRoute(candidate, current routeCandidate) bool {
 
 func (r *route) conditionCount() int {
 	count := len(r.match.header) + len(r.match.query)
+	if len(r.match.ip) > 0 {
+		count++
+	}
 	if len(r.methods) > 0 {
 		count++
 	}

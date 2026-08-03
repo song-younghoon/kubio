@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -123,6 +124,7 @@ type routeConfig struct {
 type routeMatchConfig struct {
 	Header map[string][]string
 	Query  map[string][]string
+	IP     []netip.Prefix
 }
 
 type responseHeaderPolicy struct {
@@ -244,6 +246,7 @@ type rawRouteMatch struct {
 	set    bool
 	Header optionalConditionValues
 	Query  optionalConditionValues
+	IP     optionalStringArray
 }
 
 type headerMap map[string]string
@@ -667,14 +670,15 @@ func (m *rawRouteMatch) UnmarshalJSON(data []byte) error {
 	var decoded struct {
 		Header optionalConditionValues `json:"header"`
 		Query  optionalConditionValues `json:"query"`
+		IP     optionalStringArray     `json:"ip"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return err
 	}
-	if !decoded.Header.set && !decoded.Query.set {
-		return fmt.Errorf("must contain header or query")
+	if !decoded.Header.set && !decoded.Query.set && !decoded.IP.set {
+		return fmt.Errorf("must contain header, query, or ip")
 	}
 	if decoded.Header.set && len(decoded.Header.values) == 0 {
 		return fmt.Errorf("header must not be empty")
@@ -682,7 +686,10 @@ func (m *rawRouteMatch) UnmarshalJSON(data []byte) error {
 	if decoded.Query.set && len(decoded.Query.values) == 0 {
 		return fmt.Errorf("query must not be empty")
 	}
-	*m = rawRouteMatch{set: true, Header: decoded.Header, Query: decoded.Query}
+	if decoded.IP.set && len(decoded.IP.values) == 0 {
+		return fmt.Errorf("ip must not be empty")
+	}
+	*m = rawRouteMatch{set: true, Header: decoded.Header, Query: decoded.Query, IP: decoded.IP}
 	return nil
 }
 
@@ -1036,9 +1043,14 @@ func decodeConfig(data []byte) (config, error) {
 				Strip:           bool(rawRoute.Strip),
 			}
 			if rawRoute.Match.set {
+				ip, err := parseRouteMatchPrefixes(rawRoute.Match.IP.values)
+				if err != nil {
+					return config{}, fmt.Errorf("sites[%d].routes[%d].match.ip: %w", siteIndex, routeIndex, err)
+				}
 				route.Match = &routeMatchConfig{
 					Header: cloneConditionValues(rawRoute.Match.Header.values),
 					Query:  cloneConditionValues(rawRoute.Match.Query.values),
+					IP:     ip,
 				}
 			}
 			if rawRoute.Target.set {
@@ -1286,6 +1298,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "header", "query":
 			return jsonConditions, nil
+		case "ip":
+			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonConditions:
@@ -1438,8 +1452,8 @@ func resolveRouteMatch(raw *routeMatchConfig) (routeMatchConfig, error) {
 	if raw.Query != nil && len(raw.Query) == 0 {
 		return routeMatchConfig{}, fmt.Errorf("query must not be empty")
 	}
-	if len(raw.Header) == 0 && len(raw.Query) == 0 {
-		return routeMatchConfig{}, fmt.Errorf("must contain header or query")
+	if len(raw.Header) == 0 && len(raw.Query) == 0 && len(raw.IP) == 0 {
+		return routeMatchConfig{}, fmt.Errorf("must contain header, query, or ip")
 	}
 
 	match := routeMatchConfig{}
@@ -1470,6 +1484,13 @@ func resolveRouteMatch(raw *routeMatchConfig) (routeMatchConfig, error) {
 			}
 			match.Query[name] = append([]string(nil), alternatives...)
 		}
+	}
+	if len(raw.IP) > 0 {
+		prefixes, err := normalizeRouteMatchPrefixes(raw.IP)
+		if err != nil {
+			return routeMatchConfig{}, fmt.Errorf("ip: %w", err)
+		}
+		match.IP = prefixes
 	}
 	return match, nil
 }

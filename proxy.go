@@ -1429,6 +1429,7 @@ func setForwardedHeaders(in, out *http.Request, trustProxies []netip.Prefix) {
 }
 
 func isTrustedProxy(address netip.Addr, prefixes []netip.Prefix) bool {
+	address = address.Unmap()
 	for _, prefix := range prefixes {
 		if prefix.Contains(address) {
 			return true
