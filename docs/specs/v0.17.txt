@@ -1,0 +1,180 @@
+Kubio kubio.json v0.17 Proposal
+Status: Agreed specification
+Base: v0.16
+
+
+1. Scope
+
+v0.17 adds optional active health probes to the v0.16 named-backend health
+state. A configured backend periodically sends an internal GET request to
+each target and feeds the result into the existing passive failure/ejection
+state.
+
+This version does not add adaptive backoff, direct-target timeout options,
+HTTPS upstream CA/SNI settings, advanced route conditions, client-facing TLS,
+observability, administration, routing actions, gateway features, or
+additional header policies. Those items move to
+docs/proposals/v0.18.txt.
+
+
+2. Configuration
+
+The existing named-backend `health` object may add an optional `probe` object:
+
+    {
+      "listen": ":8080",
+      "backends": {
+        "app": {
+          "targets": ["http://app-1:3000", "http://app-2:3000"],
+          "health": {
+            "fail": 3,
+            "cool": "5s",
+            "probe": {"path": "/healthz", "every": "10s", "timeout": "1s"}
+          }
+        }
+      },
+      "sites": [{"hosts": ["example.com"], "backend": "app"}]
+    }
+
+`probe` is allowed only inside a named backend's `health` object. It contains
+exactly `path`, `every`, and `timeout`. `path` is a non-empty origin-form
+request-target that starts with `/`, is no longer than 2048 bytes, contains
+valid URI escaping, no control characters, spaces, fragment, authority-form
+`//`, or absolute-URI components, and may contain a query string. Its path and
+raw query are preserved as configured; Kubio does not decode and re-encode
+them. The 2048-byte limit applies to the decoded JSON string. `every` is a
+positive Go duration no greater than 24 hours. `timeout` is a positive Go
+duration no greater than `every`. Duration strings are
+case-sensitive, are not trimmed, and do not support environment expansion.
+
+Unknown fields, aliases, nulls, missing fields, invalid paths, non-string
+paths, non-duration values, zero or negative durations, values outside the
+limits, and duplicate JSON keys are configuration errors. The complete
+allowed key set inside `health` is `fail`, `cool`, and `probe`; the complete
+allowed key set inside `probe` is `path`, `every`, and `timeout`.
+
+
+3. Probe loop
+
+For each named backend generation with `health.probe`, Kubio creates one
+probe loop after the complete router generation has been built. The loop has
+one goroutine and no goroutine is created when `probe` is absent. It waits for
+`every` before the first cycle, then starts later cycles at the configured
+interval. A cycle probes targets in configured target-index order, one target
+at a time; cycles never overlap. If a cycle takes longer than the interval,
+the next cycle starts as soon as the current cycle finishes and the missed
+tick does not create a second concurrent cycle.
+
+Each probe is an internal `GET` with no request body and no incoming, route,
+backend, cookie, authorization, or upgrade headers. The probe uses the
+target's scheme and host, sets `Host` from the target host, and replaces its
+path and raw query with the configured `path`. The probe uses the generation's
+backend `http.Transport` directly. It does not use request retry state,
+weighted request selection, retry budget, backoff, or client-header
+forwarding. Transport-generated headers are allowed. A child context limits
+the probe by `timeout`.
+
+Every non-nil probe response body is closed exactly once, synchronously,
+without reading or draining it; close errors are ignored. The timeout covers
+the transport operation through `RoundTrip`. The close itself is not
+interruptible, but if the child timeout expires before `Close` returns, the
+probe is failed regardless of response status; otherwise classification is
+independent of close errors. Kubio does not forward the response to a client
+or read its body for application data.
+
+HTTP 100, 102, 103, and other informational 1xx responses are non-final.
+HTTP 101 Switching Protocols is a final response and is a failed probe. A
+different final response with a status from 200 through 399 is a healthy
+probe. Every other final status, a transport error before a final response, or
+the absence of a final response after an informational response is a failed
+probe. The probe result is applied to the target's existing v0.16 health state
+using the same target-local synchronization and `fail`/`cool` transitions. A
+successful probe clears failures and ejection. While the target is not
+ejected, a failed probe increments its consecutive failure count; when the
+count reaches `fail`, Kubio ejects it for `cool` and clears the count. While
+ejected, a failed probe extends the existing deadline by exactly `cool`
+without incrementing. At or after expiry, ejection is cleared and a failed
+probe starts a fresh failure sequence.
+
+A probe's own timeout is an explicit failed-probe observation even though its
+child context has ended, provided the generation is still active. After
+`Close` returns, Kubio samples the child context at the target-local health
+linearization point. If its deadline has expired by that point, the probe is
+failed regardless of response status; otherwise response status determines
+classification. Close errors remain ignored. Generation retirement
+cancellation is separate and suppresses the observation when retirement wins
+before the probe health-state linearization point.
+
+Each probe-enabled generation owns a generation context. Cycle timers and
+per-probe child contexts derive from it. Initial and inter-cycle waits select
+on that context and end immediately on retirement; joining never waits for an
+uncanceled interval. If the generation is being retired, its probe context is
+canceled and that probe result does not update health state. Probe activity
+never consumes retry budget, changes request retry ordinals, advances the
+weighted request cursor, or changes client-visible responses.
+
+
+4. Generation lifecycle and reload
+
+Probe loops belong to the backend generation that created them. A complete
+router generation starts its probe loops only after all sites and routes have
+been successfully constructed. A failed startup or reload therefore starts
+no partially configured probe loop.
+
+When a valid reload atomically publishes a replacement generation, the old
+generation is marked retired immediately after publication, then its probe
+context is canceled and its probe loops are joined. The retirement mark is
+the probe observation linearization boundary: an observation linearized
+before it may update old health state; one linearized after it is discarded.
+At the target-local health linearization point, the probe checks that its
+generation is active and applies the health transition while holding the
+target-local synchronization. A retirement mark before that point suppresses
+the transition; a mark after it does not. Joining waits only for probe
+goroutines to stop; it does not close the old
+backend transport or invalidate in-flight requests. In-flight requests retain
+the old generation's passive health state, while subsequent requests use the
+new generation's fresh state and probe loop. An invalid reload leaves both
+the current state and its probes unchanged.
+
+
+5. Interaction with v0.16
+
+All v0.16 passive health, weighted selection, retry target scanning, response
+classification, context handling, ejection, reload, and direct-target rules
+remain unchanged unless this proposal explicitly adds probe observations.
+Probe observations and request observations share one target-local state, so
+their linearization order determines the final state. A request response can
+clear an ejection while a later failed probe can re-eject the target.
+
+
+6. Performance constraints
+
+Probe I/O is fully outside the request path. A backend without
+`health.probe` adds no probe goroutine or probe-specific synchronization;
+v0.16's existing per-target health locks remain when `health` itself is
+configured. A configured backend uses one bounded goroutine, one sequential
+probe at a time, and no per-tick unbounded work or probe result queue. Using
+monotonic time, the first cycle starts after `every`, and cycle `i+1` starts
+at `max(start[i] + every, end[i])`; an overlong cycle therefore queues no
+missed tick and cycles never overlap. Cancellation is checked before each
+target probe. Probe response bodies are closed immediately and probe
+resources are released on cancellation.
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.18:
+
+- Adaptive backoff.
+- Direct-target connection, response-header, and response-body timeout
+  options.
+- HTTPS upstream CA and SNI settings.
+- Client-IP and other advanced route conditions.
+- Multiple certificates, SNI certificate selection, ACME, redirects, mutual
+  TLS, TLS passthrough, and configurable TLS policy.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  and policies for Kubio-generated or intermediate responses.
