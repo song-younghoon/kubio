@@ -157,7 +157,7 @@ func (r *router) close() {
 			backend.cancelProbe()
 		}
 		for _, backend := range r.backends {
-			backend.waitProbe()
+			backend.joinProbe()
 		}
 	})
 }

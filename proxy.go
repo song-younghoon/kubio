@@ -45,23 +45,23 @@ type proxyBufferPool struct {
 }
 
 type backend struct {
-	targets       []*url.URL
-	schedule      []int
-	tries         int
-	retryStatuses map[int]struct{}
-	retryMethods  map[string]struct{}
-	retryBodyMax  int64
-	backoffDelays []time.Duration
-	backoffJitter bool
-	retryDeadline time.Duration
-	budget        *retryBudget
-	health        *backendHealth
-	transport     *http.Transport
-	nextIndex     atomic.Uint64
-	probeTargets  []string
-	probeCancel   context.CancelFunc
-	probeDone     chan struct{}
-	probeStop     sync.Once
+	targets         []*url.URL
+	schedule        []int
+	tries           int
+	retryStatuses   map[int]struct{}
+	retryMethods    map[string]struct{}
+	retryBodyMax    int64
+	backoffDelays   []time.Duration
+	backoffJitter   bool
+	retryDeadline   time.Duration
+	budget          *retryBudget
+	health          *backendHealth
+	transport       *http.Transport
+	nextIndex       atomic.Uint64
+	probeTargets    []string
+	probeCancel     context.CancelFunc
+	probeDone       chan struct{}
+	probeCancelOnce sync.Once
 }
 
 type backendGeneration struct {
@@ -111,8 +111,7 @@ func (h *backendHealth) observe(index int, ctx context.Context, response bool, e
 	target.mu.Lock()
 	defer target.mu.Unlock()
 	if response || err == nil {
-		target.failures = 0
-		target.until = time.Time{}
+		resetTargetHealth(target)
 		return
 	}
 	if ctx.Err() != nil {
@@ -129,8 +128,7 @@ func (h *backendHealth) observeProbe(index int, generation, probeContext context
 		return
 	}
 	if responseHealthy && probeContext.Err() == nil {
-		target.failures = 0
-		target.until = time.Time{}
+		resetTargetHealth(target)
 		return
 	}
 	h.observeFailureLocked(target)
@@ -153,6 +151,11 @@ func (h *backendHealth) observeFailureLocked(target *targetHealth) {
 	}
 }
 
+func resetTargetHealth(target *targetHealth) {
+	target.failures = 0
+	target.until = time.Time{}
+}
+
 func (b *backend) startProbe() {
 	if b.health == nil || b.health.probe == nil {
 		return
@@ -166,20 +169,15 @@ func (b *backend) startProbe() {
 	}()
 }
 
-func (b *backend) stopProbe() {
-	b.cancelProbe()
-	b.waitProbe()
-}
-
 func (b *backend) cancelProbe() {
-	b.probeStop.Do(func() {
+	b.probeCancelOnce.Do(func() {
 		if b.probeCancel != nil {
 			b.probeCancel()
 		}
 	})
 }
 
-func (b *backend) waitProbe() {
+func (b *backend) joinProbe() {
 	if b.probeDone != nil {
 		<-b.probeDone
 	}
@@ -189,7 +187,7 @@ func (b *backend) runProbeLoop(ctx context.Context) {
 	probe := b.health.probe
 	timer := time.NewTimer(0)
 	defer timer.Stop()
-	if !waitProbe(ctx, timer, probe.Every) {
+	if !waitProbeTimer(ctx, timer, probe.Every) {
 		return
 	}
 	for {
@@ -198,19 +196,19 @@ func (b *backend) runProbeLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			b.probeTarget(ctx, index, probe)
+			b.probeTarget(ctx, index)
 		}
 		next := started.Add(probe.Every)
 		if finished := time.Now(); finished.After(next) {
 			next = finished
 		}
-		if !waitProbe(ctx, timer, time.Until(next)) {
+		if !waitProbeTimer(ctx, timer, time.Until(next)) {
 			return
 		}
 	}
 }
 
-func waitProbe(ctx context.Context, timer *time.Timer, delay time.Duration) bool {
+func waitProbeTimer(ctx context.Context, timer *time.Timer, delay time.Duration) bool {
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
@@ -229,7 +227,8 @@ func waitProbe(ctx context.Context, timer *time.Timer, delay time.Duration) bool
 	}
 }
 
-func (b *backend) probeTarget(generation context.Context, index int, probe *backendHealthProbeConfig) {
+func (b *backend) probeTarget(generation context.Context, index int) {
+	probe := b.health.probe
 	probeContext, cancel := context.WithTimeout(generation, probe.Timeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(probeContext, http.MethodGet, b.probeTargets[index], nil)
