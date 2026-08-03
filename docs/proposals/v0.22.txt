@@ -1,0 +1,92 @@
+Kubio kubio.json v0.22 Proposal
+Status: Under review
+Base: v0.21
+
+
+1. Scope
+
+v0.22 adds a route-level prefix URI rewrite. It changes the upstream request
+path after route selection and before proxying, while preserving the existing
+query string. It does not add regex rewrites, query rewrites, redirects, fixed
+responses, or response bodies.
+
+
+2. Configuration
+
+A route may set `rewrite` to a path pattern:
+
+    {
+      "sites": [{
+        "hosts": ["example.com"],
+        "target": "http://localhost:3000",
+        "routes": [{
+          "path": "/api/*",
+          "rewrite": "/v1/*"
+        }]
+      }]
+    }
+
+The value must be an origin path beginning with `/`, without query, fragment,
+control characters, or an empty value. It may contain no `*`, or only one
+trailing `/*`, using the same wildcard grammar as route paths. A rewrite with
+`/*` replaces its prefix and appends the source route's matched suffix. A
+rewrite without `/*` replaces the complete path with that exact path. The
+source route may be exact or wildcard.
+
+`rewrite` is valid only on routes. Nulls, non-strings, aliases, duplicate
+keys, invalid path syntax, and site/backend placement are configuration
+errors. `strip` and `rewrite` are mutually exclusive. Existing route matching
+is unchanged and is evaluated against the incoming path before rewriting.
+
+
+3. Rewrite behavior
+
+The rewrite is applied only after the winning route has been selected. The
+upstream target host, scheme, headers, and method are unchanged. The original
+query string, including its raw encoding and whether it was explicitly empty,
+is preserved unchanged.
+
+For a source `/api/*` and rewrite `/v1/*`, `/api/users` becomes `/v1/users`.
+For a source `/health` and rewrite `/status`, the upstream path is `/status`.
+The root wildcard `/*` has an empty source prefix and therefore rewrites the
+complete incoming path to the rewrite prefix plus its suffix.
+
+Kubio updates `URL.Path` and preserves a valid corresponding `RawPath` when
+the incoming path was escaped. An invalid or non-corresponding incoming
+`RawPath` is cleared rather than forwarded as an ambiguous path. The client
+request path is rewritten in place only for the selected upstream request;
+host selection, route matching, and access-log path fields retain the original
+client path.
+
+
+4. Reload and failure behavior
+
+Kubio validates and compiles rewrite patterns while constructing a generation.
+Invalid configuration terminates startup and, on reload, is logged while the
+current generation continues serving unchanged. Valid reloads publish
+atomically without downtime; in-flight requests retain their generation's
+rewrite behavior.
+
+
+5. Performance constraints
+
+Rewrite patterns are parsed once per generation. The request path performs
+only the selected route's precompiled prefix operation; routes without
+`rewrite` retain the existing path. No regex engine, global lock, or config
+read is added to the request path.
+
+
+6. Deferred scope
+
+The following remain unresolved and move to v0.23:
+
+- Redirects, fixed responses, and custom error bodies.
+- Metrics, configurable log sinks/formats, and health/admin/reload endpoints.
+- Forwarded and PROXY protocols.
+- Client certificates, mutual TLS, TLS passthrough, configurable TLS policy,
+  ACME, multiple listener certificates, and listener SNI certificate
+  selection.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  adaptive retry policies, and policies for Kubio-generated or intermediate
+  responses.

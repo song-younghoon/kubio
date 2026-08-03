@@ -1,0 +1,115 @@
+Kubio kubio.json v0.21 Proposal
+Status: Agreed specification
+Base: v0.20
+
+
+1. Scope
+
+v0.21 adds request-ID generation and propagation. The feature is enabled by
+the root-level boolean `id`:
+
+    {
+      "id": true,
+      "log": true,
+      "sites": [{"hosts": ["*"], "target": "http://localhost:3000"}]
+    }
+
+When `id` is absent or false, request handling and access-log fields remain
+unchanged. The request-ID header name is fixed as `X-Request-ID`; no custom
+header name, environment expansion, or per-site override is supported.
+
+This version does not add metrics, health/admin/reload endpoints, configurable
+log sinks or formats, authentication, or any other deferred capability.
+Those items move to v0.22.
+
+
+2. Request-ID value
+
+When enabled, Kubio collects values from every case-insensitive
+`X-Request-ID` occurrence. Repeated field lines count separately and values
+are not joined. It accepts the value only when the total count is exactly one,
+that value is 1 through 128 bytes long, and every byte is an ASCII RFC 9110
+`tchar`. Invalid, empty, or multiple values are discarded.
+
+If the incoming value is discarded, Kubio generates a cryptographically random
+16-byte value and encodes it as 32 lowercase hexadecimal characters. A random
+generation failure returns an internal server error and the request is not
+proxied.
+
+Header-name comparison and duplicate removal are case-insensitive. Kubio
+deletes every existing `X-Request-ID` map entry and sets exactly one canonical
+value on the request before site selection. A proxied upstream request
+receives the same value even when site or route request-header configuration
+contains `X-Request-ID`; the generated or accepted ID wins.
+
+Kubio sets the same value on the client response, including 404 responses and
+the generated `OPTIONS *` response. It enforces this value after upstream
+response headers and site/route response-header policies have been applied;
+those policies cannot add, replace, or remove the Kubio-owned ID while the
+feature is enabled. Before forwarding every informational response, terminal
+response including 101, or generated/error response, Kubio removes the field
+case-insensitively and ensures exactly one canonical value before every
+operation that may commit headers: `WriteHeader`, `Write`, `Flush` or
+`FlushError`, and hijack. It also removes `X-Request-ID` from upstream trailers
+and trailer declarations and never emits the ID as a trailer.
+
+
+3. Access logs
+
+When `id` and `log` are both enabled, each JSON access record contains an
+`id` field with the final request ID. The value is omitted when `id` is
+disabled, preserving the existing record shape for the existing mode. The ID
+is never generated solely to populate a log record.
+
+
+4. Validation and security
+
+`id` is a strict JSON boolean and is valid only at the configuration root.
+Nulls, strings, numbers, aliases, duplicate keys, and nested placement are
+configuration errors. The fixed header is managed by Kubio's request-ID
+feature; configured request headers may not replace it while the feature is
+enabled.
+
+Request IDs are opaque correlation values, not authentication credentials.
+Kubio does not add a separate request-ID routing condition. Existing
+`match.header` rules may observe the final `X-Request-ID` value, just like any
+other request header. IDs are not used for authorization or rate limiting.
+
+If cryptographic ID generation fails, Kubio returns HTTP 500, does not proxy
+the request, and has no final ID to emit. When `id` and `log` are enabled,
+Kubio emits exactly one 500 access record with `id` omitted; when logging is
+disabled, no record is emitted.
+
+
+5. Generation and reload
+
+The request-ID mode is immutable for a router generation. A valid reload may
+enable or disable it atomically without downtime. In-flight requests retain
+the mode of the generation that accepted them. An invalid configuration keeps
+the current generation unchanged, following existing reload behavior.
+
+
+6. Performance constraints
+
+When `id` is disabled, no request-ID validation, random generation, context
+value, response-header write, or access-record field work is added. When
+enabled, the incoming value is checked once per request and the generated
+value is reused for the response, upstream request, and access record. No
+global lock is added; the existing access-log lock remains unchanged.
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.22:
+
+- Metrics and configurable log sinks/formats.
+- Health/admin/reload endpoints.
+- URI rewrites, redirects, fixed responses, and custom error bodies.
+- Forwarded and PROXY protocols.
+- Client certificates, mutual TLS, TLS passthrough, configurable TLS policy,
+  ACME, multiple listener certificates, and listener SNI certificate
+  selection.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  adaptive retry policies, and policies for Kubio-generated or intermediate
+  responses.
