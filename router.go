@@ -414,7 +414,7 @@ func parseRouteMatchPrefixes(raw []string) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, fmt.Errorf("item %d must be a CIDR", index)
 		}
-		prefixes = append(prefixes, normalizeIPPrefix(prefix))
+		prefixes = append(prefixes, prefix)
 	}
 	return normalizeRouteMatchPrefixes(prefixes)
 }
@@ -614,6 +614,9 @@ func (m *routeMatchState) matches(route *route) bool {
 		}
 	}
 	if len(route.match.query) == 0 {
+		if len(route.match.ip) == 0 {
+			return true
+		}
 		return m.matchesClientIP(route)
 	}
 	if !m.queryParsed {
@@ -630,13 +633,13 @@ func (m *routeMatchState) matches(route *route) bool {
 			return false
 		}
 	}
+	if len(route.match.ip) == 0 {
+		return true
+	}
 	return m.matchesClientIP(route)
 }
 
 func (m *routeMatchState) matchesClientIP(route *route) bool {
-	if len(route.match.ip) == 0 {
-		return true
-	}
 	if !m.clientParsed {
 		m.clientIP, m.clientValid = effectiveClientIP(m.req, m.trustProxies)
 		m.clientParsed = true

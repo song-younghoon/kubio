@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"slices"
 	"strconv"
 	"testing"
@@ -548,5 +549,26 @@ func BenchmarkRouteMatchSelection(b *testing.B) {
 				b.Fatalf("selected route %d", result.index)
 			}
 		})
+	}
+}
+
+func BenchmarkClientIPRouteSelection(b *testing.B) {
+	prefix := netip.MustParsePrefix("198.51.100.0/24")
+	selected := site{
+		trustProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+		routes: []route{{
+			pattern: pathPattern{path: "/api", wildcard: true, depth: 1},
+			match:   compileRouteMatch(routeMatchConfig{IP: []netip.Prefix{prefix}}),
+		}},
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://proxy/api/users", nil)
+	req.RemoteAddr = "10.0.0.1:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if selected.selectRoute(req).route == nil {
+			b.Fatal("client IP route not selected")
+		}
 	}
 }
