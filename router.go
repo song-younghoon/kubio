@@ -72,6 +72,7 @@ type routeMatchState struct {
 
 type pathPattern struct {
 	path     string
+	rawPath  string
 	wildcard bool
 	depth    int
 }
@@ -838,13 +839,17 @@ func newPathPattern(raw string) (pathPattern, error) {
 		if strings.Contains(prefix, "*") {
 			return pathPattern{}, fmt.Errorf("only a trailing /* wildcard is supported")
 		}
-		return pathPattern{path: prefix, wildcard: true, depth: pathDepth(prefix)}, nil
+		return pathPattern{path: prefix, rawPath: escapedURLPath(prefix), wildcard: true, depth: pathDepth(prefix)}, nil
 	}
 	if strings.Contains(raw, "*") {
 		return pathPattern{}, fmt.Errorf("only a trailing /* wildcard is supported")
 	}
 
-	return pathPattern{path: raw, depth: pathDepth(raw)}, nil
+	return pathPattern{path: raw, rawPath: escapedURLPath(raw), depth: pathDepth(raw)}, nil
+}
+
+func escapedURLPath(path string) string {
+	return (&url.URL{Path: path}).EscapedPath()
 }
 
 func pathDepth(path string) int {
@@ -897,7 +902,9 @@ func rewriteProxyPath(out, in *url.URL, source, destination pathPattern) {
 	}
 	path := destination.path
 	if destination.wildcard {
-		path += suffix
+		if suffix != "" {
+			path += suffix
+		}
 		if path == "" {
 			path = "/"
 		}
@@ -918,7 +925,7 @@ func rewriteRawPath(in *url.URL, source, destination pathPattern, path string) s
 			return ""
 		}
 	}
-	rawPrefix := (&url.URL{Path: destination.path}).EscapedPath()
+	rawPrefix := destination.rawPath
 	rawPath := rawPrefix
 	if destination.wildcard {
 		rawPath += rawSuffix

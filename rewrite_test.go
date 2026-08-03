@@ -139,3 +139,27 @@ func TestRewriteHasNoRoutePathRewriteForUnselectedRoute(t *testing.T) {
 		t.Fatalf("unselected rewrite applied to %q", path)
 	}
 }
+
+func BenchmarkRewriteProxyPath(b *testing.B) {
+	source, _ := newPathPattern("/api/*")
+	destination, _ := newPathPattern("/v1/*")
+	in := &url.URL{Path: "/api/users/profile"}
+	out := new(url.URL)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rewriteProxyPath(out, in, source, destination)
+	}
+}
+
+func BenchmarkRewriteProxyPathEscaped(b *testing.B) {
+	source, _ := newPathPattern("/api/*")
+	destination, _ := newPathPattern("/v1/*")
+	in := &url.URL{Path: "/api/users/profile", RawPath: "/api/%75sers/profile"}
+	out := new(url.URL)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rewriteProxyPath(out, in, source, destination)
+	}
+}
