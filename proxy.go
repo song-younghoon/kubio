@@ -29,10 +29,6 @@ const (
 	proxyMaxIdleConnsPerHost   = 32
 )
 
-func newProxyTransport(dialTimeout, responseHeaderTimeout time.Duration) *http.Transport {
-	return newProxyTransportWithTLS(dialTimeout, responseHeaderTimeout, nil)
-}
-
 func newProxyTransportWithTLS(dialTimeout, responseHeaderTimeout time.Duration, config *upstreamTLSConfig) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: dialTimeout}).DialContext
@@ -1102,7 +1098,7 @@ func upgradeRequest(request *http.Request) bool {
 func newProxy(
 	raw string,
 	timeout *directTimeout,
-	tlsConfig *upstreamTLSConfig,
+	upstreamTLS *upstreamTLSConfig,
 	headers map[string]string,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
@@ -1112,10 +1108,10 @@ func newProxy(
 	if err != nil {
 		return nil, err
 	}
-	if tlsConfig != nil && target.Scheme != "https" {
+	if upstreamTLS != nil && target.Scheme != "https" {
 		return nil, fmt.Errorf("tls is only allowed with HTTPS target")
 	}
-	transport, err := transports.get(timeout, tlsConfig)
+	transport, err := transports.get(timeout, upstreamTLS)
 	if err != nil {
 		return nil, err
 	}
@@ -1138,14 +1134,14 @@ type upstreamTLSKey struct {
 }
 
 type directTransportCache struct {
-	byTimeout map[directTransportKey]*http.Transport
+	byKey     map[directTransportKey]*http.Transport
 	loadedTLS map[upstreamTLSKey]*upstreamTLSConfig
 	all       []*http.Transport
 }
 
 func newDirectTransportCache() *directTransportCache {
 	return &directTransportCache{
-		byTimeout: make(map[directTransportKey]*http.Transport),
+		byKey:     make(map[directTransportKey]*http.Transport),
 		loadedTLS: make(map[upstreamTLSKey]*upstreamTLSConfig),
 	}
 }
@@ -1174,11 +1170,11 @@ func (c *directTransportCache) get(timeout *directTimeout, tlsConfig *upstreamTL
 		}
 	}
 	key := directTransportKey{dial: dial, header: header, tls: tlsConfig}
-	if transport := c.byTimeout[key]; transport != nil {
+	if transport := c.byKey[key]; transport != nil {
 		return transport, nil
 	}
 	transport := newProxyTransportWithTLS(dial, header, tlsConfig)
-	c.byTimeout[key] = transport
+	c.byKey[key] = transport
 	c.all = append(c.all, transport)
 	return transport, nil
 }
