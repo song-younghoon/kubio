@@ -252,12 +252,12 @@ type rawRouteConfig struct {
 
 type rawRespond struct {
 	set     bool
-	Status  optionalInt          `json:"status"`
-	Body    optionalString       `json:"body"`
-	Headers optionalRespondHeads `json:"headers"`
+	Status  optionalInt            `json:"status"`
+	Body    optionalString         `json:"body"`
+	Headers optionalRespondHeaders `json:"headers"`
 }
 
-type optionalRespondHeads struct {
+type optionalRespondHeaders struct {
 	set    bool
 	values map[string][]string
 }
@@ -708,9 +708,9 @@ func (r *rawRespond) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must be an object")
 	}
 	var decoded struct {
-		Status  optionalInt          `json:"status"`
-		Body    optionalString       `json:"body"`
-		Headers optionalRespondHeads `json:"headers"`
+		Status  optionalInt            `json:"status"`
+		Body    optionalString         `json:"body"`
+		Headers optionalRespondHeaders `json:"headers"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -731,7 +731,7 @@ func (r *rawRespond) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (h *optionalRespondHeads) UnmarshalJSON(data []byte) error {
+func (h *optionalRespondHeaders) UnmarshalJSON(data []byte) error {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 || data[0] != '{' {
 		return fmt.Errorf("must be an object")
@@ -755,7 +755,7 @@ func (h *optionalRespondHeads) UnmarshalJSON(data []byte) error {
 		}
 		values[name] = []string(array)
 	}
-	*h = optionalRespondHeads{set: true, values: values}
+	*h = optionalRespondHeaders{set: true, values: values}
 	return nil
 }
 

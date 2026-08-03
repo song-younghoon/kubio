@@ -30,13 +30,12 @@ type router struct {
 }
 
 type site struct {
-	hosts           []hostPattern
-	proxy           *httputil.ReverseProxy
-	responseHeaders responseHeaderPolicy
-	routes          []route
-	trustProxies    []netip.Prefix
-	exactRoutes     map[string][]int
-	wildcardRoutes  map[string][]int
+	hosts          []hostPattern
+	proxy          *httputil.ReverseProxy
+	routes         []route
+	trustProxies   []netip.Prefix
+	exactRoutes    map[string][]int
+	wildcardRoutes map[string][]int
 }
 
 type route struct {
@@ -222,11 +221,10 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		return site{}, err
 	}
 	s := site{
-		hosts:           hosts,
-		proxy:           proxy,
-		responseHeaders: siteResponseHeaders,
-		routes:          make([]route, 0, len(cfg.Routes)),
-		trustProxies:    trustProxies,
+		hosts:        hosts,
+		proxy:        proxy,
+		routes:       make([]route, 0, len(cfg.Routes)),
+		trustProxies: trustProxies,
 	}
 	for routeIndex, routeConfig := range cfg.Routes {
 		pattern, err := newPathPattern(routeConfig.Path)
