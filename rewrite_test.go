@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 )
 
@@ -134,9 +133,6 @@ func TestRewriteHasNoRoutePathRewriteForUnselectedRoute(t *testing.T) {
 	router.ServeHTTP(httptest.NewRecorder(), req)
 	if path != "/other/item" {
 		t.Fatalf("unselected route changed upstream path to %q", path)
-	}
-	if strings.Contains(path, "/v1") {
-		t.Fatalf("unselected rewrite applied to %q", path)
 	}
 }
 

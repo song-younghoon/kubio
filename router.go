@@ -40,7 +40,6 @@ type site struct {
 
 type route struct {
 	pattern pathPattern
-	rewrite *pathPattern
 	methods []string
 	match   routeMatch
 	proxy   *httputil.ReverseProxy
@@ -293,7 +292,6 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		}
 		s.routes = append(s.routes, route{
 			pattern: pattern,
-			rewrite: rewrite,
 			methods: append([]string(nil), routeConfig.Methods...),
 			match:   compileRouteMatch(match),
 			proxy:   routeProxy,
