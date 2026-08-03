@@ -40,6 +40,7 @@ type site struct {
 
 type route struct {
 	pattern pathPattern
+	rewrite *pathPattern
 	methods []string
 	match   routeMatch
 	proxy   *httputil.ReverseProxy
@@ -227,6 +228,14 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		if err != nil {
 			return s, fmt.Errorf("routes[%d].path: %w", routeIndex, err)
 		}
+		var rewrite *pathPattern
+		if routeConfig.Rewrite != "" {
+			compiled, err := newPathPattern(routeConfig.Rewrite)
+			if err != nil {
+				return s, fmt.Errorf("routes[%d].rewrite: %w", routeIndex, err)
+			}
+			rewrite = &compiled
+		}
 		if routeConfig.Methods != nil {
 			if err := validateMethods(routeConfig.Methods); err != nil {
 				return s, fmt.Errorf("routes[%d].methods: %w", routeIndex, err)
@@ -272,8 +281,18 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		if err != nil {
 			return s, fmt.Errorf("routes[%d]: %w", routeIndex, err)
 		}
+		if rewrite != nil {
+			sourcePattern := pattern
+			destinationPattern := *rewrite
+			previousRewrite := routeProxy.Rewrite
+			routeProxy.Rewrite = func(request *httputil.ProxyRequest) {
+				previousRewrite(request)
+				rewriteProxyPath(request.Out.URL, request.In.URL, sourcePattern, destinationPattern)
+			}
+		}
 		s.routes = append(s.routes, route{
 			pattern: pattern,
+			rewrite: rewrite,
 			methods: append([]string(nil), routeConfig.Methods...),
 			match:   compileRouteMatch(match),
 			proxy:   routeProxy,
@@ -871,7 +890,60 @@ func stripRequestPath(req *http.Request, prefix string) {
 	req.URL.RawPath = stripped
 }
 
+func rewriteProxyPath(out, in *url.URL, source, destination pathPattern) {
+	suffix := ""
+	if source.wildcard {
+		suffix = strings.TrimPrefix(in.Path, source.path)
+	}
+	path := destination.path
+	if destination.wildcard {
+		path += suffix
+		if path == "" {
+			path = "/"
+		}
+	}
+	out.Path = path
+	out.RawPath = rewriteRawPath(in, source, destination, path)
+}
+
+func rewriteRawPath(in *url.URL, source, destination pathPattern, path string) string {
+	if in.RawPath == "" || !validRawPath(in) {
+		return ""
+	}
+	rawSuffix := ""
+	if source.wildcard {
+		var ok bool
+		rawSuffix, ok = stripEscapedPathPrefix(in.RawPath, source.path)
+		if !ok {
+			return ""
+		}
+	}
+	rawPrefix := (&url.URL{Path: destination.path}).EscapedPath()
+	rawPath := rawPrefix
+	if destination.wildcard {
+		rawPath += rawSuffix
+	}
+	if !validRawPath(&url.URL{Path: path, RawPath: rawPath}) {
+		return ""
+	}
+	return rawPath
+}
+
+func validRawPath(value *url.URL) bool {
+	if value.RawPath == "" {
+		return false
+	}
+	if value.EscapedPath() != value.RawPath {
+		return false
+	}
+	decoded, err := url.PathUnescape(value.RawPath)
+	return err == nil && decoded == value.Path
+}
+
 func stripEscapedPathPrefix(rawPath, prefix string) (string, bool) {
+	if prefix == "" {
+		return rawPath, true
+	}
 	decodedIndex := 0
 	for index := 0; index < len(rawPath); {
 		value, next, ok := escapedPathByte(rawPath, index)

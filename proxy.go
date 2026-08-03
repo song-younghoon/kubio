@@ -1363,6 +1363,7 @@ func containsHeaderName(headers http.Header, name string) bool {
 func rewriteProxyRequest(request *httputil.ProxyRequest, target *url.URL, headers map[string]string, trustProxies []netip.Prefix) {
 	request.SetURL(target)
 	request.Out.URL.RawQuery = request.In.URL.RawQuery
+	request.Out.URL.ForceQuery = request.In.URL.ForceQuery
 	request.Out.Host = request.In.Host
 	setForwardedHeaders(request.In, request.Out, trustProxies)
 	for name, value := range headers {

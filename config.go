@@ -111,6 +111,7 @@ type siteConfig struct {
 
 type routeConfig struct {
 	Path            string               `json:"path"`
+	Rewrite         string               `json:"rewrite"`
 	Methods         []string             `json:"methods"`
 	Match           *routeMatchConfig    `json:"match"`
 	Target          string               `json:"target"`
@@ -227,6 +228,7 @@ type rawSiteConfig struct {
 
 type rawRouteConfig struct {
 	Path            *string              `json:"path"`
+	Rewrite         optionalString       `json:"rewrite"`
 	Methods         optionalStringArray  `json:"methods"`
 	Match           rawRouteMatch        `json:"match"`
 	Target          optionalString       `json:"target"`
@@ -1019,6 +1021,12 @@ func decodeConfig(data []byte) (config, error) {
 					return config{}, fmt.Errorf("sites[%d].routes[%d].methods: %w", siteIndex, routeIndex, err)
 				}
 			}
+			if rawRoute.Rewrite.set && rawRoute.Rewrite.value == "" {
+				return config{}, fmt.Errorf("sites[%d].routes[%d].rewrite must not be empty", siteIndex, routeIndex)
+			}
+			if rawRoute.Rewrite.set && bool(rawRoute.Strip) {
+				return config{}, fmt.Errorf("sites[%d].routes[%d] cannot combine rewrite with strip:true", siteIndex, routeIndex)
+			}
 			if rawRoute.Target.set && rawRoute.Backend.set {
 				return config{}, fmt.Errorf("sites[%d].routes[%d] cannot set both target and backend", siteIndex, routeIndex)
 			}
@@ -1038,6 +1046,7 @@ func decodeConfig(data []byte) (config, error) {
 			}
 			route := routeConfig{
 				Path:            *rawRoute.Path,
+				Rewrite:         rawRoute.Rewrite.value,
 				Methods:         append([]string(nil), rawRoute.Methods.values...),
 				Timeout:         decodeDirectTimeout(rawRoute.Timeout),
 				TLS:             routeTLS,
@@ -1275,7 +1284,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonRoute:
 		switch key {
-		case "path", "methods", "target", "backend", "strip":
+		case "path", "rewrite", "methods", "target", "backend", "strip":
 			return jsonAny, nil
 		case "tls":
 			return jsonUpstreamTLS, nil
