@@ -22,7 +22,7 @@ type reloadableRouter struct {
 type runtimeGeneration struct {
 	router      *router
 	certificate *tls.Certificate
-	bucket      *rateLimitState
+	bucket      rateLimitState
 }
 
 type fileState struct {
@@ -70,7 +70,7 @@ func newReloadableRouter(initial *router, certificate *tls.Certificate) *reloada
 		initial.limiter = newRateLimiter(nil)
 	}
 	initial.limiter.bindCurrent(&r.current)
-	r.current.Store(&runtimeGeneration{router: initial, certificate: certificate, bucket: newRateLimitState(initial.limit, time.Now())})
+	r.current.Store(&runtimeGeneration{router: initial, certificate: certificate, bucket: newRateLimitStateValue(initial.limit, time.Now())})
 	return r
 }
 
@@ -83,7 +83,7 @@ func buildRuntimeGeneration(cfg config) (*runtimeGeneration, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &runtimeGeneration{router: router, certificate: certificate, bucket: newRateLimitState(cfg.Limit, time.Now())}, nil
+	return &runtimeGeneration{router: router, certificate: certificate, bucket: newRateLimitStateValue(cfg.Limit, time.Now())}, nil
 }
 
 func (r *reloadableRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -146,7 +146,7 @@ func (r *reloadableRouter) StoreGeneration(next *router, certificate *tls.Certif
 	old = r.current.Swap(&runtimeGeneration{
 		router:      next,
 		certificate: certificate,
-		bucket:      newRateLimitState(next.limit, time.Now()),
+		bucket:      newRateLimitStateValue(next.limit, time.Now()),
 	})
 	if old != nil && old.router != next {
 		old.router.close()

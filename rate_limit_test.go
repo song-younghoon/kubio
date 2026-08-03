@@ -236,6 +236,61 @@ func TestRateLimiterSharesHandleAcrossEnableTransitions(t *testing.T) {
 	}
 }
 
+func BenchmarkReloadableRateLimitDisabled(b *testing.B) {
+	handler := newRateLimitBenchmarkHandler(b, nil)
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	response := &benchmarkResponseWriter{header: make(http.Header)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		handler.ServeHTTP(response, request)
+	}
+}
+
+func BenchmarkReloadableRateLimitReservation(b *testing.B) {
+	handler := newRateLimitBenchmarkHandler(b, &limitConfig{Rate: 1_000_000, Burst: 1})
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	response := &benchmarkResponseWriter{header: make(http.Header)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		handler.ServeHTTP(response, request)
+	}
+}
+
+func BenchmarkRateLimitAdmittedBucket(b *testing.B) {
+	config := &limitConfig{Rate: maxLimitRate, Burst: maxLimitBurst}
+	now := time.Now()
+	state := newRateLimitStateValue(config, now)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		state.tokens = 0
+		state.last = now.Add(-time.Second)
+		var allowed bool
+		state, allowed = reserveBucket(state, config, now)
+		if !allowed {
+			b.Fatal("admitted bucket rejected a full refill")
+		}
+	}
+}
+
+func newRateLimitBenchmarkHandler(t testing.TB, limit *limitConfig) *reloadableRouter {
+	t.Helper()
+	router, err := newRouter(config{
+		Limit: limit,
+		Sites: []siteConfig{{
+			Hosts:  []string{"*"},
+			Target: "http://127.0.0.1:1",
+			Routes: []routeConfig{{Path: "/*", Respond: &generatedResponse{Status: http.StatusNoContent}}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newReloadableRouter(router, nil)
+}
+
 func TestOldDisabledRouterUsesPublishedLimiter(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))

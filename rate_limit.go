@@ -24,7 +24,7 @@ type rateLimitState struct {
 }
 
 func newRateLimiter(config *limitConfig) *rateLimiter {
-	return newRateLimiterAt(config, time.Now())
+	return &rateLimiter{fallback: config}
 }
 
 func newRateLimiterAt(config *limitConfig, now time.Time) *rateLimiter {
@@ -36,11 +36,19 @@ func newRateLimiterAt(config *limitConfig, now time.Time) *rateLimiter {
 }
 
 func newRateLimitState(config *limitConfig, now time.Time) *rateLimitState {
+	state := newRateLimitStateValue(config, now)
 	if config == nil {
 		return nil
 	}
+	return &state
+}
+
+func newRateLimitStateValue(config *limitConfig, now time.Time) rateLimitState {
+	if config == nil {
+		return rateLimitState{}
+	}
 	capacity := int64(config.Burst) * nanotokensPerToken
-	return &rateLimitState{
+	return rateLimitState{
 		config:   config,
 		rate:     int64(config.Rate),
 		capacity: capacity,
@@ -117,21 +125,25 @@ func (l *rateLimiter) allowAt(now time.Time) bool {
 func (l *rateLimiter) reserve(config *limitConfig, now time.Time) bool {
 	for {
 		previous := l.state.Load()
-		next, allowed := reserveBucket(previous, config, now)
-		if l.state.CompareAndSwap(previous, next) {
+		var previousValue rateLimitState
+		if previous != nil {
+			previousValue = *previous
+		}
+		next, allowed := reserveBucket(previousValue, config, now)
+		if l.state.CompareAndSwap(previous, &next) {
 			return allowed
 		}
 	}
 }
 
-func reserveBucket(previous *rateLimitState, config *limitConfig, now time.Time) (*rateLimitState, bool) {
-	if previous == nil || previous.config != config {
-		next := newRateLimitState(config, now)
+func reserveBucket(previous rateLimitState, config *limitConfig, now time.Time) (rateLimitState, bool) {
+	if previous.config != config {
+		next := newRateLimitStateValue(config, now)
 		next.tokens -= nanotokensPerToken
 		return next, true
 	}
 
-	next := *previous
+	next := previous
 	if !now.Before(previous.last) {
 		elapsed := now.Sub(previous.last).Nanoseconds()
 		next.tokens = saturatingAdd(previous.tokens, saturatingMultiply(elapsed, previous.rate))
@@ -145,7 +157,7 @@ func reserveBucket(previous *rateLimitState, config *limitConfig, now time.Time)
 	if allowed {
 		next.tokens -= nanotokensPerToken
 	}
-	return &next, allowed
+	return next, allowed
 }
 
 func saturatingAdd(left, right int64) int64 {
