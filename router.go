@@ -29,12 +29,11 @@ type router struct {
 }
 
 type site struct {
-	hosts            []hostPattern
-	proxy            *httputil.ReverseProxy
-	routes           []route
-	directTransports []*http.Transport
-	exactRoutes      map[string][]int
-	wildcardRoutes   map[string][]int
+	hosts          []hostPattern
+	proxy          *httputil.ReverseProxy
+	routes         []route
+	exactRoutes    map[string][]int
+	wildcardRoutes map[string][]int
 }
 
 type route struct {
@@ -108,25 +107,23 @@ func newRouter(cfg config) (*router, error) {
 	}
 
 	r := &router{
-		backends:         backends,
-		generation:       generation,
-		directTransports: make([]*http.Transport, 0),
-		sites:            make([]site, 0, len(cfg.Sites)),
-		trustProxies:     trustProxies,
-		exactHosts:       make(map[string]int),
-		wildcardHosts:    make(map[string]int),
-		starSite:         -1,
+		backends:      backends,
+		generation:    generation,
+		sites:         make([]site, 0, len(cfg.Sites)),
+		trustProxies:  trustProxies,
+		exactHosts:    make(map[string]int),
+		wildcardHosts: make(map[string]int),
+		starSite:      -1,
 	}
+	transports := newDirectTransportCache()
 	for siteIndex, siteConfig := range cfg.Sites {
-		s, err := newSite(siteConfig, backends, trustProxies)
+		s, err := newSite(siteConfig, backends, trustProxies, transports)
 		if err != nil {
-			closeDirectTransports(s.directTransports)
-			closeDirectTransports(r.directTransports)
+			closeDirectTransports(transports.all)
 			return nil, fmt.Errorf("sites[%d]: %w", siteIndex, err)
 		}
 
 		r.sites = append(r.sites, s)
-		r.directTransports = append(r.directTransports, s.directTransports...)
 		for _, host := range s.hosts {
 			switch {
 			case host.value == "*":
@@ -151,6 +148,7 @@ func newRouter(cfg config) (*router, error) {
 	for _, backend := range backends {
 		backend.startProbe()
 	}
+	r.directTransports = transports.all
 
 	return r, nil
 }
@@ -170,7 +168,7 @@ func (r *router) close() {
 	})
 }
 
-func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.Prefix) (site, error) {
+func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.Prefix, transports *directTransportCache) (site, error) {
 	if len(cfg.Hosts) == 0 {
 		return site{}, fmt.Errorf("hosts must not be empty")
 	}
@@ -196,15 +194,15 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		responseHeaderPolicy{},
 		trustProxies,
 		backends,
+		transports,
 	)
 	if err != nil {
 		return site{}, err
 	}
 	s := site{
-		hosts:            hosts,
-		proxy:            proxy,
-		routes:           make([]route, 0, len(cfg.Routes)),
-		directTransports: directTransportFromProxy(cfg.Target != "", proxy),
+		hosts:  hosts,
+		proxy:  proxy,
+		routes: make([]route, 0, len(cfg.Routes)),
 	}
 	for routeIndex, routeConfig := range cfg.Routes {
 		pattern, err := newPathPattern(routeConfig.Path)
@@ -246,12 +244,10 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 			routeResponseHeaders,
 			trustProxies,
 			backends,
+			transports,
 		)
 		if err != nil {
 			return s, fmt.Errorf("routes[%d]: %w", routeIndex, err)
-		}
-		if target != "" {
-			s.directTransports = append(s.directTransports, directTransportFromProxy(true, routeProxy)...)
 		}
 		s.routes = append(s.routes, route{
 			pattern: pattern,
@@ -311,6 +307,7 @@ func newProxyForSelection(
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
 	backends map[string]*backend,
+	transports *directTransportCache,
 ) (*httputil.ReverseProxy, error) {
 	if err := validateDirectTimeout(timeout); err != nil {
 		return nil, err
@@ -320,7 +317,7 @@ func newProxyForSelection(
 		return nil, fmt.Errorf("must set exactly one of target or backend")
 	}
 	if hasTarget {
-		proxy, err := newProxy(target, timeout, headers, siteResponseHeaders, routeResponseHeaders, trustProxies)
+		proxy, err := newProxy(target, timeout, headers, siteResponseHeaders, routeResponseHeaders, trustProxies, transports)
 		if err != nil {
 			return nil, fmt.Errorf("target: %w", err)
 		}
@@ -350,17 +347,6 @@ func validateDirectTimeout(timeout *directTimeout) error {
 		}
 	}
 	return nil
-}
-
-func directTransportFromProxy(direct bool, proxy *httputil.ReverseProxy) []*http.Transport {
-	if !direct {
-		return nil
-	}
-	transport, ok := proxy.Transport.(*http.Transport)
-	if !ok {
-		return nil
-	}
-	return []*http.Transport{transport}
 }
 
 func closeDirectTransports(transports []*http.Transport) {

@@ -448,6 +448,27 @@ func TestDirectHeaderAndBodyTimeouts(t *testing.T) {
 	})
 }
 
+func TestDirectTransportsSharedWithinGeneration(t *testing.T) {
+	server := newTextBackend(t, "ok")
+	defer server.Close()
+	router, err := newRouter(config{Sites: []siteConfig{{
+		Hosts:   []string{"*"},
+		Target:  server.URL,
+		Timeout: &directTimeout{Dial: time.Second, Body: time.Second},
+		Routes: []routeConfig{
+			{Path: "/one", Timeout: &directTimeout{Dial: time.Second, Body: 2 * time.Second}},
+			{Path: "/two", Timeout: &directTimeout{Dial: time.Second, Body: 3 * time.Second}},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if len(router.directTransports) != 1 {
+		t.Fatalf("direct transports = %d, want 1", len(router.directTransports))
+	}
+}
+
 func TestBackendRetriesDistinctTargetsWithoutAdvancingSelector(t *testing.T) {
 	var hits atomic.Int32
 	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

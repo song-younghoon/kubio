@@ -162,6 +162,32 @@ func BenchmarkProxyRequest(b *testing.B) {
 	benchmarkProxyRequest(b, false)
 }
 
+func BenchmarkProxyRequestWithBodyTimeout(b *testing.B) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	handler, err := newRouter(config{Sites: []siteConfig{{
+		Hosts:   []string{"*"},
+		Target:  backend.URL,
+		Timeout: &directTimeout{Body: time.Hour},
+	}}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		request := httptest.NewRequest(http.MethodGet, "http://proxy/", nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			b.Fatalf("status = %d", response.Code)
+		}
+	}
+}
+
 func BenchmarkProxyRequestWithAccessLog(b *testing.B) {
 	benchmarkProxyRequest(b, true)
 }

@@ -1093,6 +1093,7 @@ func newProxy(
 	headers map[string]string,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
+	transports *directTransportCache,
 ) (*httputil.ReverseProxy, error) {
 	target, err := parseTarget(raw)
 	if err != nil {
@@ -1101,10 +1102,24 @@ func newProxy(
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}, newDirectTransport(timeout), siteResponseHeaders, routeResponseHeaders, 0, timeoutBody(timeout)), nil
+	}, transports.get(timeout), siteResponseHeaders, routeResponseHeaders, 0, timeoutBody(timeout)), nil
 }
 
-func newDirectTransport(timeout *directTimeout) *http.Transport {
+type directTransportKey struct {
+	dial   time.Duration
+	header time.Duration
+}
+
+type directTransportCache struct {
+	byTimeout map[directTransportKey]*http.Transport
+	all       []*http.Transport
+}
+
+func newDirectTransportCache() *directTransportCache {
+	return &directTransportCache{byTimeout: make(map[directTransportKey]*http.Transport)}
+}
+
+func (c *directTransportCache) get(timeout *directTimeout) *http.Transport {
 	dial, header := proxyDialTimeout, proxyResponseHeaderTimeout
 	if timeout != nil {
 		if timeout.Dial > 0 {
@@ -1114,7 +1129,14 @@ func newDirectTransport(timeout *directTimeout) *http.Transport {
 			header = timeout.Header
 		}
 	}
-	return newProxyTransport(dial, header)
+	key := directTransportKey{dial: dial, header: header}
+	if transport := c.byTimeout[key]; transport != nil {
+		return transport
+	}
+	transport := newProxyTransport(dial, header)
+	c.byTimeout[key] = transport
+	c.all = append(c.all, transport)
+	return transport
 }
 
 func timeoutBody(timeout *directTimeout) time.Duration {
