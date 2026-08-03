@@ -299,6 +299,13 @@ type deadlineBody struct {
 	once   sync.Once
 }
 
+type deadlineReadWriteBody struct {
+	io.ReadWriteCloser
+	ctx    context.Context
+	cancel func()
+	once   sync.Once
+}
+
 type directBody struct {
 	mu      sync.Mutex
 	body    io.ReadCloser
@@ -419,10 +426,35 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func (b *deadlineBody) deadlineContext() context.Context { return b.ctx }
+
 func (b *deadlineBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.once.Do(b.cancel)
 	return err
+}
+
+func (b *deadlineReadWriteBody) Read(p []byte) (int, error) {
+	n, err := b.ReadWriteCloser.Read(p)
+	if err != nil {
+		b.once.Do(b.cancel)
+	}
+	return n, err
+}
+
+func (b *deadlineReadWriteBody) deadlineContext() context.Context { return b.ctx }
+
+func (b *deadlineReadWriteBody) Close() error {
+	err := b.ReadWriteCloser.Close()
+	b.once.Do(b.cancel)
+	return err
+}
+
+func wrapDeadlineBody(body io.ReadCloser, ctx context.Context, cancel func()) io.ReadCloser {
+	if body, ok := body.(io.ReadWriteCloser); ok {
+		return &deadlineReadWriteBody{ReadWriteCloser: body, ctx: ctx, cancel: cancel}
+	}
+	return &deadlineBody{ReadCloser: body, ctx: ctx, cancel: cancel}
 }
 
 func (p *proxyBufferPool) Get() []byte {
@@ -807,7 +839,7 @@ func (b *backend) RoundTrip(request *http.Request) (*http.Response, error) {
 		cancel()
 		return response, nil
 	}
-	response.Body = &deadlineBody{ReadCloser: response.Body, ctx: ctx, cancel: cancel}
+	response.Body = wrapDeadlineBody(response.Body, ctx, cancel)
 	return response, nil
 }
 
@@ -1238,11 +1270,11 @@ func newReverseProxy(
 }
 
 func modifyProxyResponse(response *http.Response, site, route responseHeaderPolicy, deadline, bodyTimeout time.Duration) error {
-	var deadlineResponseBody *deadlineBody
+	var deadlineResponseBody interface{ deadlineContext() context.Context }
 	if deadline > 0 {
-		deadlineResponseBody, _ = response.Body.(*deadlineBody)
+		deadlineResponseBody, _ = response.Body.(interface{ deadlineContext() context.Context })
 		if deadlineResponseBody != nil {
-			if err := deadlineResponseBody.ctx.Err(); err != nil {
+			if err := deadlineResponseBody.deadlineContext().Err(); err != nil {
 				return err
 			}
 		}
@@ -1262,7 +1294,7 @@ func modifyProxyResponse(response *http.Response, site, route responseHeaderPoli
 	}
 	applyResponseHeaderPolicies(response, site, route)
 	if deadlineResponseBody != nil {
-		if err := deadlineResponseBody.ctx.Err(); err != nil {
+		if err := deadlineResponseBody.deadlineContext().Err(); err != nil {
 			return err
 		}
 	}

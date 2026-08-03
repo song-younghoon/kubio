@@ -28,7 +28,7 @@ func newAccessLogger(output io.Writer) *accessLogger {
 	return &accessLogger{output: output}
 }
 
-func (l *accessLogger) write(record accessRecord) {
+func (l *accessLogger) write(record any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_ = json.NewEncoder(l.output).Encode(record)
@@ -44,6 +44,11 @@ type accessRecord struct {
 	Status     int    `json:"status"`
 	Bytes      int64  `json:"bytes"`
 	DurationUs int64  `json:"durationUs"`
+}
+
+type accessRecordWithID struct {
+	accessRecord
+	ID string `json:"id,omitempty"`
 }
 
 type accessResponseWriter struct {
@@ -82,12 +87,39 @@ func (r *router) serveLogged(w http.ResponseWriter, req *http.Request) {
 			Bytes:      observed.bytes,
 			DurationUs: end.Sub(start).Microseconds(),
 		}
-		r.accessLogger.write(record)
+		if r.requestID {
+			r.accessLogger.write(accessRecordWithID{accessRecord: record, ID: requestIDFromRequest(req)})
+		} else {
+			r.accessLogger.write(record)
+		}
 		if panicValue != nil {
 			panic(panicValue)
 		}
 	}()
 	r.serveHTTP(observed, req)
+}
+
+func (r *router) serveRequestIDFailure(w http.ResponseWriter, req *http.Request) {
+	start := time.Now()
+	observed := &accessResponseWriter{ResponseWriter: w}
+	http.Error(observed, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	end := time.Now()
+	path := req.URL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	_, peer := peerAddress(req.RemoteAddr)
+	r.accessLogger.write(accessRecord{
+		Time:       end.UTC().Format(time.RFC3339Nano),
+		Method:     req.Method,
+		Host:       req.Host,
+		Path:       path,
+		Proto:      req.Proto,
+		Peer:       peer,
+		Status:     observed.status,
+		Bytes:      observed.bytes,
+		DurationUs: end.Sub(start).Microseconds(),
+	})
 }
 
 func (w *accessResponseWriter) WriteHeader(status int) {

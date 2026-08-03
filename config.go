@@ -29,6 +29,7 @@ const (
 type config struct {
 	Listen       string                   `json:"listen"`
 	Log          bool                     `json:"log"`
+	RequestID    bool                     `json:"id"`
 	TLS          *tlsConfig               `json:"tls"`
 	TrustProxies []string                 `json:"trustProxies"`
 	Backends     map[string]backendConfig `json:"backends"`
@@ -136,6 +137,7 @@ type responseHeaderPolicy struct {
 type rawConfig struct {
 	Listen       *string          `json:"listen"`
 	Log          strictBool       `json:"log"`
+	RequestID    strictBool       `json:"id"`
 	TLS          rawTLSConfig     `json:"tls"`
 	TrustProxies stringArray      `json:"trustProxies"`
 	Backends     rawBackends      `json:"backends"`
@@ -883,6 +885,7 @@ func decodeConfig(data []byte) (config, error) {
 	cfg := config{
 		Listen:       *raw.Listen,
 		Log:          bool(raw.Log),
+		RequestID:    bool(raw.RequestID),
 		TrustProxies: append([]string(nil), raw.TrustProxies...),
 		Backends:     make(map[string]backendConfig, len(raw.Backends)),
 		Sites:        make([]siteConfig, len(*raw.Sites)),
@@ -1173,7 +1176,7 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 	switch schema {
 	case jsonRoot:
 		switch key {
-		case "listen", "log", "trustProxies":
+		case "listen", "log", "id", "trustProxies":
 			return jsonAny, nil
 		case "tls":
 			return jsonTLS, nil

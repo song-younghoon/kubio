@@ -17,6 +17,7 @@ const routeIndexThreshold = 8
 
 type router struct {
 	accessLogger     *accessLogger
+	requestID        bool
 	backends         map[string]*backend
 	generation       *backendGeneration
 	directTransports []*http.Transport
@@ -114,6 +115,7 @@ func newRouter(cfg config) (*router, error) {
 
 	r := &router{
 		backends:      backends,
+		requestID:     cfg.RequestID,
 		generation:    generation,
 		sites:         make([]site, 0, len(cfg.Sites)),
 		trustProxies:  trustProxies,
@@ -128,6 +130,12 @@ func newRouter(cfg config) (*router, error) {
 			closeDirectTransports(transports.all)
 			closeBackendTransports(backends)
 			return nil, fmt.Errorf("sites[%d]: %w", siteIndex, err)
+		}
+		if cfg.RequestID {
+			enableRequestIDProxy(s.proxy)
+			for routeIndex := range s.routes {
+				enableRequestIDProxy(s.routes[routeIndex].proxy)
+			}
 		}
 
 		r.sites = append(r.sites, s)
@@ -480,6 +488,28 @@ func effectiveClientIP(req *http.Request, trustProxies []netip.Prefix) (netip.Ad
 }
 
 func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.requestID {
+		id, err := requestIDFor(req)
+		if err != nil {
+			if r.accessLogger != nil {
+				r.serveRequestIDFailure(w, req)
+			} else {
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			}
+			return
+		}
+		req = setRequestID(req, id)
+		requestWriter := newRequestIDWriter(w, id)
+		if r.accessLogger != nil {
+			r.serveLogged(requestWriter, req)
+		} else {
+			r.serveHTTP(requestWriter, req)
+		}
+		if !requestWriter.committed {
+			requestWriter.enforce()
+		}
+		return
+	}
 	if r.accessLogger != nil {
 		r.serveLogged(w, req)
 		return
@@ -517,8 +547,16 @@ func serveGeneralOptions(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	limitWriter := w
-	if unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter }); ok {
-		limitWriter = unwrapper.Unwrap()
+	for {
+		unwrapper, ok := limitWriter.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		unwrapped := unwrapper.Unwrap()
+		if unwrapped == limitWriter {
+			break
+		}
+		limitWriter = unwrapped
 	}
 	body := http.MaxBytesReader(limitWriter, req.Body, 4<<10)
 	_, _ = io.Copy(io.Discard, body)
