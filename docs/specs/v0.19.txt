@@ -1,5 +1,5 @@
 Kubio kubio.json v0.19 Proposal
-Status: Under review
+Status: Agreed specification
 Base: v0.18
 
 
@@ -50,12 +50,24 @@ The `tls` object contains one or both of exactly `ca` and `name`. `ca` is a
 non-empty path to a PEM file. The path is resolved from Kubio's process
 working directory using the existing TLS-file path rules. The file must be
 readable and contain at least one valid X.509 certificate. `name` is a
-non-empty TLS server name used for SNI and certificate hostname verification.
-It may be a DNS name or IP address. Values are strings, are not trimmed, and
-do not support environment expansion. The object must not be null or empty.
+non-empty TLS server name. It must be either an ASCII DNS hostname without a
+port, brackets, wildcard, trailing dot, URI syntax, whitespace, or control
+characters, or a valid IP literal without a port or zone. Values are strings,
+are not trimmed, and do not support environment expansion. For a DNS name,
+Kubio uses `name` for SNI and certificate hostname verification. For an IP
+literal, Go sends no SNI and uses `name` only for certificate verification.
+The object must not be null or empty.
 Unknown fields, aliases, nulls, non-string values, empty values, invalid PEM,
 unreadable files, duplicate keys, and duplicate object members are
 configuration errors.
+
+Kubio reads the complete `ca` file and rejects malformed PEM, non-whitespace
+bytes outside PEM blocks, PEM blocks whose type is not `CERTIFICATE`, or a
+certificate block that fails `x509.ParseCertificate`. At least one certificate
+block is required. Duplicate certificate blocks are permitted. Errors identify
+only `tls.ca`, its configured path, and a broad read/PEM/certificate category;
+they never include file contents, environment values, handshake details, or
+upstream secrets.
 
 When `ca` is present, its certificates are added to the system trust pool. If
 the system pool is unavailable, the configured certificates form the trust
@@ -70,22 +82,28 @@ the default when omitted. A direct `tls` object on a site or route whose
 effective selection is a named backend is invalid. A direct `tls` object whose
 effective target is HTTP is invalid. A named-backend `tls` object is valid for
 HTTP and HTTPS target arrays; it affects HTTPS targets only and has no effect
-on HTTP targets.
+on HTTP targets. For a named backend, an explicit `name` applies to every
+HTTPS target in that backend. If absent, each HTTPS target derives its name
+from its own target host.
 
 
 3. Upstream TLS behavior
 
 For every HTTPS upstream connection, Kubio uses the generation's configured
-trust pool and server name. The target URL and HTTP `Host` header remain the
-target host; `name` changes only TLS SNI and certificate hostname
-verification. TLS handshake and connection timeout behavior continue to use
-the effective v0.18 `timeout.dial` value. HTTP targets do not perform a TLS
-handshake and do not use the TLS object.
+trust pool and server name. The target URL remains the configured target URL.
+HTTP `Host` forwarding retains the existing v0.18 behavior: the incoming
+client Host is preserved by default, and a configured Host header overrides
+it. `name` changes only TLS SNI and certificate hostname verification. TLS
+handshake and connection timeout behavior continue to use the effective v0.18
+`timeout.dial` value. HTTP targets do not perform a TLS handshake and do not
+use the TLS object.
 
 The default TLS minimum version, cipher selection, ALPN behavior, proxy
 headers, request headers, response handling, active health probe behavior, and
-retry behavior remain unchanged. Probe requests use the same backend transport
-and therefore the same trust pool and SNI settings as backend requests.
+retry behavior remain unchanged. Custom transports preserve the existing
+HTTP/2 and ALPN negotiation, including `ForceAttemptHTTP2` and the cloned
+transport protocol settings. Probe requests use the same backend transport and
+therefore the same trust pool and SNI settings as backend requests.
 
 Certificate verification failures are upstream transport failures and retain
 the existing 502/504 classification rules. Kubio does not expose certificate
@@ -108,6 +126,11 @@ transports, and leaves active connections and in-flight response bodies
 usable. Failed or unpublished generations release their transports and do not
 affect the current generation.
 
+Kubio watches `kubio.json`, not referenced CA files. Changing a CA file at an
+unchanged configured path does not trigger reload; the operator must modify or
+touch `kubio.json`. Each resulting generation rereads and validates the CA
+file.
+
 
 5. Validation and compatibility
 
@@ -122,7 +145,10 @@ backend restrictions remain unchanged.
 
 CA files are read only during generation construction, never per request or
 per probe. A generation reuses its immutable trust pools and TLS settings
-across all requests using the same upstream transport. HTTP targets and
+across all requests using the same upstream transport. A transport may be
+shared only when its effective dial timeout, header timeout, TLS mode, trust
+pool, server name, and HTTP/2/ALPN settings are identical. Different `ca` or
+`name` settings require separate generation-owned transports. HTTP targets and
 upstreams without a `tls` object retain the existing request path. No request
 path config read, global lock, certificate parse, or reload lock is added.
 

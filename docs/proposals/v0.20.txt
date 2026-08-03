@@ -1,0 +1,114 @@
+Kubio kubio.json v0.20 Proposal
+Status: Under review
+Base: v0.19
+
+
+1. Scope
+
+v0.20 adds client-IP matching to route conditions. It allows a route to be
+selected only when the effective client IP belongs to one of configured CIDR
+prefixes. This is the only advanced route condition in this version.
+
+The feature does not add forwarded-header rewriting, PROXY protocol parsing,
+authentication, rate limiting, observability, administration, or other
+deferred v0.19 items. Those items move to v0.21.
+
+
+2. Configuration
+
+A route may add `match.ip`:
+
+    {
+      "sites": [{
+        "hosts": ["example.com"],
+        "routes": [{
+          "path": "/internal/*",
+          "match": {"ip": ["192.0.2.0/24", "2001:db8::/32"]},
+          "backend": "internal"
+        }]
+      }]
+    }
+
+`match.ip` is a non-empty array of CIDR strings. Each value must be a valid
+IPv4 or IPv6 prefix, must not contain a zone, and is not trimmed or expanded
+from an environment variable. IPv4-mapped IPv6 addresses are normalized to
+IPv4 before matching. Prefixes are normalized to their network address for
+matching. Duplicate normalized prefixes are configuration errors.
+
+The `ip` key is valid only inside a route's `match` object. The value must not
+be null, empty, or contain non-string values. Unknown fields, aliases,
+duplicate keys, duplicate object members, malformed CIDRs, and invalid values
+are configuration errors. Existing `match` fields and their strict validation
+remain unchanged.
+
+
+3. Effective client IP
+
+Kubio determines one effective client IP per request:
+
+- The immediate peer is the connection's validated remote IP. An unavailable
+  or invalid peer makes the effective client IP unavailable.
+- If the immediate peer is not in the site's `trustProxies`, Kubio ignores
+  `X-Forwarded-For` and uses the immediate peer.
+- If the immediate peer is trusted, Kubio reads only `X-Forwarded-For`. It
+  combines repeated field values in received order, splits comma-separated
+  entries, and removes optional surrounding HTTP whitespace from each entry.
+- Every resulting entry must be an IP literal without a port or zone. If the
+  header is absent, empty, or any entry is invalid, the effective client IP is
+  unavailable.
+- Kubio scans the parsed forwarded addresses from right to left and selects
+  the first address that is not in `trustProxies`. If all addresses are
+  trusted, the effective client IP is unavailable.
+
+Kubio does not use the `Forwarded` header or any other client-controlled
+header as a fallback. An untrusted peer cannot influence the effective client
+IP with a forwarded header. The existing `trustProxies` validation and
+forwarded-header behavior are otherwise unchanged.
+
+
+4. Route matching and selection
+
+The route's `match.ip` condition passes when the effective client IP belongs
+to at least one configured prefix. A missing or unavailable effective client
+IP makes the condition fail; it does not produce an error response.
+
+When a route has multiple match fields, all configured fields must pass. The
+values inside `match.ip` are alternatives (OR). A route without `match.ip` is
+unchanged. Client-IP matching is an eligibility condition only: the existing
+path specificity, host selection, method matching, and same-depth declaration
+order determine the winning eligible route. No forwarded header is added,
+removed, or rewritten by this feature.
+
+
+5. Reload and failure behavior
+
+Kubio parses and normalizes route prefixes while constructing a generation.
+An invalid `match.ip` configuration terminates startup and, on reload, is
+logged while the current generation continues serving unchanged. A valid
+reload publishes atomically without downtime; in-flight requests retain their
+old generation's parsed prefixes.
+
+
+6. Performance constraints
+
+Routes store parsed prefixes, not strings, and no CIDR parsing occurs on the
+request path. Requests for configurations without `match.ip` retain the
+existing route-matching path. For a request that can use client-IP matching,
+Kubio parses the effective client IP at most once and reuses it across route
+checks. No global lock, config-file read, or allocation is added to requests
+that have no client-IP route condition.
+
+
+7. Deferred scope
+
+The following remain unresolved and move to v0.21:
+
+- Client certificates, mutual TLS, TLS passthrough, configurable TLS policy,
+  ACME, multiple listener certificates, and SNI certificate selection.
+- Configurable logs, request IDs, metrics, health/admin/reload endpoints.
+- Forwarded/PROXY protocols, URI rewrites, redirects, fixed responses, and
+  custom error bodies.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  adaptive retry policies, and policies for Kubio-generated or intermediate
+  responses.
