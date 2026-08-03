@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -28,11 +29,19 @@ const (
 )
 
 func newProxyTransport(dialTimeout, responseHeaderTimeout time.Duration) *http.Transport {
+	return newProxyTransportWithTLS(dialTimeout, responseHeaderTimeout, nil)
+}
+
+func newProxyTransportWithTLS(dialTimeout, responseHeaderTimeout time.Duration, config *upstreamTLSConfig) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: dialTimeout}).DialContext
 	transport.TLSHandshakeTimeout = dialTimeout
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.MaxIdleConnsPerHost = proxyMaxIdleConnsPerHost
+	if config != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: config.RootCAs, ServerName: config.Name}
+		transport.ForceAttemptHTTP2 = true
+	}
 	return transport
 }
 
@@ -596,6 +605,10 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		}
 		targets[index] = target
 	}
+	upstreamTLS, err := loadUpstreamTLS(cfg.TLS)
+	if err != nil {
+		return nil, err
+	}
 	var schedule []int
 	if cfg.Weights != nil {
 		if err := validateTargetWeights(cfg.Weights, len(targets)); err != nil {
@@ -640,7 +653,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		retryDeadline: deadline,
 		budget:        budget,
 		health:        health,
-		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
+		transport:     newProxyTransportWithTLS(dialTimeout, responseHeaderTimeout, upstreamTLS),
 	}
 	if health != nil && health.probe != nil {
 		backend.probeTargets = make([]string, len(targets))
@@ -1088,6 +1101,7 @@ func upgradeRequest(request *http.Request) bool {
 func newProxy(
 	raw string,
 	timeout *directTimeout,
+	tlsConfig *upstreamTLSConfig,
 	headers map[string]string,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
@@ -1097,27 +1111,51 @@ func newProxy(
 	if err != nil {
 		return nil, err
 	}
+	if tlsConfig != nil && target.Scheme != "https" {
+		return nil, fmt.Errorf("tls is only allowed with HTTPS target")
+	}
+	transport, err := transports.get(timeout, tlsConfig)
+	if err != nil {
+		return nil, err
+	}
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}, transports.get(timeout), siteResponseHeaders, routeResponseHeaders, 0, directBodyTimeout(timeout)), nil
+	}, transport, siteResponseHeaders, routeResponseHeaders, 0, directBodyTimeout(timeout)), nil
 }
 
 type directTransportKey struct {
 	dial   time.Duration
 	header time.Duration
+	tls    *upstreamTLSConfig
 }
 
 type directTransportCache struct {
 	byTimeout map[directTransportKey]*http.Transport
+	loadedTLS map[*upstreamTLSConfig]*upstreamTLSConfig
 	all       []*http.Transport
 }
 
 func newDirectTransportCache() *directTransportCache {
-	return &directTransportCache{byTimeout: make(map[directTransportKey]*http.Transport)}
+	return &directTransportCache{
+		byTimeout: make(map[directTransportKey]*http.Transport),
+		loadedTLS: make(map[*upstreamTLSConfig]*upstreamTLSConfig),
+	}
 }
 
-func (c *directTransportCache) get(timeout *directTimeout) *http.Transport {
+func (c *directTransportCache) get(timeout *directTimeout, tlsConfig *upstreamTLSConfig) (*http.Transport, error) {
+	if tlsConfig != nil {
+		loaded, ok := c.loadedTLS[tlsConfig]
+		if !ok {
+			var err error
+			loaded, err = loadUpstreamTLS(tlsConfig)
+			if err != nil {
+				return nil, err
+			}
+			c.loadedTLS[tlsConfig] = loaded
+		}
+		tlsConfig = loaded
+	}
 	dial, header := proxyDialTimeout, proxyResponseHeaderTimeout
 	if timeout != nil {
 		if timeout.Dial > 0 {
@@ -1127,14 +1165,14 @@ func (c *directTransportCache) get(timeout *directTimeout) *http.Transport {
 			header = timeout.Header
 		}
 	}
-	key := directTransportKey{dial: dial, header: header}
+	key := directTransportKey{dial: dial, header: header, tls: tlsConfig}
 	if transport := c.byTimeout[key]; transport != nil {
-		return transport
+		return transport, nil
 	}
-	transport := newProxyTransport(dial, header)
+	transport := newProxyTransportWithTLS(dial, header, tlsConfig)
 	c.byTimeout[key] = transport
 	c.all = append(c.all, transport)
-	return transport
+	return transport, nil
 }
 
 func directBodyTimeout(timeout *directTimeout) time.Duration {

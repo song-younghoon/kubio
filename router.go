@@ -120,6 +120,7 @@ func newRouter(cfg config) (*router, error) {
 		s, err := newSite(siteConfig, backends, trustProxies, transports)
 		if err != nil {
 			closeDirectTransports(transports.all)
+			closeBackendTransports(backends)
 			return nil, fmt.Errorf("sites[%d]: %w", siteIndex, err)
 		}
 
@@ -165,6 +166,7 @@ func (r *router) close() {
 			backend.joinProbe()
 		}
 		closeDirectTransports(r.directTransports)
+		closeBackendTransports(r.backends)
 	})
 }
 
@@ -189,6 +191,7 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		cfg.Target,
 		cfg.Backend,
 		cfg.Timeout,
+		cfg.TLS,
 		siteHeaders,
 		siteResponseHeaders,
 		responseHeaderPolicy{},
@@ -235,10 +238,15 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		if timeout == nil && routeConfig.Target == "" && routeConfig.Backend == "" && target != "" {
 			timeout = cfg.Timeout
 		}
+		upstreamTLS := routeConfig.TLS
+		if upstreamTLS == nil && routeConfig.Target == "" && routeConfig.Backend == "" && target != "" {
+			upstreamTLS = cfg.TLS
+		}
 		routeProxy, err := newProxyForSelection(
 			target,
 			backendName,
 			timeout,
+			upstreamTLS,
 			mergeHeaders(siteHeaders, routeHeaders),
 			siteResponseHeaders,
 			routeResponseHeaders,
@@ -293,6 +301,7 @@ func newBackends(configs map[string]backendConfig) (map[string]*backend, error) 
 		}
 		backend, err := newBackend(cfg)
 		if err != nil {
+			closeBackendTransports(backends)
 			return nil, fmt.Errorf("backends[%q]: %w", name, err)
 		}
 		backends[name] = backend
@@ -303,6 +312,7 @@ func newBackends(configs map[string]backendConfig) (map[string]*backend, error) 
 func newProxyForSelection(
 	target, backendName string,
 	timeout *directTimeout,
+	upstreamTLS *upstreamTLSConfig,
 	headers map[string]string,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
@@ -317,7 +327,7 @@ func newProxyForSelection(
 		return nil, fmt.Errorf("must set exactly one of target or backend")
 	}
 	if hasTarget {
-		proxy, err := newProxy(target, timeout, headers, siteResponseHeaders, routeResponseHeaders, trustProxies, transports)
+		proxy, err := newProxy(target, timeout, upstreamTLS, headers, siteResponseHeaders, routeResponseHeaders, trustProxies, transports)
 		if err != nil {
 			return nil, fmt.Errorf("target: %w", err)
 		}
@@ -325,6 +335,9 @@ func newProxyForSelection(
 	}
 	if timeout != nil {
 		return nil, fmt.Errorf("timeout is not allowed with backend")
+	}
+	if upstreamTLS != nil {
+		return nil, fmt.Errorf("tls is not allowed with backend")
 	}
 	backend, ok := backends[backendName]
 	if !ok {
@@ -359,6 +372,14 @@ func validateDirectTimeoutValue(name string, duration time.Duration) error {
 func closeDirectTransports(transports []*http.Transport) {
 	for _, transport := range transports {
 		transport.CloseIdleConnections()
+	}
+}
+
+func closeBackendTransports(backends map[string]*backend) {
+	for _, backend := range backends {
+		if backend.transport != nil {
+			backend.transport.CloseIdleConnections()
+		}
 	}
 }
 

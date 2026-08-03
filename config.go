@@ -44,6 +44,7 @@ type backendConfig struct {
 	Weights []int                `json:"weights"`
 	Tries   int                  `json:"tries"`
 	Timeout backendTimeout       `json:"timeout"`
+	TLS     *upstreamTLSConfig   `json:"tls"`
 	Health  *backendHealthConfig `json:"health"`
 	Retry   *backendRetryConfig  `json:"retry"`
 }
@@ -100,6 +101,7 @@ type siteConfig struct {
 	Target          string               `json:"target"`
 	Backend         string               `json:"backend"`
 	Timeout         *directTimeout       `json:"timeout"`
+	TLS             *upstreamTLSConfig   `json:"tls"`
 	Headers         map[string]string    `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Routes          []routeConfig        `json:"routes"`
@@ -112,6 +114,7 @@ type routeConfig struct {
 	Target          string               `json:"target"`
 	Backend         string               `json:"backend"`
 	Timeout         *directTimeout       `json:"timeout"`
+	TLS             *upstreamTLSConfig   `json:"tls"`
 	Headers         map[string]string    `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Strip           bool                 `json:"strip"`
@@ -148,6 +151,7 @@ type rawBackendConfig struct {
 	Weights optionalIntArray  `json:"weights"`
 	Tries   optionalInt       `json:"tries"`
 	Timeout rawBackendTimeout `json:"timeout"`
+	TLS     rawUpstreamTLS    `json:"tls"`
 	Health  rawBackendHealth  `json:"health"`
 	Retry   rawBackendRetry   `json:"retry"`
 }
@@ -211,6 +215,7 @@ type rawSiteConfig struct {
 	Target          optionalString       `json:"target"`
 	Backend         optionalString       `json:"backend"`
 	Timeout         rawDirectTimeout     `json:"timeout"`
+	TLS             rawUpstreamTLS       `json:"tls"`
 	Headers         headerMap            `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Routes          rawRoutes            `json:"routes"`
@@ -223,9 +228,16 @@ type rawRouteConfig struct {
 	Target          optionalString       `json:"target"`
 	Backend         optionalString       `json:"backend"`
 	Timeout         rawDirectTimeout     `json:"timeout"`
+	TLS             rawUpstreamTLS       `json:"tls"`
 	Headers         headerMap            `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Strip           strictBool           `json:"strip"`
+}
+
+type rawUpstreamTLS struct {
+	set  bool
+	CA   optionalString `json:"ca"`
+	Name optionalString `json:"name"`
 }
 
 type rawRouteMatch struct {
@@ -317,6 +329,38 @@ func (t *rawTLSConfig) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("key must be a non-empty string")
 	}
 	*t = rawTLSConfig{set: true, Cert: decoded.Cert.value, Key: decoded.Key.value}
+	return nil
+}
+
+func (t *rawUpstreamTLS) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		CA   optionalString `json:"ca"`
+		Name optionalString `json:"name"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.CA.set && !decoded.Name.set {
+		return fmt.Errorf("must contain ca or name")
+	}
+	if decoded.CA.set && decoded.CA.value == "" {
+		return fmt.Errorf("ca must be a non-empty string")
+	}
+	if decoded.Name.set {
+		if decoded.Name.value == "" {
+			return fmt.Errorf("name must be a non-empty string")
+		}
+		if err := validateUpstreamServerName(decoded.Name.value); err != nil {
+			return fmt.Errorf("name: %w", err)
+		}
+	}
+	*t = rawUpstreamTLS{set: true, CA: decoded.CA, Name: decoded.Name}
 	return nil
 }
 
@@ -892,6 +936,10 @@ func decodeConfig(data []byte) (config, error) {
 				}
 			}
 		}
+		backendTLS, err := decodeUpstreamTLS(rawBackend.TLS)
+		if err != nil {
+			return config{}, fmt.Errorf("backends[%q].tls: %w", name, err)
+		}
 		cfg.Backends[name] = backendConfig{
 			Targets: append([]string(nil), (*rawBackend.Targets)...),
 			Weights: weights,
@@ -900,6 +948,7 @@ func decodeConfig(data []byte) (config, error) {
 				Dial:   rawBackend.Timeout.Dial.value,
 				Header: rawBackend.Timeout.Header.value,
 			},
+			TLS: backendTLS,
 			Health: func() *backendHealthConfig {
 				if !rawBackend.Health.set {
 					return nil
@@ -933,10 +982,15 @@ func decodeConfig(data []byte) (config, error) {
 		if rawSite.Backend.set && rawSite.Timeout.set {
 			return config{}, fmt.Errorf("sites[%d].timeout is not allowed with backend", siteIndex)
 		}
+		siteTLS, err := decodeUpstreamTLS(rawSite.TLS)
+		if err != nil {
+			return config{}, fmt.Errorf("sites[%d].tls: %w", siteIndex, err)
+		}
 
 		site := siteConfig{
 			Hosts:           append([]string(nil), (*rawSite.Hosts)...),
 			Timeout:         decodeDirectTimeout(rawSite.Timeout),
+			TLS:             siteTLS,
 			Headers:         map[string]string(rawSite.Headers),
 			ResponseHeaders: rawSite.ResponseHeaders,
 			Routes:          make([]routeConfig, len(rawSite.Routes)),
@@ -968,10 +1022,15 @@ func decodeConfig(data []byte) (config, error) {
 			if rawRoute.Timeout.set && usesBackend {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].timeout is not allowed with backend", siteIndex, routeIndex)
 			}
+			routeTLS, err := decodeUpstreamTLS(rawRoute.TLS)
+			if err != nil {
+				return config{}, fmt.Errorf("sites[%d].routes[%d].tls: %w", siteIndex, routeIndex, err)
+			}
 			route := routeConfig{
 				Path:            *rawRoute.Path,
 				Methods:         append([]string(nil), rawRoute.Methods.values...),
 				Timeout:         decodeDirectTimeout(rawRoute.Timeout),
+				TLS:             routeTLS,
 				Headers:         map[string]string(rawRoute.Headers),
 				ResponseHeaders: rawRoute.ResponseHeaders,
 				Strip:           bool(rawRoute.Strip),
@@ -1033,6 +1092,7 @@ const (
 	jsonRouteMatch
 	jsonConditions
 	jsonTLS
+	jsonUpstreamTLS
 )
 
 func consumeJSONValue(decoder *json.Decoder, schema jsonSchema) error {
@@ -1117,6 +1177,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "targets", "weights", "tries":
 			return jsonAny, nil
+		case "tls":
+			return jsonUpstreamTLS, nil
 		case "retry":
 			return jsonBackendRetry, nil
 		case "timeout":
@@ -1184,6 +1246,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "hosts", "target", "backend":
 			return jsonAny, nil
+		case "tls":
+			return jsonUpstreamTLS, nil
 		case "timeout":
 			return jsonDirectTimeout, nil
 		case "headers":
@@ -1198,6 +1262,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "path", "methods", "target", "backend", "strip":
 			return jsonAny, nil
+		case "tls":
+			return jsonUpstreamTLS, nil
 		case "timeout":
 			return jsonDirectTimeout, nil
 		case "match":
@@ -1227,6 +1293,12 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 	case jsonTLS:
 		switch key {
 		case "cert", "key":
+			return jsonAny, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonUpstreamTLS:
+		switch key {
+		case "ca", "name":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
