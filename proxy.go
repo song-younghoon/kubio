@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -1130,29 +1131,36 @@ type directTransportKey struct {
 	tls    *upstreamTLSConfig
 }
 
+type upstreamTLSKey struct {
+	caPath string
+	name   string
+	roots  *x509.CertPool
+}
+
 type directTransportCache struct {
 	byTimeout map[directTransportKey]*http.Transport
-	loadedTLS map[*upstreamTLSConfig]*upstreamTLSConfig
+	loadedTLS map[upstreamTLSKey]*upstreamTLSConfig
 	all       []*http.Transport
 }
 
 func newDirectTransportCache() *directTransportCache {
 	return &directTransportCache{
 		byTimeout: make(map[directTransportKey]*http.Transport),
-		loadedTLS: make(map[*upstreamTLSConfig]*upstreamTLSConfig),
+		loadedTLS: make(map[upstreamTLSKey]*upstreamTLSConfig),
 	}
 }
 
 func (c *directTransportCache) get(timeout *directTimeout, tlsConfig *upstreamTLSConfig) (*http.Transport, error) {
 	if tlsConfig != nil {
-		loaded, ok := c.loadedTLS[tlsConfig]
+		identity := upstreamTLSKey{caPath: tlsConfig.CAPath, name: tlsConfig.Name, roots: tlsConfig.RootCAs}
+		loaded, ok := c.loadedTLS[identity]
 		if !ok {
 			var err error
 			loaded, err = loadUpstreamTLS(tlsConfig)
 			if err != nil {
 				return nil, err
 			}
-			c.loadedTLS[tlsConfig] = loaded
+			c.loadedTLS[identity] = loaded
 		}
 		tlsConfig = loaded
 	}

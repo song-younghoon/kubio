@@ -64,6 +64,25 @@ func TestUpstreamTLSRejectsHTTPAndBackendOverrides(t *testing.T) {
 	}
 }
 
+func TestDirectTLSTransportsShareEquivalentSettings(t *testing.T) {
+	router, err := newRouter(config{Sites: []siteConfig{{
+		Hosts:  []string{"*"},
+		Target: "https://localhost:3000",
+		TLS:    &upstreamTLSConfig{Name: "example.com"},
+		Routes: []routeConfig{
+			{Path: "/one", Target: "https://localhost:3001", TLS: &upstreamTLSConfig{Name: "example.com"}},
+			{Path: "/two", Target: "https://localhost:3002", TLS: &upstreamTLSConfig{Name: "example.com"}},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if len(router.directTransports) != 1 {
+		t.Fatalf("direct transports = %d, want 1", len(router.directTransports))
+	}
+}
+
 func TestUpstreamTLSStrictCAParsing(t *testing.T) {
 	valid := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1, 2, 3}})
 	for name, data := range map[string][]byte{
