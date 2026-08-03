@@ -1,0 +1,96 @@
+Kubio kubio.json v0.23 Proposal
+Status: Under review
+Base: v0.22
+
+
+1. Scope
+
+v0.23 adds route-level generated responses. A selected route may return a
+fixed HTTP response without contacting its upstream. This version covers
+fixed responses and redirects expressed through the same response primitive;
+it does not add custom bodies for Kubio-generated errors, metrics, new log
+sinks or formats, health/admin endpoints, or transport/security policies.
+
+
+2. Configuration
+
+A route may set `respond`:
+
+    {
+      "path": "/maintenance",
+      "respond": {
+        "status": 503,
+        "body": "temporarily unavailable",
+        "headers": {
+          "Content-Type": ["text/plain; charset=utf-8"]
+        }
+      }
+    }
+
+`respond.status` is required and is a terminal HTTP status from 200 through
+599. `respond.body` is an optional string and defaults to an empty body.
+`respond.headers` is an optional object mapping field names to non-empty
+arrays of string values. Header names are case-insensitive and duplicate names
+are invalid. Values use the existing response-header validation and
+environment expansion rules. Kubio-managed headers, including
+`Content-Length`, are rejected.
+
+A 3xx response with a `Location` header is a redirect. Kubio does not add a
+separate redirect option. `Location` is validated as an ordinary response
+header and may be relative or absolute.
+
+`respond` is valid only directly on a route. It cannot be combined with
+`target`, `backend`, `timeout`, `tls`, request `headers`, `response`, `strip`,
+or `rewrite`. A site must still define its existing target or backend for
+routes that do not generate a response. Routes may continue to use `methods`
+and `match` to select a generated response.
+
+Strict JSON parsing rejects nulls, non-objects, unknown fields, aliases,
+duplicate keys, missing status, invalid status, invalid body types, invalid
+header names or values, and empty header arrays. `respond` is not valid at
+site or backend level.
+
+
+3. Response behavior
+
+Kubio evaluates the route normally, then emits the configured status, headers,
+and body instead of selecting or contacting an upstream. The request method,
+query, and path do not alter the configured body. A body is not emitted for
+204 or 304; configuring a non-empty body for either status is invalid.
+
+Generated responses participate in the existing access log with their actual
+status and bytes. The v0.21 request ID, when enabled, is applied to generated
+responses with the same ownership and commit rules as proxied responses.
+
+
+4. Reload and failure behavior
+
+Kubio validates and compiles generated responses while constructing a
+generation. Invalid configuration terminates startup and, on reload, is
+logged while the current generation continues serving unchanged. Valid reloads
+publish atomically without downtime; in-flight requests retain their
+generation's response behavior.
+
+
+5. Performance constraints
+
+Response bodies and headers are validated and prepared once per generation.
+The request path emits the selected route's precompiled response without
+reading configuration or contacting an upstream. Routes without `respond`
+retain the existing proxy path.
+
+
+6. Deferred scope
+
+The following remain unresolved and move to v0.24:
+
+- Custom bodies for Kubio-generated errors.
+- Metrics, configurable log sinks/formats, and health/admin/reload endpoints.
+- Forwarded and PROXY protocols.
+- Client certificates, mutual TLS, TLS passthrough, configurable TLS policy,
+  ACME, multiple listener certificates, and listener SNI certificate
+  selection.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  adaptive retry policies, and policies for Kubio-generated or intermediate
+  responses.
