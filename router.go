@@ -9,17 +9,21 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 const routeIndexThreshold = 8
 
 type router struct {
 	accessLogger  *accessLogger
+	backends      map[string]*backend
+	generation    *backendGeneration
 	sites         []site
 	trustProxies  []netip.Prefix
 	exactHosts    map[string]int
 	wildcardHosts map[string]int
 	starSite      int
+	closeOnce     sync.Once
 }
 
 type site struct {
@@ -93,8 +97,16 @@ func newRouter(cfg config) (*router, error) {
 	if err != nil {
 		return nil, err
 	}
+	generation := &backendGeneration{}
+	for _, backend := range backends {
+		if backend.health != nil {
+			backend.health.generation = generation
+		}
+	}
 
 	r := &router{
+		backends:      backends,
+		generation:    generation,
 		sites:         make([]site, 0, len(cfg.Sites)),
 		trustProxies:  trustProxies,
 		exactHosts:    make(map[string]int),
@@ -129,8 +141,25 @@ func newRouter(cfg config) (*router, error) {
 		prepareAccessLog()
 		r.accessLogger = stdoutAccessLogger
 	}
+	for _, backend := range backends {
+		backend.startProbe()
+	}
 
 	return r, nil
+}
+
+func (r *router) close() {
+	r.closeOnce.Do(func() {
+		if r.generation != nil {
+			r.generation.retired.Store(true)
+		}
+		for _, backend := range r.backends {
+			backend.cancelProbe()
+		}
+		for _, backend := range r.backends {
+			backend.waitProbe()
+		}
+	})
 }
 
 func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.Prefix) (site, error) {

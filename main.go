@@ -90,7 +90,10 @@ func (r *reloadableRouter) Store(next *router) {
 }
 
 func (r *reloadableRouter) StoreGeneration(next *router, certificate *tls.Certificate) {
-	r.current.Store(&runtimeGeneration{router: next, certificate: certificate})
+	old := r.current.Swap(&runtimeGeneration{router: next, certificate: certificate})
+	if old != nil && old.router != next {
+		old.router.close()
+	}
 }
 
 func (r *reloadableRouter) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {

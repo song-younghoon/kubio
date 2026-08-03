@@ -58,6 +58,13 @@ type backend struct {
 	health        *backendHealth
 	transport     *http.Transport
 	nextIndex     atomic.Uint64
+	probeCancel   context.CancelFunc
+	probeDone     chan struct{}
+	probeStop     sync.Once
+}
+
+type backendGeneration struct {
+	retired atomic.Bool
 }
 
 type backendRetryKey struct{}
@@ -69,9 +76,11 @@ type backendRetryState struct {
 }
 
 type backendHealth struct {
-	fail    int
-	cool    time.Duration
-	targets []targetHealth
+	fail       int
+	cool       time.Duration
+	probe      *backendHealthProbeConfig
+	generation *backendGeneration
+	targets    []targetHealth
 }
 
 type targetHealth struct {
@@ -108,6 +117,25 @@ func (h *backendHealth) observe(index int, ctx context.Context, response bool, e
 	if ctx.Err() != nil {
 		return
 	}
+	h.observeFailureLocked(target)
+}
+
+func (h *backendHealth) observeProbe(index int, generation, probeContext context.Context, responseHealthy bool) {
+	target := &h.targets[index]
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if generation.Err() != nil || h.generation != nil && h.generation.retired.Load() {
+		return
+	}
+	if responseHealthy && probeContext.Err() == nil {
+		target.failures = 0
+		target.until = time.Time{}
+		return
+	}
+	h.observeFailureLocked(target)
+}
+
+func (h *backendHealth) observeFailureLocked(target *targetHealth) {
 	now := time.Now()
 	if !target.until.IsZero() {
 		if now.Before(target.until) {
@@ -122,6 +150,95 @@ func (h *backendHealth) observe(index int, ctx context.Context, response bool, e
 		target.failures = 0
 		target.until = now.Add(h.cool)
 	}
+}
+
+func (b *backend) startProbe() {
+	if b.health == nil || b.health.probe == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.probeCancel = cancel
+	b.probeDone = make(chan struct{})
+	go func() {
+		defer close(b.probeDone)
+		b.runProbeLoop(ctx)
+	}()
+}
+
+func (b *backend) stopProbe() {
+	b.cancelProbe()
+	b.waitProbe()
+}
+
+func (b *backend) cancelProbe() {
+	b.probeStop.Do(func() {
+		if b.probeCancel != nil {
+			b.probeCancel()
+		}
+	})
+}
+
+func (b *backend) waitProbe() {
+	if b.probeDone != nil {
+		<-b.probeDone
+	}
+}
+
+func (b *backend) runProbeLoop(ctx context.Context) {
+	probe := b.health.probe
+	if !waitProbe(ctx, probe.Every) {
+		return
+	}
+	for {
+		started := time.Now()
+		for index := range b.targets {
+			if ctx.Err() != nil {
+				return
+			}
+			b.probeTarget(ctx, index, probe)
+		}
+		next := started.Add(probe.Every)
+		if finished := time.Now(); finished.After(next) {
+			next = finished
+		}
+		if !waitProbe(ctx, time.Until(next)) {
+			return
+		}
+	}
+}
+
+func waitProbe(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (b *backend) probeTarget(generation context.Context, index int, probe *backendHealthProbeConfig) {
+	target := *b.targets[index]
+	target.Path = probe.Path.Path
+	target.RawPath = probe.Path.RawPath
+	target.RawQuery = probe.Path.RawQuery
+	target.ForceQuery = probe.Path.ForceQuery
+	probeContext, cancel := context.WithTimeout(generation, probe.Timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeContext, http.MethodGet, target.String(), nil)
+	if err != nil {
+		b.health.observeProbe(index, generation, probeContext, false)
+		return
+	}
+	request.Host = target.Host
+	response, err := b.transport.RoundTrip(request)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	responseHealthy := err == nil && response != nil && response.Body != nil &&
+		response.StatusCode >= http.StatusOK && response.StatusCode <= 399
+	b.health.observeProbe(index, generation, probeContext, responseHealthy)
 }
 
 var errRetryBudgetExceeded = errors.New("retry budget exhausted")
@@ -382,6 +499,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		health = &backendHealth{
 			fail:    cfg.Health.Fail,
 			cool:    cfg.Health.Cool,
+			probe:   cfg.Health.Probe,
 			targets: make([]targetHealth, len(targets)),
 		}
 	}

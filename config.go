@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,12 +14,14 @@ import (
 )
 
 const (
-	maxRetryBodyBytes    int64 = 64 << 20
-	maxRetryBudget             = 1_000_000
-	maxTargetWeight            = 1_000
-	maxTargetWeightTotal       = 10_000
-	maxHealthFailures          = 1_000
-	maxHealthCooldown          = 24 * time.Hour
+	maxRetryBodyBytes       int64 = 64 << 20
+	maxRetryBudget                = 1_000_000
+	maxTargetWeight               = 1_000
+	maxTargetWeightTotal          = 10_000
+	maxHealthFailures             = 1_000
+	maxHealthCooldown             = 24 * time.Hour
+	maxHealthProbePathBytes       = 2_048
+	maxHealthProbeDuration        = 24 * time.Hour
 )
 
 type config struct {
@@ -74,8 +77,15 @@ type backendBackoffConfig struct {
 }
 
 type backendHealthConfig struct {
-	Fail int
-	Cool time.Duration
+	Fail  int
+	Cool  time.Duration
+	Probe *backendHealthProbeConfig
+}
+
+type backendHealthProbeConfig struct {
+	Path    url.URL
+	Every   time.Duration
+	Timeout time.Duration
 }
 
 type siteConfig struct {
@@ -155,9 +165,17 @@ type rawBackendBudget struct {
 }
 
 type rawBackendHealth struct {
-	set  bool
-	Fail optionalInt      `json:"fail"`
-	Cool optionalDuration `json:"cool"`
+	set   bool
+	Fail  optionalInt           `json:"fail"`
+	Cool  optionalDuration      `json:"cool"`
+	Probe rawBackendHealthProbe `json:"probe"`
+}
+
+type rawBackendHealthProbe struct {
+	set     bool
+	Path    url.URL
+	Every   time.Duration
+	Timeout time.Duration
 }
 
 type rawBackendBackoff struct {
@@ -389,8 +407,9 @@ func (h *rawBackendHealth) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("must be an object")
 	}
 	var decoded struct {
-		Fail optionalInt      `json:"fail"`
-		Cool optionalDuration `json:"cool"`
+		Fail  optionalInt           `json:"fail"`
+		Cool  optionalDuration      `json:"cool"`
+		Probe rawBackendHealthProbe `json:"probe"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -403,8 +422,73 @@ func (h *rawBackendHealth) UnmarshalJSON(data []byte) error {
 	if !decoded.Cool.set || decoded.Cool.value > maxHealthCooldown {
 		return fmt.Errorf("cool must be greater than zero and no greater than %s", maxHealthCooldown)
 	}
-	*h = rawBackendHealth{set: true, Fail: decoded.Fail, Cool: decoded.Cool}
+	*h = rawBackendHealth{set: true, Fail: decoded.Fail, Cool: decoded.Cool, Probe: decoded.Probe}
 	return nil
+}
+
+func (p *rawBackendHealthProbe) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Path    optionalString   `json:"path"`
+		Every   optionalDuration `json:"every"`
+		Timeout optionalDuration `json:"timeout"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Path.set {
+		return fmt.Errorf("path must be set")
+	}
+	path, err := parseHealthProbePath(decoded.Path.value)
+	if err != nil {
+		return fmt.Errorf("path: %w", err)
+	}
+	if !decoded.Every.set || decoded.Every.value > maxHealthProbeDuration {
+		return fmt.Errorf("every must be no greater than %s", maxHealthProbeDuration)
+	}
+	if !decoded.Timeout.set {
+		return fmt.Errorf("timeout must be set")
+	}
+	if decoded.Timeout.value > decoded.Every.value {
+		return fmt.Errorf("timeout must be no greater than every")
+	}
+	*p = rawBackendHealthProbe{
+		set:     true,
+		Path:    path,
+		Every:   decoded.Every.value,
+		Timeout: decoded.Timeout.value,
+	}
+	return nil
+}
+
+func parseHealthProbePath(raw string) (url.URL, error) {
+	if raw == "" {
+		return url.URL{}, fmt.Errorf("must not be empty")
+	}
+	if len(raw) > maxHealthProbePathBytes {
+		return url.URL{}, fmt.Errorf("must not exceed %d bytes", maxHealthProbePathBytes)
+	}
+	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.Contains(raw, "#") {
+		return url.URL{}, fmt.Errorf("must be an origin-form request-target")
+	}
+	for index := 0; index < len(raw); index++ {
+		if raw[index] <= ' ' || raw[index] == 0x7f {
+			return url.URL{}, fmt.Errorf("must not contain spaces or control characters")
+		}
+	}
+	parsed, err := url.ParseRequestURI(raw)
+	if err != nil {
+		return url.URL{}, fmt.Errorf("must be a valid request-target: %w", err)
+	}
+	if parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" || parsed.RawFragment != "" || parsed.Opaque != "" {
+		return url.URL{}, fmt.Errorf("must be an origin-form request-target")
+	}
+	return *parsed, nil
 }
 
 func (b *rawBackendBackoff) UnmarshalJSON(data []byte) error {
@@ -764,7 +848,15 @@ func decodeConfig(data []byte) (config, error) {
 				if !rawBackend.Health.set {
 					return nil
 				}
-				return &backendHealthConfig{Fail: rawBackend.Health.Fail.value, Cool: rawBackend.Health.Cool.value}
+				health := &backendHealthConfig{Fail: rawBackend.Health.Fail.value, Cool: rawBackend.Health.Cool.value}
+				if rawBackend.Health.Probe.set {
+					health.Probe = &backendHealthProbeConfig{
+						Path:    rawBackend.Health.Probe.Path,
+						Every:   rawBackend.Health.Probe.Every,
+						Timeout: rawBackend.Health.Probe.Timeout,
+					}
+				}
+				return health
 			}(),
 			Retry: retry,
 		}
@@ -863,6 +955,7 @@ const (
 	jsonBackendBody
 	jsonBackendBudget
 	jsonBackendHealth
+	jsonBackendProbe
 	jsonBackendBackoff
 	jsonSites
 	jsonSite
@@ -992,6 +1085,14 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 	case jsonBackendHealth:
 		switch key {
 		case "fail", "cool":
+			return jsonAny, nil
+		case "probe":
+			return jsonBackendProbe, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonBackendProbe:
+		switch key {
+		case "path", "every", "timeout":
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"net/textproto"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -45,7 +46,7 @@ func TestBackendResilienceConfig(t *testing.T) {
       "targets": ["http://app-1:3000", "http://app-2:3000", "http://app-3:3000"],
       "weights": [3, 1, 2],
       "tries": 2,
-      "health": {"fail": 3, "cool": "5s"},
+      "health": {"fail": 3, "cool": "5s", "probe": {"path": "/healthz?ready=1", "every": "10s", "timeout": "1s"}},
       "retry": {"status": [502, 503, 504], "methods": ["POST", "PUT"], "body": {"max": 1048576}, "backoff": {"base": "25ms", "cap": "50ms", "jitter": "none"}, "deadline": "2s", "budget": {"max": 100, "window": "1s"}},
       "timeout": {"dial": "250ms", "header": "1m30s"}
     }
@@ -59,6 +60,7 @@ func TestBackendResilienceConfig(t *testing.T) {
 	backend := cfg.Backends["app"]
 	if !slices.Equal(backend.Weights, []int{3, 1, 2}) || backend.Tries != 2 || backend.Timeout.Dial != 250*time.Millisecond || backend.Timeout.Header != 90*time.Second ||
 		backend.Health == nil || backend.Health.Fail != 3 || backend.Health.Cool != 5*time.Second ||
+		backend.Health.Probe == nil || backend.Health.Probe.Path.Path != "/healthz" || backend.Health.Probe.Path.RawQuery != "ready=1" || backend.Health.Probe.Every != 10*time.Second || backend.Health.Probe.Timeout != time.Second ||
 		!slices.Equal(backend.Retry.Methods, []string{"POST", "PUT"}) || backend.Retry.Body == nil || backend.Retry.Body.Max != 1048576 ||
 		backend.Retry.Backoff == nil || backend.Retry.Backoff.Base != 25*time.Millisecond ||
 		backend.Retry.Backoff.Cap != 50*time.Millisecond || backend.Retry.Backoff.Jitter ||
@@ -80,123 +82,135 @@ func TestBackendResilienceConfig(t *testing.T) {
 		return `{"listen":":8080","backends":{"app":{"targets":["http://a:3000","http://b:3000"],` + fields + `}},"sites":[{"hosts":["*"],"backend":"app"}]}`
 	}
 	invalid := map[string]string{
-		"tries null":                    withBackend(`"tries":null`),
-		"tries string":                  withBackend(`"tries":"1"`),
-		"tries boolean":                 withBackend(`"tries":true`),
-		"tries decimal":                 withBackend(`"tries":1.0`),
-		"tries exponent":                withBackend(`"tries":1e0`),
-		"tries zero":                    withBackend(`"tries":0`),
-		"tries negative":                withBackend(`"tries":-1`),
-		"tries above targets":           withBackend(`"tries":3`),
-		"weights null":                  withBackend(`"weights":null`),
-		"weights empty":                 withBackend(`"weights":[]`),
-		"weights length":                withBackend(`"weights":[1]`),
-		"weights decimal":               withBackend(`"weights":[1.0,1]`),
-		"weights exponent":              withBackend(`"weights":[1e0,1]`),
-		"weights zero":                  withBackend(`"weights":[0,1]`),
-		"weights negative":              withBackend(`"weights":[-1,1]`),
-		"weights too large":             withBackend(`"weights":[1001,1]`),
-		"weights unknown":               withBackend(`"weight":[1,1]`),
-		"weights duplicate field":       withBackend(`"weights":[1,1],"weights":[2,2]`),
-		"health null":                   withBackend(`"health":null`),
-		"health scalar":                 withBackend(`"health":true`),
-		"health array":                  withBackend(`"health":[]`),
-		"health empty":                  withBackend(`"health":{}`),
-		"health missing fail":           withBackend(`"health":{"cool":"1s"}`),
-		"health missing cool":           withBackend(`"health":{"fail":1}`),
-		"health fail decimal":           withBackend(`"health":{"fail":1.0,"cool":"1s"}`),
-		"health fail exponent":          withBackend(`"health":{"fail":1e0,"cool":"1s"}`),
-		"health fail zero":              withBackend(`"health":{"fail":0,"cool":"1s"}`),
-		"health fail negative":          withBackend(`"health":{"fail":-1,"cool":"1s"}`),
-		"health fail too large":         withBackend(`"health":{"fail":1001,"cool":"1s"}`),
-		"health cool null":              withBackend(`"health":{"fail":1,"cool":null}`),
-		"health cool zero":              withBackend(`"health":{"fail":1,"cool":"0s"}`),
-		"health cool negative":          withBackend(`"health":{"fail":1,"cool":"-1s"}`),
-		"health cool too large":         withBackend(`"health":{"fail":1,"cool":"24h1ns"}`),
-		"health cool environment":       withBackend(`"health":{"fail":1,"cool":"${KUBIO_HEALTH_COOL}"}`),
-		"health unknown":                withBackend(`"health":{"fail":1,"cool":"1s","retry":1}`),
-		"health duplicate field":        withBackend(`"health":{"fail":1,"fail":2,"cool":"1s"}`),
-		"timeout null":                  withBackend(`"timeout":null`),
-		"timeout array":                 withBackend(`"timeout":[]`),
-		"timeout empty":                 withBackend(`"timeout":{}`),
-		"timeout unknown":               withBackend(`"timeout":{"read":"1s"}`),
-		"dial null":                     withBackend(`"timeout":{"dial":null}`),
-		"dial number":                   withBackend(`"timeout":{"dial":1}`),
-		"dial empty":                    withBackend(`"timeout":{"dial":""}`),
-		"dial zero":                     withBackend(`"timeout":{"dial":"0s"}`),
-		"dial negative":                 withBackend(`"timeout":{"dial":"-1s"}`),
-		"dial whitespace":               withBackend(`"timeout":{"dial":" 1s"}`),
-		"header invalid":                withBackend(`"timeout":{"header":"soon"}`),
-		"duration environment":          withBackend(`"timeout":{"header":"${KUBIO_TIMEOUT}"}`),
-		"duplicate timeout field":       withBackend(`"timeout":{"dial":"1s","dial":"2s"}`),
-		"retry null":                    withBackend(`"tries":2,"retry":null`),
-		"retry scalar":                  withBackend(`"tries":2,"retry":true`),
-		"retry array":                   withBackend(`"tries":2,"retry":[]`),
-		"retry empty":                   withBackend(`"tries":2,"retry":{}`),
-		"retry missing tries":           withBackend(`"retry":{"status":[503]}`),
-		"retry one try":                 withBackend(`"tries":1,"retry":{"status":[503]}`),
-		"retry null status":             withBackend(`"tries":2,"retry":{"status":null}`),
-		"retry scalar status":           withBackend(`"tries":2,"retry":{"status":503}`),
-		"retry empty status":            withBackend(`"tries":2,"retry":{"status":[]}`),
-		"retry status string":           withBackend(`"tries":2,"retry":{"status":["503"]}`),
-		"retry status decimal":          withBackend(`"tries":2,"retry":{"status":[503.0]}`),
-		"retry status exponent":         withBackend(`"tries":2,"retry":{"status":[5.03e2]}`),
-		"retry status low":              withBackend(`"tries":2,"retry":{"status":[399]}`),
-		"retry status high":             withBackend(`"tries":2,"retry":{"status":[600]}`),
-		"retry duplicate status":        withBackend(`"tries":2,"retry":{"status":[503,503]}`),
-		"retry duplicate field":         withBackend(`"tries":2,"retry":{"status":[503],"status":[504]}`),
-		"retry unknown field":           withBackend(`"tries":2,"retry":{"status":[503],"codes":[503]}`),
-		"retry alias":                   withBackend(`"tries":2,"retries":{"status":[503]}`),
-		"retry methods null":            withBackend(`"tries":2,"retry":{"status":[503],"methods":null}`),
-		"retry methods empty":           withBackend(`"tries":2,"retry":{"status":[503],"methods":[]}`),
-		"retry methods wildcard":        withBackend(`"tries":2,"retry":{"status":[503],"methods":["POST*"]}`),
-		"retry methods duplicate":       withBackend(`"tries":2,"retry":{"status":[503],"methods":["POST","POST"]}`),
-		"retry body null":               withBackend(`"tries":2,"retry":{"status":[503],"body":null}`),
-		"retry body empty":              withBackend(`"tries":2,"retry":{"status":[503],"body":{}}`),
-		"retry body max null":           withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":null}}`),
-		"retry body max decimal":        withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1.0}}`),
-		"retry body max exponent":       withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1e3}}`),
-		"retry body max zero":           withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":0}}`),
-		"retry body max negative":       withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":-1}}`),
-		"retry body max too large":      withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":67108865}}`),
-		"retry body unknown":            withBackend(`"tries":2,"retry":{"status":[503],"body":{"limit":1}}`),
-		"retry body duplicate max":      withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1,"max":2}}`),
-		"retry budget null":             withBackend(`"tries":2,"retry":{"status":[503],"budget":null}`),
-		"retry budget empty":            withBackend(`"tries":2,"retry":{"status":[503],"budget":{}}`),
-		"retry budget max decimal":      withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1.0,"window":"1s"}}`),
-		"retry budget max exponent":     withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1e3,"window":"1s"}}`),
-		"retry budget max zero":         withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":0,"window":"1s"}}`),
-		"retry budget max too large":    withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1000001,"window":"1s"}}`),
-		"retry budget window null":      withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":null}}`),
-		"retry budget window zero":      withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":"0s"}}`),
-		"retry budget unknown":          withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":"1s","burst":1}}`),
-		"retry budget duplicate max":    withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"max":2,"window":"1s"}}`),
-		"retry delay null":              withBackend(`"tries":2,"retry":{"status":[503],"delay":null}`),
-		"retry delay number":            withBackend(`"tries":2,"retry":{"status":[503],"delay":1}`),
-		"retry delay empty":             withBackend(`"tries":2,"retry":{"status":[503],"delay":""}`),
-		"retry delay zero":              withBackend(`"tries":2,"retry":{"status":[503],"delay":"0s"}`),
-		"retry delay negative":          withBackend(`"tries":2,"retry":{"status":[503],"delay":"-1s"}`),
-		"retry delay whitespace":        withBackend(`"tries":2,"retry":{"status":[503],"delay":" 1s"}`),
-		"retry deadline null":           withBackend(`"tries":2,"retry":{"status":[503],"deadline":null}`),
-		"retry deadline number":         withBackend(`"tries":2,"retry":{"status":[503],"deadline":1}`),
-		"retry deadline empty":          withBackend(`"tries":2,"retry":{"status":[503],"deadline":""}`),
-		"retry deadline zero":           withBackend(`"tries":2,"retry":{"status":[503],"deadline":"0s"}`),
-		"retry deadline negative":       withBackend(`"tries":2,"retry":{"status":[503],"deadline":"-1s"}`),
-		"retry deadline whitespace":     withBackend(`"tries":2,"retry":{"status":[503],"deadline":" 1s"}`),
-		"retry duplicate delay":         withBackend(`"tries":2,"retry":{"status":[503],"delay":"1s","delay":"2s"}`),
-		"retry backoff null":            withBackend(`"tries":2,"retry":{"status":[503],"backoff":null}`),
-		"retry backoff scalar":          withBackend(`"tries":2,"retry":{"status":[503],"backoff":true}`),
-		"retry backoff empty":           withBackend(`"tries":2,"retry":{"status":[503],"backoff":{}}`),
-		"retry backoff missing base":    withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"cap":"1s"}}`),
-		"retry backoff missing cap":     withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s"}}`),
-		"retry backoff base invalid":    withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"soon","cap":"1s"}}`),
-		"retry backoff cap invalid":     withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"soon"}}`),
-		"retry backoff cap low":         withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"2s","cap":"1s"}}`),
-		"retry backoff jitter invalid":  withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s","jitter":"random"}}`),
-		"retry backoff duplicate field": withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s"},"backoff":{"base":"2s","cap":"2s"}}`),
-		"retry backoff duplicate base":  withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","base":"2s","cap":"2s"}}`),
-		"site timeout":                  `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"dial":"1s"}}]}`,
-		"site retry":                    `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","retry":{"status":[503]}}]}`,
+		"tries null":                     withBackend(`"tries":null`),
+		"tries string":                   withBackend(`"tries":"1"`),
+		"tries boolean":                  withBackend(`"tries":true`),
+		"tries decimal":                  withBackend(`"tries":1.0`),
+		"tries exponent":                 withBackend(`"tries":1e0`),
+		"tries zero":                     withBackend(`"tries":0`),
+		"tries negative":                 withBackend(`"tries":-1`),
+		"tries above targets":            withBackend(`"tries":3`),
+		"weights null":                   withBackend(`"weights":null`),
+		"weights empty":                  withBackend(`"weights":[]`),
+		"weights length":                 withBackend(`"weights":[1]`),
+		"weights decimal":                withBackend(`"weights":[1.0,1]`),
+		"weights exponent":               withBackend(`"weights":[1e0,1]`),
+		"weights zero":                   withBackend(`"weights":[0,1]`),
+		"weights negative":               withBackend(`"weights":[-1,1]`),
+		"weights too large":              withBackend(`"weights":[1001,1]`),
+		"weights unknown":                withBackend(`"weight":[1,1]`),
+		"weights duplicate field":        withBackend(`"weights":[1,1],"weights":[2,2]`),
+		"health null":                    withBackend(`"health":null`),
+		"health scalar":                  withBackend(`"health":true`),
+		"health array":                   withBackend(`"health":[]`),
+		"health empty":                   withBackend(`"health":{}`),
+		"health missing fail":            withBackend(`"health":{"cool":"1s"}`),
+		"health missing cool":            withBackend(`"health":{"fail":1}`),
+		"health fail decimal":            withBackend(`"health":{"fail":1.0,"cool":"1s"}`),
+		"health fail exponent":           withBackend(`"health":{"fail":1e0,"cool":"1s"}`),
+		"health fail zero":               withBackend(`"health":{"fail":0,"cool":"1s"}`),
+		"health fail negative":           withBackend(`"health":{"fail":-1,"cool":"1s"}`),
+		"health fail too large":          withBackend(`"health":{"fail":1001,"cool":"1s"}`),
+		"health cool null":               withBackend(`"health":{"fail":1,"cool":null}`),
+		"health cool zero":               withBackend(`"health":{"fail":1,"cool":"0s"}`),
+		"health cool negative":           withBackend(`"health":{"fail":1,"cool":"-1s"}`),
+		"health cool too large":          withBackend(`"health":{"fail":1,"cool":"24h1ns"}`),
+		"health cool environment":        withBackend(`"health":{"fail":1,"cool":"${KUBIO_HEALTH_COOL}"}`),
+		"health probe null":              withBackend(`"health":{"fail":1,"cool":"1s","probe":null}`),
+		"health probe missing path":      withBackend(`"health":{"fail":1,"cool":"1s","probe":{"every":"1s","timeout":"1s"}}`),
+		"health probe missing every":     withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/healthz","timeout":"1s"}}`),
+		"health probe missing timeout":   withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/healthz","every":"1s"}}`),
+		"health probe authority path":    withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"//other","every":"1s","timeout":"1s"}}`),
+		"health probe absolute path":     withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"http://other","every":"1s","timeout":"1s"}}`),
+		"health probe invalid escape":    withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/%zz","every":"1s","timeout":"1s"}}`),
+		"health probe fragment":          withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/health#z","every":"1s","timeout":"1s"}}`),
+		"health probe every too large":   withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/health","every":"24h1ns","timeout":"1s"}}`),
+		"health probe timeout too large": withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/health","every":"1s","timeout":"2s"}}`),
+		"health probe unknown":           withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/health","every":"1s","timeout":"1s","interval":"1s"}}`),
+		"health probe duplicate field":   withBackend(`"health":{"fail":1,"cool":"1s","probe":{"path":"/health","path":"/ready","every":"1s","timeout":"1s"}}`),
+		"health unknown":                 withBackend(`"health":{"fail":1,"cool":"1s","retry":1}`),
+		"health duplicate field":         withBackend(`"health":{"fail":1,"fail":2,"cool":"1s"}`),
+		"timeout null":                   withBackend(`"timeout":null`),
+		"timeout array":                  withBackend(`"timeout":[]`),
+		"timeout empty":                  withBackend(`"timeout":{}`),
+		"timeout unknown":                withBackend(`"timeout":{"read":"1s"}`),
+		"dial null":                      withBackend(`"timeout":{"dial":null}`),
+		"dial number":                    withBackend(`"timeout":{"dial":1}`),
+		"dial empty":                     withBackend(`"timeout":{"dial":""}`),
+		"dial zero":                      withBackend(`"timeout":{"dial":"0s"}`),
+		"dial negative":                  withBackend(`"timeout":{"dial":"-1s"}`),
+		"dial whitespace":                withBackend(`"timeout":{"dial":" 1s"}`),
+		"header invalid":                 withBackend(`"timeout":{"header":"soon"}`),
+		"duration environment":           withBackend(`"timeout":{"header":"${KUBIO_TIMEOUT}"}`),
+		"duplicate timeout field":        withBackend(`"timeout":{"dial":"1s","dial":"2s"}`),
+		"retry null":                     withBackend(`"tries":2,"retry":null`),
+		"retry scalar":                   withBackend(`"tries":2,"retry":true`),
+		"retry array":                    withBackend(`"tries":2,"retry":[]`),
+		"retry empty":                    withBackend(`"tries":2,"retry":{}`),
+		"retry missing tries":            withBackend(`"retry":{"status":[503]}`),
+		"retry one try":                  withBackend(`"tries":1,"retry":{"status":[503]}`),
+		"retry null status":              withBackend(`"tries":2,"retry":{"status":null}`),
+		"retry scalar status":            withBackend(`"tries":2,"retry":{"status":503}`),
+		"retry empty status":             withBackend(`"tries":2,"retry":{"status":[]}`),
+		"retry status string":            withBackend(`"tries":2,"retry":{"status":["503"]}`),
+		"retry status decimal":           withBackend(`"tries":2,"retry":{"status":[503.0]}`),
+		"retry status exponent":          withBackend(`"tries":2,"retry":{"status":[5.03e2]}`),
+		"retry status low":               withBackend(`"tries":2,"retry":{"status":[399]}`),
+		"retry status high":              withBackend(`"tries":2,"retry":{"status":[600]}`),
+		"retry duplicate status":         withBackend(`"tries":2,"retry":{"status":[503,503]}`),
+		"retry duplicate field":          withBackend(`"tries":2,"retry":{"status":[503],"status":[504]}`),
+		"retry unknown field":            withBackend(`"tries":2,"retry":{"status":[503],"codes":[503]}`),
+		"retry alias":                    withBackend(`"tries":2,"retries":{"status":[503]}`),
+		"retry methods null":             withBackend(`"tries":2,"retry":{"status":[503],"methods":null}`),
+		"retry methods empty":            withBackend(`"tries":2,"retry":{"status":[503],"methods":[]}`),
+		"retry methods wildcard":         withBackend(`"tries":2,"retry":{"status":[503],"methods":["POST*"]}`),
+		"retry methods duplicate":        withBackend(`"tries":2,"retry":{"status":[503],"methods":["POST","POST"]}`),
+		"retry body null":                withBackend(`"tries":2,"retry":{"status":[503],"body":null}`),
+		"retry body empty":               withBackend(`"tries":2,"retry":{"status":[503],"body":{}}`),
+		"retry body max null":            withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":null}}`),
+		"retry body max decimal":         withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1.0}}`),
+		"retry body max exponent":        withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1e3}}`),
+		"retry body max zero":            withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":0}}`),
+		"retry body max negative":        withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":-1}}`),
+		"retry body max too large":       withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":67108865}}`),
+		"retry body unknown":             withBackend(`"tries":2,"retry":{"status":[503],"body":{"limit":1}}`),
+		"retry body duplicate max":       withBackend(`"tries":2,"retry":{"status":[503],"body":{"max":1,"max":2}}`),
+		"retry budget null":              withBackend(`"tries":2,"retry":{"status":[503],"budget":null}`),
+		"retry budget empty":             withBackend(`"tries":2,"retry":{"status":[503],"budget":{}}`),
+		"retry budget max decimal":       withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1.0,"window":"1s"}}`),
+		"retry budget max exponent":      withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1e3,"window":"1s"}}`),
+		"retry budget max zero":          withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":0,"window":"1s"}}`),
+		"retry budget max too large":     withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1000001,"window":"1s"}}`),
+		"retry budget window null":       withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":null}}`),
+		"retry budget window zero":       withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":"0s"}}`),
+		"retry budget unknown":           withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"window":"1s","burst":1}}`),
+		"retry budget duplicate max":     withBackend(`"tries":2,"retry":{"status":[503],"budget":{"max":1,"max":2,"window":"1s"}}`),
+		"retry delay null":               withBackend(`"tries":2,"retry":{"status":[503],"delay":null}`),
+		"retry delay number":             withBackend(`"tries":2,"retry":{"status":[503],"delay":1}`),
+		"retry delay empty":              withBackend(`"tries":2,"retry":{"status":[503],"delay":""}`),
+		"retry delay zero":               withBackend(`"tries":2,"retry":{"status":[503],"delay":"0s"}`),
+		"retry delay negative":           withBackend(`"tries":2,"retry":{"status":[503],"delay":"-1s"}`),
+		"retry delay whitespace":         withBackend(`"tries":2,"retry":{"status":[503],"delay":" 1s"}`),
+		"retry deadline null":            withBackend(`"tries":2,"retry":{"status":[503],"deadline":null}`),
+		"retry deadline number":          withBackend(`"tries":2,"retry":{"status":[503],"deadline":1}`),
+		"retry deadline empty":           withBackend(`"tries":2,"retry":{"status":[503],"deadline":""}`),
+		"retry deadline zero":            withBackend(`"tries":2,"retry":{"status":[503],"deadline":"0s"}`),
+		"retry deadline negative":        withBackend(`"tries":2,"retry":{"status":[503],"deadline":"-1s"}`),
+		"retry deadline whitespace":      withBackend(`"tries":2,"retry":{"status":[503],"deadline":" 1s"}`),
+		"retry duplicate delay":          withBackend(`"tries":2,"retry":{"status":[503],"delay":"1s","delay":"2s"}`),
+		"retry backoff null":             withBackend(`"tries":2,"retry":{"status":[503],"backoff":null}`),
+		"retry backoff scalar":           withBackend(`"tries":2,"retry":{"status":[503],"backoff":true}`),
+		"retry backoff empty":            withBackend(`"tries":2,"retry":{"status":[503],"backoff":{}}`),
+		"retry backoff missing base":     withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"cap":"1s"}}`),
+		"retry backoff missing cap":      withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s"}}`),
+		"retry backoff base invalid":     withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"soon","cap":"1s"}}`),
+		"retry backoff cap invalid":      withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"soon"}}`),
+		"retry backoff cap low":          withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"2s","cap":"1s"}}`),
+		"retry backoff jitter invalid":   withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s","jitter":"random"}}`),
+		"retry backoff duplicate field":  withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s"},"backoff":{"base":"2s","cap":"2s"}}`),
+		"retry backoff duplicate base":   withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","base":"2s","cap":"2s"}}`),
+		"site timeout":                   `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"dial":"1s"}}]}`,
+		"site retry":                     `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","retry":{"status":[503]}}]}`,
 	}
 	for name, data := range invalid {
 		t.Run(name, func(t *testing.T) {
@@ -1349,5 +1363,87 @@ func TestBackendDoesNotRetryAfterInformationalResponse(t *testing.T) {
 	}
 	if informational.Load() != 1 || healthyHits.Load() != 0 {
 		t.Fatalf("informational = %d, healthy hits = %d", informational.Load(), healthyHits.Load())
+	}
+}
+
+func TestBackendActiveHealthProbe(t *testing.T) {
+	var status atomic.Int32
+	status.Store(http.StatusNoContent)
+	observed := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		select {
+		case observed <- strings.Join([]string{
+			request.Method,
+			request.URL.RequestURI(),
+			request.Host,
+			request.Header.Get("X-Client"),
+			request.Header.Get("Cookie"),
+			request.Header.Get("Authorization"),
+			request.Header.Get("Upgrade"),
+		}, "|"):
+		default:
+		}
+		w.WriteHeader(int(status.Load()))
+	}))
+	defer server.Close()
+
+	router, err := newRouter(config{
+		Backends: map[string]backendConfig{"app": {
+			Targets: []string{server.URL},
+			Health: &backendHealthConfig{
+				Fail:  1,
+				Cool:  time.Hour,
+				Probe: &backendHealthProbeConfig{Path: url.URL{Path: "/healthz", RawQuery: "ready=1"}, Every: 5 * time.Millisecond, Timeout: 50 * time.Millisecond},
+			},
+		}},
+		Sites: []siteConfig{{Hosts: []string{"*"}, Backend: "app"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+
+	wait := func(condition func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for !condition() {
+			if time.Now().After(deadline) {
+				t.Fatal("condition was not reached")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	select {
+	case request := <-observed:
+		want := strings.Join([]string{http.MethodGet, "/healthz?ready=1", server.Listener.Addr().String(), "", "", "", ""}, "|")
+		if request != want {
+			t.Fatalf("probe request = %q, want %q", request, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active probe did not run")
+	}
+
+	backend := router.backends["app"]
+	status.Store(http.StatusServiceUnavailable)
+	wait(func() bool { return !backend.health.available(0) })
+	status.Store(http.StatusOK)
+	wait(func() bool { return backend.health.available(0) })
+}
+
+func TestBackendActiveProbeTimeoutAtHealthObservation(t *testing.T) {
+	health := &backendHealth{fail: 1, cool: time.Hour, targets: make([]targetHealth, 1)}
+	probeContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	health.observeProbe(0, context.Background(), probeContext, true)
+	if health.available(0) {
+		t.Fatal("expired probe was recorded as healthy")
+	}
+
+	retired, retire := context.WithCancel(context.Background())
+	retire()
+	retiredHealth := &backendHealth{fail: 1, cool: time.Hour, targets: make([]targetHealth, 1)}
+	retiredHealth.observeProbe(0, retired, context.Background(), false)
+	if !retiredHealth.available(0) {
+		t.Fatal("retired probe changed health state")
 	}
 }
