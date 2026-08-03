@@ -126,9 +126,10 @@ type routeConfig struct {
 }
 
 type generatedResponse struct {
-	Status  int
-	Body    []byte
-	Headers responseHeaderPolicy
+	Status   int
+	Body     []byte
+	Headers  responseHeaderPolicy
+	Prepared http.Header
 }
 
 type routeMatchConfig struct {

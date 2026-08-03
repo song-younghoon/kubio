@@ -265,11 +265,13 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 			if routeConfig.Target != "" || routeConfig.Backend != "" || routeConfig.Timeout != nil || routeConfig.TLS != nil || len(routeConfig.Headers) > 0 || !emptyResponseHeaderPolicy(routeConfig.ResponseHeaders) || routeConfig.Rewrite != "" || routeConfig.Strip {
 				return s, fmt.Errorf("routes[%d].respond cannot be combined with upstream, headers, response, or rewrite fields", routeIndex)
 			}
+			respond := *routeConfig.Respond
+			respond.Prepared = prepareGeneratedResponseHeaders(siteResponseHeaders, respond.Headers)
 			s.routes = append(s.routes, route{
 				pattern: pattern,
 				methods: append([]string(nil), routeConfig.Methods...),
 				match:   compileRouteMatch(match),
-				respond: routeConfig.Respond,
+				respond: &respond,
 			})
 			continue
 		}
@@ -587,7 +589,7 @@ func (r *router) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if selectedRoute.route.respond != nil {
-		serveGeneratedResponse(w, req, selectedRoute.route.respond, selected.responseHeaders)
+		serveGeneratedResponse(w, req, selectedRoute.route.respond)
 		return
 	}
 	if selectedRoute.route.strip {
@@ -596,11 +598,8 @@ func (r *router) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	selectedRoute.route.proxy.ServeHTTP(w, req)
 }
 
-func serveGeneratedResponse(w http.ResponseWriter, req *http.Request, generated *generatedResponse, sitePolicy responseHeaderPolicy) {
-	response := &http.Response{StatusCode: generated.Status, Header: make(http.Header)}
-	applyResponseHeaders(response, sitePolicy)
-	applyResponseHeaders(response, generated.Headers)
-	for name, values := range response.Header {
+func serveGeneratedResponse(w http.ResponseWriter, req *http.Request, generated *generatedResponse) {
+	for name, values := range generated.Prepared {
 		w.Header()[name] = append([]string(nil), values...)
 	}
 	w.WriteHeader(generated.Status)
@@ -608,6 +607,13 @@ func serveGeneratedResponse(w http.ResponseWriter, req *http.Request, generated 
 		return
 	}
 	_, _ = w.Write(generated.Body)
+}
+
+func prepareGeneratedResponseHeaders(sitePolicy, generated responseHeaderPolicy) http.Header {
+	response := &http.Response{Header: make(http.Header)}
+	applyResponseHeaders(response, sitePolicy)
+	applyResponseHeaders(response, generated)
+	return response.Header
 }
 
 func serveGeneralOptions(w http.ResponseWriter, req *http.Request) {

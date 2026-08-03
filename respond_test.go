@@ -146,3 +146,17 @@ func TestGeneratedResponseAccessLogHEADBytes(t *testing.T) {
 		t.Fatalf("access record = %#v; want status 200 and zero bytes", record)
 	}
 }
+
+func BenchmarkServeGeneratedResponse(b *testing.B) {
+	response := &generatedResponse{
+		Status:   http.StatusOK,
+		Body:     []byte("benchmark body"),
+		Prepared: http.Header{"Content-Type": {"text/plain"}, "X-Test": {"value"}},
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		serveGeneratedResponse(httptest.NewRecorder(), request, response)
+	}
+}
