@@ -1,5 +1,5 @@
-Kubio kubio.json v0.24 Proposal
-Status: Under review
+Kubio kubio.json v0.24 Specification
+Status: Agreed specification
 Base: v0.23
 
 
@@ -30,12 +30,19 @@ The existing upstream `tls` object accepts `cert` and `key`:
     }
 
 `cert` and `key` are non-empty paths to a PEM client certificate chain and
-private key. They must be configured together. Kubio reads them using the
-existing process-working-directory path rules and loads them with the
-standard X.509 key-pair validation. The certificate and private key must
-match; malformed PEM, unsupported key material, unreadable files, empty
-values, and trailing non-whitespace data are configuration errors. File
-contents and private key material are never included in errors or logs.
+private key. They must be configured together. Paths are used exactly as
+written, are not trimmed or environment-expanded, are resolved relative to
+the process working directory, and may be absolute, symbolic links, or equal
+to one another. Kubio loads them with the existing Go X.509 key-pair rules.
+The certificate input contains one or more `CERTIFICATE` PEM blocks, with the
+leaf first and the transmitted chain following it. The key input contains one
+supported private-key PEM block in a format accepted by the Go standard
+library. If the paths are equal, the same file may contain the certificate
+chain followed by that private-key block. All other PEM blocks, malformed
+PEM, encrypted keys, unreadable files, missing values, and trailing
+non-whitespace data are configuration errors. The leaf public key must match
+the private key. File contents and private key material are never included in
+errors or logs.
 
 The existing `ca` and `name` fields retain their v0.19 behavior. An upstream
 `tls` object may contain any combination of `ca`, `name`, and the paired
@@ -49,18 +56,41 @@ invalid. A named backend may use the client certificate for its HTTPS targets;
 HTTP targets in the same backend remain unchanged. Existing direct-vs-backend
 TLS placement and inheritance rules remain unchanged.
 
+The root `tls` remains listener-only and accepts only its existing `cert` and
+`key` fields. Upstream `cert` and `key` are client credentials only. Kubio
+resolves the effective target or backend and inherited upstream TLS exactly as
+v0.19 before reading client-certificate files; a direct effective HTTP target
+is rejected before those files are read, and route TLS on an effective backend
+remains invalid. Certificate validity dates, extended key usage, trust, and
+client authorization are not generation-time validation; they remain
+upstream handshake behavior. Kubio does not change filesystem permissions, so
+operators must restrict private-key file access to the Kubio process.
+
+Startup and reload errors may identify only `tls.cert` or `tls.key`, the
+configured path, and a broad read, PEM, certificate, key, or mismatch
+category. They must not include PEM contents, private-key material,
+environment values, handshake details, or upstream secrets.
+
 
 3. Upstream TLS behavior
 
 For every HTTPS upstream connection using the effective client certificate,
-Kubio presents the configured certificate chain during the TLS handshake and
-continues to verify the upstream using the effective `ca`, `name`, and default
-Go TLS behavior. The target URL, Host forwarding, request headers, HTTP/2,
-ALPN, timeout, health probe, retry, and response behavior remain unchanged.
+Kubio configures the generation-owned `tls.Config.Certificates` with the
+validated chain. Go presents that chain only when the upstream requests an
+acceptable client certificate; no certificate is sent when it does not, and
+Kubio performs no custom certificate selection. Upstream verification
+continues to use the effective `ca`, `name`, and default Go TLS behavior. The
+target URL, Host forwarding, request headers, HTTP/2, ALPN, timeout, health
+probe, retry, and response behavior remain unchanged.
 
 Certificate selection is performed by the standard Go TLS client. Kubio does
 not renegotiate certificates per request, expose certificate details to
 clients, or use the client certificate for authorization or routing.
+
+Upstream TLS handshake failures, including rejection or absence of an
+acceptable client certificate, are ordinary transport errors. They retain
+existing retry, health-observation, timeout, and 502/504 classification
+behavior and never expose certificate details.
 
 
 4. Reload and failure behavior
@@ -77,6 +107,11 @@ a referenced file at an unchanged path does not trigger reload; the operator
 must modify or touch `kubio.json`. Each resulting generation rereads and
 validates the files.
 
+Any failed or unpublished generation cancels any started probes and
+closes/releases every transport and parsed resource it constructed; it never
+alters the current generation. Valid publication and old-generation retirement
+retain the v0.19 atomic and in-flight behavior.
+
 
 5. Performance and security constraints
 
@@ -84,8 +119,15 @@ Certificate and key files are read only during generation construction. A
 generation reuses immutable parsed key material across all requests using
 the same effective transport. Transports may be shared only when their
 timeouts, trust pool, server name, client certificate, and HTTP/2/ALPN settings
-are identical. No request-path file read, certificate parse, global lock, or
-reload lock is added.
+are identical. A named backend may retain one generation-owned transport for
+mixed HTTP/HTTPS targets: HTTP requests perform no TLS and never use the
+client certificate, while HTTPS requests, health probes, and retries use it.
+Equivalent TLS configuration includes the full ordered client
+certificate chain and corresponding private-key identity, trust pool, server
+name, timeouts, and HTTP/2/ALPN settings. Configured path equality alone never
+permits sharing, and no TLS material or transport is shared across generations.
+No request-path file read, certificate parse, global lock, or reload lock is
+added.
 
 
 6. Deferred scope
