@@ -205,3 +205,26 @@ func TestRequestIDConfigRequiresBoolean(t *testing.T) {
 		t.Fatal("decodeConfig() accepted a non-boolean id")
 	}
 }
+
+func BenchmarkRequestIDForValid(b *testing.B) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.Header.Set(requestIDHeader, "benchmark-id")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := requestIDFor(req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRequestIDForGenerated(b *testing.B) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := requestIDFor(req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

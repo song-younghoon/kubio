@@ -102,7 +102,7 @@ func requestIDFor(req *http.Request) (string, error) {
 	var value string
 	count := 0
 	for name, values := range req.Header {
-		if !strings.EqualFold(name, requestIDHeader) {
+		if name != requestIDHeader && !strings.EqualFold(name, requestIDHeader) {
 			continue
 		}
 		count += len(values)
@@ -114,11 +114,11 @@ func requestIDFor(req *http.Request) (string, error) {
 		return value, nil
 	}
 
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
 		return "", fmt.Errorf("generate request ID: %w", err)
 	}
-	return hex.EncodeToString(random), nil
+	return hex.EncodeToString(random[:]), nil
 }
 
 func setRequestID(req *http.Request, id string) *http.Request {
@@ -126,7 +126,7 @@ func setRequestID(req *http.Request, id string) *http.Request {
 		req.Header = make(http.Header)
 	}
 	removeRequestID(req.Header)
-	req.Header.Set(requestIDHeader, id)
+	req.Header[requestIDHeader] = []string{id}
 	return req.WithContext(context.WithValue(req.Context(), requestIDContextKey{}, id))
 }
 
@@ -137,7 +137,8 @@ func requestIDFromRequest(req *http.Request) string {
 
 func removeRequestID(header http.Header) {
 	for name := range header {
-		if strings.EqualFold(name, requestIDHeader) ||
+		if name == requestIDHeader ||
+			strings.EqualFold(name, requestIDHeader) ||
 			(strings.HasPrefix(name, http.TrailerPrefix) && strings.EqualFold(strings.TrimPrefix(name, http.TrailerPrefix), requestIDHeader)) {
 			delete(header, name)
 		}
