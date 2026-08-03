@@ -1,0 +1,104 @@
+Kubio kubio.json v0.24 Proposal
+Status: Under review
+Base: v0.23
+
+
+1. Scope
+
+v0.24 adds upstream HTTPS client certificates. Kubio can authenticate to an
+HTTPS upstream with a configured X.509 certificate and private key. The scope
+is limited to upstream connections; it does not add listener client
+authentication, inbound mutual TLS, TLS passthrough, custom TLS policy, ACME,
+multiple listener certificates, or listener SNI certificate selection.
+
+
+2. Configuration
+
+The existing upstream `tls` object accepts `cert` and `key`:
+
+    {
+      "sites": [{
+        "hosts": ["example.com"],
+        "target": "https://app.internal:8443",
+        "tls": {
+          "ca": "certs/internal-ca.pem",
+          "name": "app.internal",
+          "cert": "certs/kubio-client.pem",
+          "key": "certs/kubio-client.key"
+        }
+      }]
+    }
+
+`cert` and `key` are non-empty paths to a PEM client certificate chain and
+private key. They must be configured together. Kubio reads them using the
+existing process-working-directory path rules and loads them with the
+standard X.509 key-pair validation. The certificate and private key must
+match; malformed PEM, unsupported key material, unreadable files, empty
+values, and trailing non-whitespace data are configuration errors. File
+contents and private key material are never included in errors or logs.
+
+The existing `ca` and `name` fields retain their v0.19 behavior. An upstream
+`tls` object may contain any combination of `ca`, `name`, and the paired
+`cert`/`key`, but it must not be empty. Values are strings, are not trimmed,
+and do not support environment expansion. Unknown fields, aliases, nulls,
+non-string values, duplicate keys, and duplicate object members remain errors.
+
+Client certificates are valid only for HTTPS connections. A direct site or
+route `tls` object with `cert` or `key` whose effective target is HTTP is
+invalid. A named backend may use the client certificate for its HTTPS targets;
+HTTP targets in the same backend remain unchanged. Existing direct-vs-backend
+TLS placement and inheritance rules remain unchanged.
+
+
+3. Upstream TLS behavior
+
+For every HTTPS upstream connection using the effective client certificate,
+Kubio presents the configured certificate chain during the TLS handshake and
+continues to verify the upstream using the effective `ca`, `name`, and default
+Go TLS behavior. The target URL, Host forwarding, request headers, HTTP/2,
+ALPN, timeout, health probe, retry, and response behavior remain unchanged.
+
+Certificate selection is performed by the standard Go TLS client. Kubio does
+not renegotiate certificates per request, expose certificate details to
+clients, or use the client certificate for authorization or routing.
+
+
+4. Reload and failure behavior
+
+Certificate and key files are read and validated while constructing a router
+generation. Startup failure terminates Kubio. A reload with unreadable,
+malformed, or mismatched files is logged and leaves the current generation,
+transports, and active probes unchanged. A valid reload atomically publishes
+the new client certificate without downtime; in-flight requests retain the
+old generation's TLS settings.
+
+Kubio watches `kubio.json`, not referenced certificate or key files. Changing
+a referenced file at an unchanged path does not trigger reload; the operator
+must modify or touch `kubio.json`. Each resulting generation rereads and
+validates the files.
+
+
+5. Performance and security constraints
+
+Certificate and key files are read only during generation construction. A
+generation reuses immutable parsed key material across all requests using
+the same effective transport. Transports may be shared only when their
+timeouts, trust pool, server name, client certificate, and HTTP/2/ALPN settings
+are identical. No request-path file read, certificate parse, global lock, or
+reload lock is added.
+
+
+6. Deferred scope
+
+The following remain unresolved and move to v0.25:
+
+- Custom bodies for Kubio-generated errors.
+- Metrics, configurable log sinks/formats, and health/admin/reload endpoints.
+- Forwarded and PROXY protocols.
+- Listener client authentication, inbound mutual TLS, TLS passthrough,
+  configurable TLS policy, ACME, multiple listener certificates, and listener
+  SNI certificate selection.
+- Rate limiting, authentication, compression, caching, service discovery,
+  response trailers, conditional response headers, request-header policies,
+  adaptive retry policies, and policies for Kubio-generated or intermediate
+  responses.

@@ -1,5 +1,5 @@
-Kubio kubio.json v0.23 Proposal
-Status: Under review
+Kubio kubio.json v0.23 Specification
+Status: Agreed specification
 Base: v0.22
 
 
@@ -27,36 +27,58 @@ A route may set `respond`:
       }
     }
 
-`respond.status` is required and is a terminal HTTP status from 200 through
-599. `respond.body` is an optional string and defaults to an empty body.
+`respond.status` is required and is a JSON base-10 integer token with no
+decimal point or exponent, from 200 through 599. All 1xx statuses are
+invalid. `respond.body` is an optional string and defaults to an empty body.
+After standard JSON string decoding, the body is sent as its UTF-8 bytes
+without environment expansion, content encoding, normalization, or charset
+transformation. Its decoded byte length must not exceed 64 MiB; larger bodies
+are configuration errors.
 `respond.headers` is an optional object mapping field names to non-empty
 arrays of string values. Header names are case-insensitive and duplicate names
 are invalid. Values use the existing response-header validation and
-environment expansion rules. Kubio-managed headers, including
-`Content-Length`, are rejected.
+environment expansion rules. The managed names rejected by the existing
+resolver are `Connection`, `Proxy-Connection`, `Keep-Alive`,
+`Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Content-Length`,
+`Proxy-Authenticate`, and `Proxy-Authorization`.
 
-A 3xx response with a `Location` header is a redirect. Kubio does not add a
+A 3xx response with a `Location` header is a redirect. More precisely, Kubio
+calls a response a redirect only when its status is 300 through 399 other
+than 304 and it contains at least one `Location` value. Kubio does not add a
 separate redirect option. `Location` is validated as an ordinary response
-header and may be relative or absolute.
+header, may be relative or absolute, and is emitted exactly as configured;
+Kubio never parses, normalizes, follows, or rewrites it. A 3xx response
+without `Location` remains an ordinary generated response.
 
 `respond` is valid only directly on a route. It cannot be combined with
-`target`, `backend`, `timeout`, `tls`, request `headers`, `response`, `strip`,
-or `rewrite`. A site must still define its existing target or backend for
-routes that do not generate a response. Routes may continue to use `methods`
-and `match` to select a generated response.
+`target`, `backend`, `timeout`, `tls`, request `headers`, `response`, or
+`rewrite`. It conflicts only with `strip:true`; explicit `strip:false` is
+allowed and ignored. The existing site rule requiring exactly one site-level
+`target` or `backend` remains unconditional. A responding route may omit
+route-level upstream fields; inherited target/backend, timeout, TLS, and
+request headers are ignored and no upstream is contacted. The site-level
+response policy is applied first, then `respond.headers`; `respond.headers`
+wins except for Kubio-managed fields. Routes may continue to use `methods` and
+`match` to select a generated response.
 
 Strict JSON parsing rejects nulls, non-objects, unknown fields, aliases,
 duplicate keys, missing status, invalid status, invalid body types, invalid
 header names or values, and empty header arrays. `respond` is not valid at
-site or backend level.
+site or backend level. The existing server-wide `OPTIONS *` handler runs
+before site and route selection and is never intercepted by `respond`.
 
 
 3. Response behavior
 
 Kubio evaluates the route normally, then emits the configured status, headers,
 and body instead of selecting or contacting an upstream. The request method,
-query, and path do not alter the configured body. A body is not emitted for
-204 or 304; configuring a non-empty body for either status is invalid.
+query, and path do not alter the configured body. A body is required to be
+empty for 204, 205, and 304; configuring a non-empty body for any of these
+statuses is invalid. For a HEAD request, Kubio emits no body regardless of
+the configured body and records zero response bytes. For other allowed
+statuses, Kubio applies headers, commits the configured status, and writes
+the exact body bytes once. If a managed implicit header is absent, the
+standard `net/http` behavior applies.
 
 Generated responses participate in the existing access log with their actual
 status and bytes. The v0.21 request ID, when enabled, is applied to generated
@@ -81,6 +103,10 @@ retain the existing proxy path.
 
 
 6. Deferred scope
+
+The existing site response-header policy behavior for `respond` routes is
+defined in this specification and is not deferred. Only new policy mechanisms
+for Kubio-generated or intermediate responses remain deferred.
 
 The following remain unresolved and move to v0.24:
 
