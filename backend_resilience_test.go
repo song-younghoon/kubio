@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -209,7 +210,7 @@ func TestBackendResilienceConfig(t *testing.T) {
 		"retry backoff jitter invalid":   withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s","jitter":"random"}}`),
 		"retry backoff duplicate field":  withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","cap":"1s"},"backoff":{"base":"2s","cap":"2s"}}`),
 		"retry backoff duplicate base":   withBackend(`"tries":2,"retry":{"status":[503],"backoff":{"base":"1s","base":"2s","cap":"2s"}}`),
-		"site timeout":                   `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"dial":"1s"}}]}`,
+		"site timeout empty":             `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{}}]}`,
 		"site retry":                     `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","retry":{"status":[503]}}]}`,
 	}
 	for name, data := range invalid {
@@ -272,6 +273,179 @@ func TestBackendResilienceDefaultsAndValidation(t *testing.T) {
 			t.Fatalf("invalid backend accepted: %+v", cfg)
 		}
 	}
+}
+
+func TestDirectTimeoutConfig(t *testing.T) {
+	valid := `{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"dial":"1s","body":"2s"},"routes":[{"path":"/api","timeout":{"header":"3s"}}]}]}`
+	cfg, err := decodeConfig([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sites[0].Timeout == nil || cfg.Sites[0].Timeout.Dial != time.Second || cfg.Sites[0].Timeout.Body != 2*time.Second ||
+		cfg.Sites[0].Routes[0].Timeout == nil || cfg.Sites[0].Routes[0].Timeout.Header != 3*time.Second {
+		t.Fatalf("decoded direct timeouts = %+v", cfg.Sites[0])
+	}
+
+	invalid := []string{
+		`{"listen":":8080","sites":[{"hosts":["*"],"backend":"app","timeout":{"dial":"1s"}}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"backend":"app","routes":[{"path":"/api","timeout":{"body":"1s"}}]}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":null}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{}}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"read":"1s"}}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"body":"0s"}}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"body":"24h1ns"}}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"body":"${KUBIO_TIMEOUT}"}}]}`,
+		`{"listen":":8080","sites":[{"hosts":["*"],"target":"http://app:3000","timeout":{"body":"1s","body":"2s"}}]}`,
+	}
+	for index, data := range invalid {
+		if _, err := decodeConfig([]byte(data)); err == nil {
+			t.Fatalf("invalid direct timeout %d was accepted", index)
+		}
+	}
+}
+
+type blockingReadBody struct {
+	closed  chan struct{}
+	started chan struct{}
+	once    sync.Once
+	closes  atomic.Int32
+}
+
+func (b *blockingReadBody) Read([]byte) (int, error) {
+	if b.started != nil {
+		close(b.started)
+	}
+	<-b.closed
+	return 0, errors.New("body closed")
+}
+
+func (b *blockingReadBody) Close() error {
+	b.once.Do(func() {
+		b.closes.Add(1)
+		close(b.closed)
+	})
+	return nil
+}
+
+func TestDirectBodyTimeoutClosesBlockedRead(t *testing.T) {
+	underlying := &blockingReadBody{closed: make(chan struct{})}
+	body := newDirectBody(underlying, context.Background(), 10*time.Millisecond)
+	result := make(chan error, 1)
+	go func() {
+		_, err := body.Read(make([]byte, 1))
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("body error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("body read did not stop at timeout")
+	}
+	if underlying.closes.Load() != 1 {
+		t.Fatalf("underlying closes = %d, want 1", underlying.closes.Load())
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("second close error = %v", err)
+	}
+	if underlying.closes.Load() != 1 {
+		t.Fatalf("underlying closes after second close = %d, want 1", underlying.closes.Load())
+	}
+
+	t.Run("client cancellation wins", func(t *testing.T) {
+		underlying := &blockingReadBody{closed: make(chan struct{})}
+		ctx, cancel := context.WithCancel(context.Background())
+		body := newDirectBody(underlying, ctx, time.Hour)
+		result := make(chan error, 1)
+		go func() {
+			_, err := body.Read(make([]byte, 1))
+			result <- err
+		}()
+		cancel()
+		select {
+		case err := <-result:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled body error = %v, want canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("canceled body read did not stop")
+		}
+		if underlying.closes.Load() != 1 {
+			t.Fatalf("canceled underlying closes = %d, want 1", underlying.closes.Load())
+		}
+	})
+
+	t.Run("normal close preserves read error", func(t *testing.T) {
+		underlying := &blockingReadBody{closed: make(chan struct{}), started: make(chan struct{})}
+		body := newDirectBody(underlying, context.Background(), time.Hour)
+		result := make(chan error, 1)
+		go func() {
+			_, err := body.Read(make([]byte, 1))
+			result <- err
+		}()
+		<-underlying.started
+		if err := body.Close(); err != nil {
+			t.Fatalf("close error = %v", err)
+		}
+		select {
+		case err := <-result:
+			if err == nil {
+				t.Fatal("concurrent read returned nil error")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("concurrent read did not stop")
+		}
+	})
+}
+
+func TestDirectHeaderAndBodyTimeouts(t *testing.T) {
+	t.Run("header", func(t *testing.T) {
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			<-release
+		}))
+		defer func() {
+			close(release)
+			server.Close()
+		}()
+		router, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: server.URL, Timeout: &directTimeout{Header: 20 * time.Millisecond}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer router.close()
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+		if response.Code != http.StatusGatewayTimeout {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusGatewayTimeout)
+		}
+	})
+
+	t.Run("body after commit", func(t *testing.T) {
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "part")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-release
+		}))
+		defer func() {
+			close(release)
+			server.Close()
+		}()
+		router, err := newRouter(config{Sites: []siteConfig{{Hosts: []string{"*"}, Target: server.URL, Timeout: &directTimeout{Body: 20 * time.Millisecond}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer router.close()
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy/", nil))
+		if response.Code != http.StatusOK || response.Body.String() != "part" {
+			t.Fatalf("response = %d %q, want 200 and part", response.Code, response.Body.String())
+		}
+	})
 }
 
 func TestBackendRetriesDistinctTargetsWithoutAdvancingSelector(t *testing.T) {

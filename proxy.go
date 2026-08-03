@@ -295,6 +295,118 @@ type deadlineBody struct {
 	once   sync.Once
 }
 
+type directBody struct {
+	mu      sync.Mutex
+	body    io.ReadCloser
+	ctx     context.Context
+	timer   *time.Timer
+	stopCtx func() bool
+	closed  bool
+	cause   error
+}
+
+func newDirectBody(body io.ReadCloser, ctx context.Context, timeout time.Duration) *directBody {
+	direct := &directBody{body: body, ctx: ctx}
+	direct.timer = time.AfterFunc(timeout, direct.expire)
+	direct.stopCtx = context.AfterFunc(ctx, func() {
+		_ = direct.Close()
+	})
+	return direct
+}
+
+func (b *directBody) expire() {
+	b.finalize(context.DeadlineExceeded)
+}
+
+func (b *directBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.closed {
+		cause := b.cause
+		b.mu.Unlock()
+		if cause != nil {
+			return 0, cause
+		}
+		return 0, http.ErrBodyReadAfterClose
+	}
+	body := b.body
+	ctx := b.ctx
+	b.mu.Unlock()
+
+	n, err := body.Read(p)
+	if err == nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return n, b.finalize(contextErr)
+		}
+		b.mu.Lock()
+		closed := b.closed
+		cause := b.cause
+		b.mu.Unlock()
+		if cause != nil {
+			return n, cause
+		}
+		if closed {
+			return n, http.ErrBodyReadAfterClose
+		}
+		return n, nil
+	}
+	return n, b.finalize(err)
+}
+
+func (b *directBody) Close() error {
+	b.finalize(nil)
+	return nil
+}
+
+func (b *directBody) err() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cause != nil {
+		return b.cause
+	}
+	if b.ctx != nil {
+		return b.ctx.Err()
+	}
+	return nil
+}
+
+func (b *directBody) finalize(defaultCause error) error {
+	b.mu.Lock()
+	if b.closed {
+		cause := b.cause
+		b.mu.Unlock()
+		if cause == nil {
+			return defaultCause
+		}
+		return cause
+	}
+	cause := defaultCause
+	if b.ctx != nil {
+		if contextErr := b.ctx.Err(); contextErr != nil {
+			cause = contextErr
+		}
+	}
+	b.closed = true
+	b.cause = cause
+	body := b.body
+	b.body = nil
+	timer := b.timer
+	b.timer = nil
+	stopCtx := b.stopCtx
+	b.stopCtx = nil
+	b.ctx = nil
+	b.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+	if stopCtx != nil {
+		stopCtx()
+	}
+	if body != nil {
+		_ = body.Close()
+	}
+	return cause
+}
+
 func (b *deadlineBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil {
@@ -977,6 +1089,7 @@ func upgradeRequest(request *http.Request) bool {
 
 func newProxy(
 	raw string,
+	timeout *directTimeout,
 	headers map[string]string,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
@@ -988,7 +1101,27 @@ func newProxy(
 
 	return newReverseProxy(func(request *httputil.ProxyRequest) {
 		rewriteProxyRequest(request, target, headers, trustProxies)
-	}, proxyTransport, siteResponseHeaders, routeResponseHeaders, 0), nil
+	}, newDirectTransport(timeout), siteResponseHeaders, routeResponseHeaders, 0, timeoutBody(timeout)), nil
+}
+
+func newDirectTransport(timeout *directTimeout) *http.Transport {
+	dial, header := proxyDialTimeout, proxyResponseHeaderTimeout
+	if timeout != nil {
+		if timeout.Dial > 0 {
+			dial = timeout.Dial
+		}
+		if timeout.Header > 0 {
+			header = timeout.Header
+		}
+	}
+	return newProxyTransport(dial, header)
+}
+
+func timeoutBody(timeout *directTimeout) time.Duration {
+	if timeout == nil {
+		return 0
+	}
+	return timeout.Body
 }
 
 func newBackendProxy(
@@ -1018,7 +1151,7 @@ func newBackendProxy(
 		}
 		transport = backend.transport
 	}
-	return newReverseProxy(rewrite, transport, siteResponseHeaders, routeResponseHeaders, backend.retryDeadline)
+	return newReverseProxy(rewrite, transport, siteResponseHeaders, routeResponseHeaders, backend.retryDeadline, 0)
 }
 
 func newReverseProxy(
@@ -1026,6 +1159,7 @@ func newReverseProxy(
 	transport http.RoundTripper,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	deadline time.Duration,
+	bodyTimeout time.Duration,
 ) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Rewrite:      rewrite,
@@ -1033,23 +1167,42 @@ func newReverseProxy(
 		BufferPool:   &proxyBuffers,
 		ErrorHandler: proxyErrorHandler,
 	}
-	if deadline > 0 {
+	if deadline > 0 || bodyTimeout > 0 || !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
 		proxy.ModifyResponse = func(response *http.Response) error {
-			body, _ := response.Body.(*deadlineBody)
-			if body != nil {
-				if err := body.ctx.Err(); err != nil {
+			var deadlineResponseBody *deadlineBody
+			if deadline > 0 {
+				deadlineResponseBody, _ = response.Body.(*deadlineBody)
+				if deadlineResponseBody != nil {
+					if err := deadlineResponseBody.ctx.Err(); err != nil {
+						return err
+					}
+				}
+			}
+			var directResponseBody *directBody
+			if bodyTimeout > 0 && response.StatusCode >= http.StatusOK && response.StatusCode != http.StatusSwitchingProtocols && response.Body != nil {
+				ctx := context.Background()
+				if response.Request != nil {
+					ctx = response.Request.Context()
+				}
+				directResponseBody = newDirectBody(response.Body, ctx, bodyTimeout)
+				response.Body = directResponseBody
+				if err := directResponseBody.err(); err != nil {
+					_ = directResponseBody.Close()
 					return err
 				}
 			}
 			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
-			if body != nil {
-				return body.ctx.Err()
+			if deadlineResponseBody != nil {
+				if err := deadlineResponseBody.ctx.Err(); err != nil {
+					return err
+				}
 			}
-			return nil
-		}
-	} else if !emptyResponseHeaderPolicy(siteResponseHeaders) || !emptyResponseHeaderPolicy(routeResponseHeaders) {
-		proxy.ModifyResponse = func(response *http.Response) error {
-			applyResponseHeaderPolicies(response, siteResponseHeaders, routeResponseHeaders)
+			if directResponseBody != nil {
+				if err := directResponseBody.err(); err != nil {
+					_ = directResponseBody.Close()
+					return err
+				}
+			}
 			return nil
 		}
 	}

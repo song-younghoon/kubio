@@ -22,6 +22,7 @@ const (
 	maxHealthCooldown             = 24 * time.Hour
 	maxHealthProbePathBytes       = 2_048
 	maxHealthProbeDuration        = 24 * time.Hour
+	maxDirectTimeout              = 24 * time.Hour
 )
 
 type config struct {
@@ -50,6 +51,12 @@ type backendConfig struct {
 type backendTimeout struct {
 	Dial   time.Duration
 	Header time.Duration
+}
+
+type directTimeout struct {
+	Dial   time.Duration
+	Header time.Duration
+	Body   time.Duration
 }
 
 type backendRetryConfig struct {
@@ -92,6 +99,7 @@ type siteConfig struct {
 	Hosts           []string             `json:"hosts"`
 	Target          string               `json:"target"`
 	Backend         string               `json:"backend"`
+	Timeout         *directTimeout       `json:"timeout"`
 	Headers         map[string]string    `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Routes          []routeConfig        `json:"routes"`
@@ -103,6 +111,7 @@ type routeConfig struct {
 	Match           *routeMatchConfig    `json:"match"`
 	Target          string               `json:"target"`
 	Backend         string               `json:"backend"`
+	Timeout         *directTimeout       `json:"timeout"`
 	Headers         map[string]string    `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Strip           bool                 `json:"strip"`
@@ -190,10 +199,18 @@ type rawBackendTimeout struct {
 	Header optionalDuration `json:"header"`
 }
 
+type rawDirectTimeout struct {
+	set    bool
+	Dial   optionalDuration `json:"dial"`
+	Header optionalDuration `json:"header"`
+	Body   optionalDuration `json:"body"`
+}
+
 type rawSiteConfig struct {
 	Hosts           *stringArray         `json:"hosts"`
 	Target          optionalString       `json:"target"`
 	Backend         optionalString       `json:"backend"`
+	Timeout         rawDirectTimeout     `json:"timeout"`
 	Headers         headerMap            `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Routes          rawRoutes            `json:"routes"`
@@ -205,6 +222,7 @@ type rawRouteConfig struct {
 	Match           rawRouteMatch        `json:"match"`
 	Target          optionalString       `json:"target"`
 	Backend         optionalString       `json:"backend"`
+	Timeout         rawDirectTimeout     `json:"timeout"`
 	Headers         headerMap            `json:"headers"`
 	ResponseHeaders responseHeaderPolicy `json:"response"`
 	Strip           strictBool           `json:"strip"`
@@ -330,6 +348,44 @@ func (t *rawBackendTimeout) UnmarshalJSON(data []byte) error {
 	}
 	*t = rawBackendTimeout{Dial: decoded.Dial, Header: decoded.Header}
 	return nil
+}
+
+func (t *rawDirectTimeout) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("must be an object")
+	}
+	var decoded struct {
+		Dial   optionalDuration `json:"dial"`
+		Header optionalDuration `json:"header"`
+		Body   optionalDuration `json:"body"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if !decoded.Dial.set && !decoded.Header.set && !decoded.Body.set {
+		return fmt.Errorf("must contain dial, header, or body")
+	}
+	for name, duration := range map[string]time.Duration{
+		"dial":   decoded.Dial.value,
+		"header": decoded.Header.value,
+		"body":   decoded.Body.value,
+	} {
+		if duration > maxDirectTimeout {
+			return fmt.Errorf("%s must be no greater than %s", name, maxDirectTimeout)
+		}
+	}
+	*t = rawDirectTimeout{set: true, Dial: decoded.Dial, Header: decoded.Header, Body: decoded.Body}
+	return nil
+}
+
+func decodeDirectTimeout(raw rawDirectTimeout) *directTimeout {
+	if !raw.set {
+		return nil
+	}
+	return &directTimeout{Dial: raw.Dial.value, Header: raw.Header.value, Body: raw.Body.value}
 }
 
 func (r *rawBackendRetry) UnmarshalJSON(data []byte) error {
@@ -874,9 +930,13 @@ func decodeConfig(data []byte) (config, error) {
 		if rawSite.Backend.set && rawSite.Backend.value == "" {
 			return config{}, fmt.Errorf("sites[%d].backend must not be empty", siteIndex)
 		}
+		if rawSite.Backend.set && rawSite.Timeout.set {
+			return config{}, fmt.Errorf("sites[%d].timeout is not allowed with backend", siteIndex)
+		}
 
 		site := siteConfig{
 			Hosts:           append([]string(nil), (*rawSite.Hosts)...),
+			Timeout:         decodeDirectTimeout(rawSite.Timeout),
 			Headers:         map[string]string(rawSite.Headers),
 			ResponseHeaders: rawSite.ResponseHeaders,
 			Routes:          make([]routeConfig, len(rawSite.Routes)),
@@ -904,9 +964,14 @@ func decodeConfig(data []byte) (config, error) {
 			if rawRoute.Backend.set && rawRoute.Backend.value == "" {
 				return config{}, fmt.Errorf("sites[%d].routes[%d].backend must not be empty", siteIndex, routeIndex)
 			}
+			usesBackend := rawRoute.Backend.set || (!rawRoute.Target.set && rawSite.Backend.set)
+			if rawRoute.Timeout.set && usesBackend {
+				return config{}, fmt.Errorf("sites[%d].routes[%d].timeout is not allowed with backend", siteIndex, routeIndex)
+			}
 			route := routeConfig{
 				Path:            *rawRoute.Path,
 				Methods:         append([]string(nil), rawRoute.Methods.values...),
+				Timeout:         decodeDirectTimeout(rawRoute.Timeout),
 				Headers:         map[string]string(rawRoute.Headers),
 				ResponseHeaders: rawRoute.ResponseHeaders,
 				Strip:           bool(rawRoute.Strip),
@@ -964,6 +1029,7 @@ const (
 	jsonHeaders
 	jsonResponseHeaders
 	jsonBackendTimeout
+	jsonDirectTimeout
 	jsonRouteMatch
 	jsonConditions
 	jsonTLS
@@ -1108,10 +1174,18 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 			return jsonAny, nil
 		}
 		return jsonAny, fmt.Errorf("unknown field %q", key)
+	case jsonDirectTimeout:
+		switch key {
+		case "dial", "header", "body":
+			return jsonAny, nil
+		}
+		return jsonAny, fmt.Errorf("unknown field %q", key)
 	case jsonSite:
 		switch key {
 		case "hosts", "target", "backend":
 			return jsonAny, nil
+		case "timeout":
+			return jsonDirectTimeout, nil
 		case "headers":
 			return jsonHeaders, nil
 		case "response":
@@ -1124,6 +1198,8 @@ func childJSONSchema(schema jsonSchema, key string) (jsonSchema, error) {
 		switch key {
 		case "path", "methods", "target", "backend", "strip":
 			return jsonAny, nil
+		case "timeout":
+			return jsonDirectTimeout, nil
 		case "match":
 			return jsonRouteMatch, nil
 		case "headers":

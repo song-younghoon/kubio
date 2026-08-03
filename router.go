@@ -10,28 +10,31 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 const routeIndexThreshold = 8
 
 type router struct {
-	accessLogger  *accessLogger
-	backends      map[string]*backend
-	generation    *backendGeneration
-	sites         []site
-	trustProxies  []netip.Prefix
-	exactHosts    map[string]int
-	wildcardHosts map[string]int
-	starSite      int
-	closeOnce     sync.Once
+	accessLogger     *accessLogger
+	backends         map[string]*backend
+	generation       *backendGeneration
+	directTransports []*http.Transport
+	sites            []site
+	trustProxies     []netip.Prefix
+	exactHosts       map[string]int
+	wildcardHosts    map[string]int
+	starSite         int
+	closeOnce        sync.Once
 }
 
 type site struct {
-	hosts          []hostPattern
-	proxy          *httputil.ReverseProxy
-	routes         []route
-	exactRoutes    map[string][]int
-	wildcardRoutes map[string][]int
+	hosts            []hostPattern
+	proxy            *httputil.ReverseProxy
+	routes           []route
+	directTransports []*http.Transport
+	exactRoutes      map[string][]int
+	wildcardRoutes   map[string][]int
 }
 
 type route struct {
@@ -105,21 +108,25 @@ func newRouter(cfg config) (*router, error) {
 	}
 
 	r := &router{
-		backends:      backends,
-		generation:    generation,
-		sites:         make([]site, 0, len(cfg.Sites)),
-		trustProxies:  trustProxies,
-		exactHosts:    make(map[string]int),
-		wildcardHosts: make(map[string]int),
-		starSite:      -1,
+		backends:         backends,
+		generation:       generation,
+		directTransports: make([]*http.Transport, 0),
+		sites:            make([]site, 0, len(cfg.Sites)),
+		trustProxies:     trustProxies,
+		exactHosts:       make(map[string]int),
+		wildcardHosts:    make(map[string]int),
+		starSite:         -1,
 	}
 	for siteIndex, siteConfig := range cfg.Sites {
 		s, err := newSite(siteConfig, backends, trustProxies)
 		if err != nil {
+			closeDirectTransports(s.directTransports)
+			closeDirectTransports(r.directTransports)
 			return nil, fmt.Errorf("sites[%d]: %w", siteIndex, err)
 		}
 
 		r.sites = append(r.sites, s)
+		r.directTransports = append(r.directTransports, s.directTransports...)
 		for _, host := range s.hosts {
 			switch {
 			case host.value == "*":
@@ -159,6 +166,7 @@ func (r *router) close() {
 		for _, backend := range r.backends {
 			backend.joinProbe()
 		}
+		closeDirectTransports(r.directTransports)
 	})
 }
 
@@ -182,6 +190,7 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 	proxy, err := newProxyForSelection(
 		cfg.Target,
 		cfg.Backend,
+		cfg.Timeout,
 		siteHeaders,
 		siteResponseHeaders,
 		responseHeaderPolicy{},
@@ -192,40 +201,46 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 		return site{}, err
 	}
 	s := site{
-		hosts:  hosts,
-		proxy:  proxy,
-		routes: make([]route, 0, len(cfg.Routes)),
+		hosts:            hosts,
+		proxy:            proxy,
+		routes:           make([]route, 0, len(cfg.Routes)),
+		directTransports: directTransportFromProxy(cfg.Target != "", proxy),
 	}
 	for routeIndex, routeConfig := range cfg.Routes {
 		pattern, err := newPathPattern(routeConfig.Path)
 		if err != nil {
-			return site{}, fmt.Errorf("routes[%d].path: %w", routeIndex, err)
+			return s, fmt.Errorf("routes[%d].path: %w", routeIndex, err)
 		}
 		if routeConfig.Methods != nil {
 			if err := validateMethods(routeConfig.Methods); err != nil {
-				return site{}, fmt.Errorf("routes[%d].methods: %w", routeIndex, err)
+				return s, fmt.Errorf("routes[%d].methods: %w", routeIndex, err)
 			}
 		}
 		match, err := resolveRouteMatch(routeConfig.Match)
 		if err != nil {
-			return site{}, fmt.Errorf("routes[%d].match: %w", routeIndex, err)
+			return s, fmt.Errorf("routes[%d].match: %w", routeIndex, err)
 		}
 		routeHeaders, err := resolveHeaders(routeConfig.Headers)
 		if err != nil {
-			return site{}, fmt.Errorf("routes[%d].headers: %w", routeIndex, err)
+			return s, fmt.Errorf("routes[%d].headers: %w", routeIndex, err)
 		}
 		routeResponseHeaders, err := resolveResponseHeaders(routeConfig.ResponseHeaders)
 		if err != nil {
-			return site{}, fmt.Errorf("routes[%d].response: %w", routeIndex, err)
+			return s, fmt.Errorf("routes[%d].response: %w", routeIndex, err)
 		}
 
 		target, backendName := cfg.Target, cfg.Backend
 		if routeConfig.Target != "" || routeConfig.Backend != "" {
 			target, backendName = routeConfig.Target, routeConfig.Backend
 		}
+		timeout := routeConfig.Timeout
+		if timeout == nil && routeConfig.Target == "" && routeConfig.Backend == "" && target != "" {
+			timeout = cfg.Timeout
+		}
 		routeProxy, err := newProxyForSelection(
 			target,
 			backendName,
+			timeout,
 			mergeHeaders(siteHeaders, routeHeaders),
 			siteResponseHeaders,
 			routeResponseHeaders,
@@ -233,7 +248,10 @@ func newSite(cfg siteConfig, backends map[string]*backend, trustProxies []netip.
 			backends,
 		)
 		if err != nil {
-			return site{}, fmt.Errorf("routes[%d]: %w", routeIndex, err)
+			return s, fmt.Errorf("routes[%d]: %w", routeIndex, err)
+		}
+		if target != "" {
+			s.directTransports = append(s.directTransports, directTransportFromProxy(true, routeProxy)...)
 		}
 		s.routes = append(s.routes, route{
 			pattern: pattern,
@@ -288,27 +306,67 @@ func newBackends(configs map[string]backendConfig) (map[string]*backend, error) 
 
 func newProxyForSelection(
 	target, backendName string,
+	timeout *directTimeout,
 	headers map[string]string,
 	siteResponseHeaders, routeResponseHeaders responseHeaderPolicy,
 	trustProxies []netip.Prefix,
 	backends map[string]*backend,
 ) (*httputil.ReverseProxy, error) {
+	if err := validateDirectTimeout(timeout); err != nil {
+		return nil, err
+	}
 	hasTarget, hasBackend := target != "", backendName != ""
 	if hasTarget == hasBackend {
 		return nil, fmt.Errorf("must set exactly one of target or backend")
 	}
 	if hasTarget {
-		proxy, err := newProxy(target, headers, siteResponseHeaders, routeResponseHeaders, trustProxies)
+		proxy, err := newProxy(target, timeout, headers, siteResponseHeaders, routeResponseHeaders, trustProxies)
 		if err != nil {
 			return nil, fmt.Errorf("target: %w", err)
 		}
 		return proxy, nil
+	}
+	if timeout != nil {
+		return nil, fmt.Errorf("timeout is not allowed with backend")
 	}
 	backend, ok := backends[backendName]
 	if !ok {
 		return nil, fmt.Errorf("backend %q is not defined", backendName)
 	}
 	return newBackendProxy(backend, headers, siteResponseHeaders, routeResponseHeaders, trustProxies), nil
+}
+
+func validateDirectTimeout(timeout *directTimeout) error {
+	if timeout == nil {
+		return nil
+	}
+	for name, duration := range map[string]time.Duration{
+		"dial":   timeout.Dial,
+		"header": timeout.Header,
+		"body":   timeout.Body,
+	} {
+		if duration < 0 || duration > maxDirectTimeout {
+			return fmt.Errorf("timeout.%s must not be negative and no greater than %s", name, maxDirectTimeout)
+		}
+	}
+	return nil
+}
+
+func directTransportFromProxy(direct bool, proxy *httputil.ReverseProxy) []*http.Transport {
+	if !direct {
+		return nil
+	}
+	transport, ok := proxy.Transport.(*http.Transport)
+	if !ok {
+		return nil
+	}
+	return []*http.Transport{transport}
+}
+
+func closeDirectTransports(transports []*http.Transport) {
+	for _, transport := range transports {
+		transport.CloseIdleConnections()
+	}
 }
 
 func parseTrustedProxies(raw []string) ([]netip.Prefix, error) {
