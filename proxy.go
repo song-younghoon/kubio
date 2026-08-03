@@ -58,6 +58,7 @@ type backend struct {
 	health        *backendHealth
 	transport     *http.Transport
 	nextIndex     atomic.Uint64
+	probeTargets  []string
 	probeCancel   context.CancelFunc
 	probeDone     chan struct{}
 	probeStop     sync.Once
@@ -186,7 +187,9 @@ func (b *backend) waitProbe() {
 
 func (b *backend) runProbeLoop(ctx context.Context) {
 	probe := b.health.probe
-	if !waitProbe(ctx, probe.Every) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	if !waitProbe(ctx, timer, probe.Every) {
 		return
 	}
 	for {
@@ -201,15 +204,23 @@ func (b *backend) runProbeLoop(ctx context.Context) {
 		if finished := time.Now(); finished.After(next) {
 			next = finished
 		}
-		if !waitProbe(ctx, time.Until(next)) {
+		if !waitProbe(ctx, timer, time.Until(next)) {
 			return
 		}
 	}
 }
 
-func waitProbe(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
+func waitProbe(ctx context.Context, timer *time.Timer, delay time.Duration) bool {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	timer.Reset(delay)
 	select {
 	case <-timer.C:
 		return true
@@ -219,19 +230,14 @@ func waitProbe(ctx context.Context, delay time.Duration) bool {
 }
 
 func (b *backend) probeTarget(generation context.Context, index int, probe *backendHealthProbeConfig) {
-	target := *b.targets[index]
-	target.Path = probe.Path.Path
-	target.RawPath = probe.Path.RawPath
-	target.RawQuery = probe.Path.RawQuery
-	target.ForceQuery = probe.Path.ForceQuery
 	probeContext, cancel := context.WithTimeout(generation, probe.Timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(probeContext, http.MethodGet, target.String(), nil)
+	request, err := http.NewRequestWithContext(probeContext, http.MethodGet, b.probeTargets[index], nil)
 	if err != nil {
 		b.health.observeProbe(index, generation, probeContext, false)
 		return
 	}
-	request.Host = target.Host
+	request.Host = b.targets[index].Host
 	response, err := b.transport.RoundTrip(request)
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()
@@ -513,7 +519,7 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		}
 		deadline = cfg.Retry.Deadline
 	}
-	return &backend{
+	backend := &backend{
 		targets:       targets,
 		schedule:      schedule,
 		tries:         tries,
@@ -526,7 +532,19 @@ func newBackend(cfg backendConfig) (*backend, error) {
 		budget:        budget,
 		health:        health,
 		transport:     newProxyTransport(dialTimeout, responseHeaderTimeout),
-	}, nil
+	}
+	if health != nil && health.probe != nil {
+		backend.probeTargets = make([]string, len(targets))
+		for index, target := range targets {
+			probeTarget := *target
+			probeTarget.Path = health.probe.Path.Path
+			probeTarget.RawPath = health.probe.Path.RawPath
+			probeTarget.RawQuery = health.probe.Path.RawQuery
+			probeTarget.ForceQuery = health.probe.Path.ForceQuery
+			backend.probeTargets[index] = probeTarget.String()
+		}
+	}
+	return backend, nil
 }
 
 func (b *backend) nextScheduledTargetIndex() int {
