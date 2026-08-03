@@ -306,6 +306,10 @@ type deadlineReadWriteBody struct {
 	once   sync.Once
 }
 
+type deadlineBodyState interface {
+	deadlineContext() context.Context
+}
+
 type directBody struct {
 	mu      sync.Mutex
 	body    io.ReadCloser
@@ -1270,9 +1274,9 @@ func newReverseProxy(
 }
 
 func modifyProxyResponse(response *http.Response, site, route responseHeaderPolicy, deadline, bodyTimeout time.Duration) error {
-	var deadlineResponseBody interface{ deadlineContext() context.Context }
+	var deadlineResponseBody deadlineBodyState
 	if deadline > 0 {
-		deadlineResponseBody, _ = response.Body.(interface{ deadlineContext() context.Context })
+		deadlineResponseBody, _ = response.Body.(deadlineBodyState)
 		if deadlineResponseBody != nil {
 			if err := deadlineResponseBody.deadlineContext().Err(); err != nil {
 				return err

@@ -35,14 +35,12 @@ func (w *requestIDWriter) Header() http.Header {
 	header := w.ResponseWriter.Header()
 	if w.committed {
 		if !w.hijacked || !w.upgradeHeaderPrepared {
-			removeRequestID(header)
-			removeRequestIDTrailer(header)
+			cleanRequestIDHeaders(header)
 			if w.hijacked {
 				w.upgradeHeaderPrepared = true
 			}
 		} else {
-			removeRequestID(header)
-			removeRequestIDTrailer(header)
+			cleanRequestIDHeaders(header)
 			header.Set(requestIDHeader, w.id)
 		}
 	}
@@ -51,8 +49,7 @@ func (w *requestIDWriter) Header() http.Header {
 
 func (w *requestIDWriter) enforce() {
 	header := w.ResponseWriter.Header()
-	removeRequestID(header)
-	removeRequestIDTrailer(header)
+	cleanRequestIDHeaders(header)
 	header.Set(requestIDHeader, w.id)
 }
 
@@ -145,6 +142,11 @@ func removeRequestID(header http.Header) {
 	}
 }
 
+func cleanRequestIDHeaders(header http.Header) {
+	removeRequestID(header)
+	removeRequestIDTrailer(header)
+}
+
 func removeRequestIDTrailer(header http.Header) {
 	for name, values := range header {
 		if !strings.EqualFold(name, "Trailer") {
@@ -186,8 +188,7 @@ func enableRequestIDProxy(proxy *httputil.ReverseProxy) {
 				return err
 			}
 		}
-		removeRequestID(response.Header)
-		removeRequestIDTrailer(response.Header)
+		cleanRequestIDHeaders(response.Header)
 		removeRequestID(response.Trailer)
 		if response.Request != nil {
 			if id := requestIDFromRequest(response.Request); id != "" {

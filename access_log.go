@@ -76,17 +76,7 @@ func (r *router) serveLogged(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		end := time.Now()
-		record := accessRecord{
-			Time:       end.UTC().Format(time.RFC3339Nano),
-			Method:     method,
-			Host:       host,
-			Path:       path,
-			Proto:      proto,
-			Peer:       peer,
-			Status:     observed.status,
-			Bytes:      observed.bytes,
-			DurationUs: end.Sub(start).Microseconds(),
-		}
+		record := newAccessRecord(method, host, path, proto, peer, observed, start, end)
 		if r.requestID {
 			r.accessLogger.write(accessRecordWithID{accessRecord: record, ID: requestIDFromRequest(req)})
 		} else {
@@ -109,17 +99,21 @@ func (r *router) serveRequestIDFailure(w http.ResponseWriter, req *http.Request)
 		path = "/"
 	}
 	_, peer := peerAddress(req.RemoteAddr)
-	r.accessLogger.write(accessRecord{
+	r.accessLogger.write(newAccessRecord(req.Method, req.Host, path, req.Proto, peer, observed, start, end))
+}
+
+func newAccessRecord(method, host, path, proto, peer string, observed *accessResponseWriter, start, end time.Time) accessRecord {
+	return accessRecord{
 		Time:       end.UTC().Format(time.RFC3339Nano),
-		Method:     req.Method,
-		Host:       req.Host,
+		Method:     method,
+		Host:       host,
 		Path:       path,
-		Proto:      req.Proto,
+		Proto:      proto,
 		Peer:       peer,
 		Status:     observed.status,
 		Bytes:      observed.bytes,
 		DurationUs: end.Sub(start).Microseconds(),
-	})
+	}
 }
 
 func (w *accessResponseWriter) WriteHeader(status int) {
