@@ -1,5 +1,5 @@
 Kubio kubio.json v0.20 Proposal
-Status: Under review
+Status: Agreed specification
 Base: v0.19
 
 
@@ -33,7 +33,9 @@ A route may add `match.ip`:
 IPv4 or IPv6 prefix, must not contain a zone, and is not trimmed or expanded
 from an environment variable. IPv4-mapped IPv6 addresses are normalized to
 IPv4 before matching. Prefixes are normalized to their network address for
-matching. Duplicate normalized prefixes are configuration errors.
+matching. Duplicate detection is scoped to each individual route's `match.ip`
+array. Equal normalized prefixes in different routes are allowed and are not
+compared.
 
 The `ip` key is valid only inside a route's `match` object. The value must not
 be null, empty, or contain non-string values. Unknown fields, aliases,
@@ -48,17 +50,27 @@ Kubio determines one effective client IP per request:
 
 - The immediate peer is the connection's validated remote IP. An unavailable
   or invalid peer makes the effective client IP unavailable.
-- If the immediate peer is not in the site's `trustProxies`, Kubio ignores
-  `X-Forwarded-For` and uses the immediate peer.
+- If the immediate peer is not in the generation's configured root-level
+  `trustProxies`, Kubio ignores `X-Forwarded-For` and uses the immediate
+  peer.
 - If the immediate peer is trusted, Kubio reads only `X-Forwarded-For`. It
   combines repeated field values in received order, splits comma-separated
-  entries, and removes optional surrounding HTTP whitespace from each entry.
+  entries, and removes only ASCII SP and HTAB from the surrounding edge of
+  each entry.
 - Every resulting entry must be an IP literal without a port or zone. If the
   header is absent, empty, or any entry is invalid, the effective client IP is
   unavailable.
 - Kubio scans the parsed forwarded addresses from right to left and selects
   the first address that is not in `trustProxies`. If all addresses are
   trusted, the effective client IP is unavailable.
+
+After parsing, Kubio unmapps IPv4-mapped IPv6 peer and forwarded addresses
+before trust-prefix lookup and route matching. Bytes other than ASCII SP and
+HTAB remain subject to IP-literal validation. After masking, an IPv4-mapped
+IPv6 prefix with length at least `/96` is unmapped and its prefix length is
+reduced by 96. A mapped prefix shorter than `/96` remains an IPv6 prefix and
+does not match IPv4 addresses. This prefix normalization applies to both
+`trustProxies` and route `match.ip` prefixes.
 
 Kubio does not use the `Forwarded` header or any other client-controlled
 header as a fallback. An untrusted peer cannot influence the effective client
@@ -74,10 +86,14 @@ IP makes the condition fail; it does not produce an error response.
 
 When a route has multiple match fields, all configured fields must pass. The
 values inside `match.ip` are alternatives (OR). A route without `match.ip` is
-unchanged. Client-IP matching is an eligibility condition only: the existing
-path specificity, host selection, method matching, and same-depth declaration
-order determine the winning eligible route. No forwarded header is added,
-removed, or rewritten by this feature.
+unchanged. Client-IP matching is an eligibility condition only. Among eligible
+routes, the existing priority order is applied: exact path, greater path
+depth, greater condition count, fewer alternatives, then later declaration
+order. `match.ip` contributes one condition and its normalized prefixes
+contribute its alternative count, alongside methods, headers, and queries. No
+forwarded header is added, removed, or rewritten by this feature. If no route
+is eligible, the selected site's default target or backend handles the request
+unchanged; an unavailable client IP never produces an error response.
 
 
 5. Reload and failure behavior
